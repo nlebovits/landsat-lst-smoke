@@ -129,6 +129,31 @@ def shard_bytes(shard_px: int, n_scenes: int) -> float:
 # --------------------------------------------------------------------------
 
 
+def rehearse_shard(shard: Shard, item_dicts, crs: str, resolution: float,
+                   read_threads: int = 4) -> dict:
+    """Same contract as process_shard, with synthetic pixels and no S3.
+
+    Exercises everything a real run does except the read: submit, the return
+    payload, gather, assembly into the output raster, part writing and merge.
+    Those are the paths that broke on billed instances, and all of them are
+    testable on a laptop for nothing.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(shard.row * 10007 + shard.col)
+    n = max(len(item_dicts), 1)
+    lst = rng.normal(45.0, 6.0, (shard.ny, shard.nx)).astype("float32")
+    dn = np.rint((lst - LST_OFFSET) / LST_SCALE)
+    dn[(dn < LST_MIN_DN) | (dn > LST_MAX_DN)] = LST_NODATA_DN
+    qa = np.full((12, shard.ny, shard.nx), min(n // 12, 255), dtype="uint8")
+    time.sleep(0.01)
+    return {
+        "row": shard.row, "col": shard.col, "y0": shard.y0, "x0": shard.x0,
+        "lst_p95": dn.astype("uint16"), "qa_count": qa,
+        "n_scenes": n, "load_s": 0.0, "reduce_s": 0.0,
+    }
+
+
 def process_shard(shard: Shard, item_dicts, crs: str, resolution: float,
                   read_threads: int = 4) -> dict:
     """Load, mask, reduce and encode one shard. Returns small arrays only.
@@ -240,6 +265,11 @@ def parse_args(argv=None):
         help="process only shards[A:B] of the plan. The plan is deterministic "
         "and anchored to whole degrees, so slice i on one machine and slice j "
         "on another cover the tile exactly once between them",
+    )
+    p.add_argument(
+        "--rehearse", type=int, default=0, metavar="N",
+        help="run the whole pipeline with N synthetic scenes and no S3 reads; "
+        "proves submit, gather, assembly, part writing and merge for free",
     )
     p.add_argument(
         "--merge",
@@ -409,30 +439,55 @@ def main(argv=None) -> int:
     os.environ.setdefault("FRISKY_TRACING_CAPACITY", "2000000")
 
     t_search = time.perf_counter()
-    items, item_bboxes = search_items(args, bbox)
+    if args.rehearse:
+        w, so, e, no = bbox
+        item_bboxes = [
+            (w + (e - w) * (i % 7) / 7 - 0.3, so + (no - so) * (i // 7 % 7) / 7 - 0.3,
+             w + (e - w) * (i % 7) / 7 + 0.6, so + (no - so) * (i // 7 % 7) / 7 + 0.6)
+            for i in range(args.rehearse)
+        ]
+        items = [{"id": f"fake-{i}"} for i in range(args.rehearse)]
+    else:
+        items, item_bboxes = search_items(args, bbox)
     t_search = time.perf_counter() - t_search
     print(f"scenes        {len(items)} in {t_search:.1f}s")
     if not items:
         print("no scenes matched")
         return 1
-    if args.source == "planetary-computer":
+    if args.source == "planetary-computer" and not args.rehearse:
         import planetary_computer
 
         for it in items:
             planetary_computer.sign_inplace(it)
-    item_dicts = [it.to_dict() for it in items]
+    item_dicts = items if args.rehearse else [it.to_dict() for it in items]
 
-    work = []
-    for sh in shards:
-        idx = items_for_shard(sh, item_bboxes)
-        if idx:
-            work.append((sh, [item_dicts[i] for i in idx]))
+    # Slice the PLAN, never the filtered list. Shards with no overlapping
+    # scenes drop out of `work`, so slicing after filtering shifts every index
+    # and machines silently leave gaps. The rehearsal caught exactly that:
+    # slice 972:1296 ran 288 shards, and the merge reported 1,440,000 px
+    # never written.
+    mine = shards
     if args.shard_slice:
         a, _, b = args.shard_slice.partition(":")
         lo = int(a) if a else 0
-        hi = int(b) if b else len(work)
-        work = work[lo:hi]
-        print(f"slice         shards[{lo}:{hi}] of {len(shards)} planned")
+        hi = int(b) if b else len(shards)
+        mine = shards[lo:hi]
+        print(f"slice         shards[{lo}:{hi}] -> {len(mine)} of "
+              f"{len(shards)} planned")
+
+    work = []
+    for sh in mine:
+        idx = items_for_shard(sh, item_bboxes)
+        if idx:
+            work.append((sh, [item_dicts[i] for i in idx]))
+    # Shards with no overlapping scene are still this slice's responsibility.
+    # Recording them as all-nodata keeps coverage complete, so the merge can
+    # tell "no Landsat here" (ocean, edge) from "a machine died", which it
+    # cannot do if they are simply absent.
+    barren = [sh for sh in mine if not items_for_shard(sh, item_bboxes)]
+    if barren:
+        print(f"              {len(barren)} shards have no scenes; "
+              f"written as nodata")
     if args.max_shards:
         work = work[: args.max_shards]
     counts = [len(d) for _, d in work]
@@ -463,8 +518,9 @@ def main(argv=None) -> int:
     qa_out = np.zeros((12, height, width), dtype="uint8")
 
     t0 = time.perf_counter()
+    fn = rehearse_shard if args.rehearse else process_shard
     futures = [
-        client.submit(process_shard, sh, d, args.crs, res, args.read_threads)
+        client.submit(fn, sh, d, args.crs, res, args.read_threads)
         for sh, d in work
     ]
     print(f"submitted     {len(futures)} shards in {time.perf_counter()-t0:.1f}s")
@@ -534,12 +590,9 @@ def main(argv=None) -> int:
     import numpy as _np
 
     payload = {}
-    for sh, _d in work:
+    for sh in mine:  # every planned shard in this slice, barren ones included
         tag = f"{sh.y0}_{sh.x0}"
-        a = lst_out[sh.y0:sh.y0 + sh.ny, sh.x0:sh.x0 + sh.nx]
-        if not a.any():
-            continue
-        payload["lst_" + tag] = a
+        payload["lst_" + tag] = lst_out[sh.y0:sh.y0 + sh.ny, sh.x0:sh.x0 + sh.nx]
         payload["qa_" + tag] = qa_out[:, sh.y0:sh.y0 + sh.ny, sh.x0:sh.x0 + sh.nx]
     if payload:
         _np.savez_compressed(args.out_dir / "part-000.npz", **payload)

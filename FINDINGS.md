@@ -611,3 +611,49 @@ item list removes most of the second.
 Note that `c6i` beats the `r6i` used for the measurements on both axes: the peak
 was 26.5 GiB of 96, so the memory-optimised instance was renting RAM the job
 never touched.
+
+## Rehearsal mode: everything except the read, for free
+
+The expensive lesson of this session is that almost every failure was findable
+on a laptop, and I kept finding them on billed instances instead: an argparse
+flag, a CRS/resolution pairing, a silently ignored chunk argument, wrong
+spatial dim names, a 6.3M-task graph, threads multiplying to 128 on 16 cores.
+
+`--rehearse N` runs the entire pipeline with N synthetic scenes and no S3 at
+all. It exercises shard planning, item filtering, cluster startup, submission,
+gather, assembly into the output raster, part writing and merge. The only thing
+it does not cover is read throughput, which is the one question that genuinely
+needs the cloud.
+
+```bash
+# a full tile across four machines, rehearsed in about 30 seconds
+for i in 0 1 2 3; do
+  uv run shard_lst_p95.py --bbox=-65,-35,-60,-30 --pixels-per-degree 3600 \
+    --shard-slice $((i*324)):$(((i+1)*324)) --rehearse 900 --out-dir part$i
+done
+uv run shard_lst_p95.py --merge part0 part1 part2 part3 --out-dir tile
+```
+
+### It immediately found two bugs that would have cost a four-instance run
+
+**`--shard-slice` sliced the filtered list, not the plan.** Shards with no
+overlapping scene are dropped before slicing, so indices shift and the last
+slice came up 36 shards short. Machines would have left gaps in a real tile,
+where ocean and edge shards legitimately have no scenes. The slice now applies
+to the plan, which is deterministic and anchored to whole degrees.
+
+**A barren shard was skipped rather than written.** That makes "no Landsat
+coverage here" indistinguishable from "a machine died", which defeats the whole
+point of the coverage check. Barren shards are now written as nodata, so a
+complete set of slices always reports 100% coverage and a genuinely missing
+slice is caught.
+
+Verified after both fixes: four slices of an 18,000 x 18,000 tile merge to
+**100.00% coverage, 1,296 of 1,296 shards**, and dropping one slice still
+reports `75,168,000 px never written`.
+
+### What rehearsal cannot tell you
+
+Read throughput, and therefore wall time and cost. Everything else — geometry,
+coverage, slicing, assembly, memory shape of the merge (peak 8.2 GB for a full
+tile), and the concurrency guard — is answerable before an instance exists.
