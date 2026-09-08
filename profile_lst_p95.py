@@ -786,7 +786,20 @@ def parse_args(argv=None):
         ),
     )
     p.add_argument("--crs", default="epsg:3857")
-    p.add_argument("--resolution", type=int, default=30)
+    p.add_argument(
+        "--resolution",
+        type=float,
+        default=30.0,
+        help="pixel size in CRS units: metres for a projected CRS, degrees for "
+        "a geographic one. Prefer --pixels-per-degree on a geographic grid",
+    )
+    p.add_argument(
+        "--pixels-per-degree",
+        type=int,
+        default=None,
+        help="geographic grids only. Sets resolution to 1/N, which keeps every "
+        "tile a whole number of pixels. The 5 degree grid uses 3600",
+    )
     p.add_argument("--max-scenes", type=int, default=None, help="cap for a smoke run")
     p.add_argument("--sample-interval", type=float, default=0.1)
     p.add_argument("--gdal-threads", default="1", help="GDAL_NUM_THREADS, or ALL_CPUS")
@@ -841,6 +854,29 @@ def main(argv=None) -> int:
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.pixels_per_degree:
+        args.resolution = 1.0 / args.pixels_per_degree
+
+    # A degree is not a metre. Passing --resolution 30 with a geographic CRS
+    # asks for 30-degree pixels; passing 1/3600 with a projected one asks for
+    # sub-millimetre pixels. Both build a graph and fail later, expensively.
+    from odc.geo import CRS as _CRS
+
+    _projected = _CRS(args.crs).projected
+    if _projected and args.resolution < 0.01:
+        msg = (
+            f"--crs {args.crs} is projected, so --resolution {args.resolution} "
+            f"means {args.resolution} metres. Did you mean --pixels-per-degree?"
+        )
+        raise SystemExit(msg)
+    if not _projected and args.resolution > 1.0:
+        msg = (
+            f"--crs {args.crs} is geographic, so --resolution {args.resolution} "
+            f"means {args.resolution} DEGREES. Use --pixels-per-degree 3600 "
+            f"for the 5 degree tile grid."
+        )
+        raise SystemExit(msg)
+
     concurrency = args.workers * args.threads_per_worker
     budget_gib = args.workers * args.memory_limit_gib
 
@@ -862,6 +898,10 @@ def main(argv=None) -> int:
     print(
         f"chunking      read {args.load_chunk or args.chunk}, "
         f"reduce {args.chunk}, time {args.time_chunk}"
+    )
+    print(
+        f"grid          {args.crs} @ {args.resolution:g}"
+        f"{' m' if _projected else ' deg'}"
     )
     print(f"out-dir       {out_dir.resolve()}")
     print("raster output disabled: the composite is computed and discarded\n")
