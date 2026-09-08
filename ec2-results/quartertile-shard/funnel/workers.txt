@@ -1,0 +1,18 @@
+                                                                      Workers from spans (tile/spans.json)                                                                       
+Worker                                                  Spans    Span time    Window    Top spans                                                                                
+unix:///tmp/frisky-sock-b7mten_f/worker-26799-0.sock      152        19.7m     19.7m    worker.exec.call 19.7m, worker.exec.deserialize 2.7s, worker.send_data_to_scheduler 852ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26793-0.sock      168        19.7m     19.7m    worker.exec.call 19.6m, worker.exec.deserialize 2.6s, worker.send_data_to_scheduler 927ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26802-0.sock      152        19.7m     19.6m    worker.exec.call 19.6m, worker.exec.deserialize 2.8s, worker.send_data_to_scheduler 764ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26800-0.sock      160        19.6m     19.6m    worker.exec.call 19.6m, worker.exec.deserialize 2.5s, worker.send_data_to_scheduler 924ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26788-0.sock      160        19.6m     19.6m    worker.exec.call 19.5m, worker.exec.deserialize 2.8s, worker.send_data_to_scheduler 762ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26801-0.sock      168        19.6m     19.6m    worker.exec.call 19.5m, worker.exec.deserialize 2.5s, worker.send_data_to_scheduler 911ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26796-0.sock      160        19.6m     19.6m    worker.exec.call 19.5m, worker.exec.deserialize 2.6s, worker.send_data_to_scheduler 647ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26798-0.sock      160        19.6m     19.5m    worker.exec.call 19.5m, worker.exec.deserialize 2.3s, worker.send_data_to_scheduler 695ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26787-0.sock      176        19.5m     19.5m    worker.exec.call 19.5m, worker.exec.deserialize 2.3s, worker.send_data_to_scheduler 636ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26797-0.sock      168        19.5m     19.5m    worker.exec.call 19.4m, worker.exec.deserialize 2.5s, worker.send_data_to_scheduler 690ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26794-0.sock      168        19.5m     19.4m    worker.exec.call 19.4m, worker.exec.deserialize 2.5s, worker.send_data_to_scheduler 708ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26789-0.sock      160        19.5m     19.4m    worker.exec.call 19.4m, worker.exec.deserialize 2.6s, worker.send_data_to_scheduler 748ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26792-0.sock      152        19.4m     19.4m    worker.exec.call 19.4m, worker.exec.deserialize 2.6s, worker.send_data_to_scheduler 659ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26790-0.sock      160        19.4m     19.4m    worker.exec.call 19.4m, worker.exec.deserialize 2.6s, worker.send_data_to_scheduler 843ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26791-0.sock      160        19.4m     19.4m    worker.exec.call 19.4m, worker.exec.deserialize 2.5s, worker.send_data_to_scheduler 635ms
+unix:///tmp/frisky-sock-b7mten_f/worker-26795-0.sock      168        19.4m     19.4m    worker.exec.call 19.3m, worker.exec.deserialize 2.3s, worker.send_data_to_scheduler 728ms

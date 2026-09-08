@@ -460,16 +460,77 @@ of `81 Mpx × 1765 scenes × 4 bytes` = **572 GB of float32** from time-major re
 blocks into space-major reduce blocks. That is a half-terabyte all-to-all
 shuffle, and no block size avoids it. 1.21 TiB spilled for a 58 GB input.
 
-### The fix is to shard, not to tune
+### The fix is to shard, not to tune, and it works
 
-A 512 x 512 shard holds `512² × 1765 × 4` = 1.85 GB for its complete time
-stack. That fits in one worker with no shuffle at all. A 9000 x 9000 quarter
-tile is 324 such shards, each independent, each a small graph.
+A 512 x 512 shard holds `512² × 1765 × 4` = 1.85 GB for its complete time stack.
+That fits in one worker with no shuffle at all. `shard_lst_p95.py` submits one
+shard as one task: load, mask, reduce, encode, return. No dask array spans a
+worker boundary, so there is nothing to rechunk and nothing to shuffle.
 
-The department composite works precisely because it *is* one shard: 8.5 Mpx is
-small enough that the rechunk stays local. Scaling it by widening the bbox
-scales the shuffle quadratically. The pipeline needs a different decomposition,
-not different parameters.
+**Measured, quarter tile of S30W065, `r6i.4xlarge`, 16 vCPU:**
+
+```
+raster      9000 x 9000 px      shards   324 of 512 px
+scenes      1765                search   18.2 s
+compute     1113.9 s (18.6 min)          3.44 s/shard wall
+client RSS  5.09 GiB peak
+LST p95     min -17.0 C  mean 44.6 C  max 75.9 C  (100.0% valid)
+qa_count    Jan 18.9 ... Jun 12.2  Jul 10.5 ... Dec 16.1
+```
+
+`qa_count` is the correctness check: all twelve months populated, summer above
+winter for a southern-hemisphere site.
+
+Frisky on the completed run, against the array attempt on the same problem:
+
+| | array graph | **sharded** |
+|---|---|---|
+| spilled | 1.21 TiB | **0 B** |
+| worker-to-worker transfer | 225.07 GiB | **0 B** |
+| task results pinned | 167,209 | 324, released as gathered |
+| memory peak | 57 GiB / 104 | **26.5 GiB / 96 (28%)** |
+| completed | never | **324 / 324** |
+
+### There is no inefficiency left on this instance
+
+```
+wall-clock 1187.2 s   workers 16   tasks 324
+compute    18,740.7 s      scheduler 18.5 s
+worker.exec.call 18,699.8 s      worker.exec.gil 2.1 ms
+```
+
+Slot utilisation is 15.8 of 16, or **99%**. The GIL costs 2.1 milliseconds.
+Scheduler overhead is 18.5 s of 1,187. `observe stragglers` reports every worker
+within 0 s of the median. Nothing spills, nothing transfers.
+
+**The only remaining lever is more cores**, and because the work is CPU-bound the
+cost per tile stays flat while wall time falls:
+
+| instance | vCPU | full tile wall | cost |
+|---|---|---|---|
+| `r6i.4xlarge` | 16 | ~74 min | ~$1.25 |
+| `r6i.8xlarge` | 32 | ~37 min | ~$1.26 |
+| `r6i.16xlarge` | 64 | ~19 min | ~$1.27 |
+
+A full tile is 1,296 shards, exactly 4x the quarter, because per-shard cost is
+bounded by revisit rate rather than tile size. Roughly 520 land tiles between
+60 N and 60 S puts a global five-year composite near **$650**, plus about $0.09
+per tile in requester-pays GET charges.
+
+### Two failures worth keeping
+
+**Concurrency knobs multiply.** `--workers 8 --threads-per-worker 4` gives 32
+shard slots, and `--read-threads 4` multiplies that to 128 OS threads on 16
+cores. Measured: 15 of 324 shards in 400 s, the first wave of 64 all crawling.
+Sizing slots to cores instead gave 15 shards in 105 s, 3.8x faster. The script
+now refuses to start above `cores * 6` threads.
+
+**`client.gather` on every future at once aborts the process.** With 324 futures
+and ~1 GB of results resident, frisky 0.7.2 raised a Rust panic across the PyO3
+boundary at 90% completion, which cannot unwind and so aborts rather than
+raising. 290 shards had completed with zero errors and all of it was lost.
+Collecting with `frisky.as_completed` and assembling one result at a time
+completed 324 of 324 with no panics.
 
 ### Orphaned workers contaminated two measurements
 

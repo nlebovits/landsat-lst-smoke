@@ -1,0 +1,35 @@
+### QUARTER TILE: 16 slots x 4 read threads = 64 on 16 cores ###
+start 19:33:51
+concurrency   16 shard slots x 4 read threads = 64 threads on 16 cores
+bbox          (-62.5, -35.0, -60.0, -32.5)
+grid          EPSG:4326 @ 1/3600 deg
+raster        9000 x 9000 px  (81 Mpx)
+shards        324  of 512x512 px (18 x 18)
+scenes        1765 in 18.2s
+shards        324 with data, scenes/shard min 177 p50 486 max 711
+worst shard   0.69 GiB, 11.1 GiB across 16 slots
+
+dashboard     http://127.0.0.1:43205
+submitted     324 shards in 70.9s
+    25/324    94.0s   3.76s/shard  client RSS 3.2 GiB
+    50/324   198.9s   3.98s/shard  client RSS 3.4 GiB
+    75/324   275.3s   3.67s/shard  client RSS 3.6 GiB
+   100/324   332.6s   3.33s/shard  client RSS 3.7 GiB
+   125/324   408.1s   3.26s/shard  client RSS 3.8 GiB
+   150/324   532.7s   3.55s/shard  client RSS 4.0 GiB
+   175/324   639.0s   3.65s/shard  client RSS 4.2 GiB
+   200/324   750.6s   3.75s/shard  client RSS 4.4 GiB
+   225/324   852.3s   3.79s/shard  client RSS 4.6 GiB
+   250/324   926.4s   3.71s/shard  client RSS 4.7 GiB
+   275/324   992.9s   3.61s/shard  client RSS 4.9 GiB
+   300/324  1064.2s   3.55s/shard  client RSS 5.0 GiB
+   324/324  1113.9s   3.44s/shard  client RSS 5.1 GiB
+
+LST p95       min -17.0 C  mean 44.6 C  max 75.9 C  (100.0% valid)
+compute       1113.9s for 324 shards (3.44s each)
+client RSS    5.09 GiB peak
+qa_count      Jan 18.9  Feb 14.3  Mar 15.5  Apr 12.6  May 14.9  Jun 12.2  Jul 10.5  Aug 14.9  Sep 15.3  Oct 14.5  Nov 14.2  Dec 16.1
+artifacts     /home/ubuntu/tile
+exit=0 tile
+end 19:53:59
+TILE DONE

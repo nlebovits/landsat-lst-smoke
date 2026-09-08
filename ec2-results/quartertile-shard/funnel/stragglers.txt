@@ -1,0 +1,8 @@
+                                Workers unlike their peers (top 5)                                 
+Worker                                                  Excess    Top deviations (vs median worker)
+unix:///tmp/frisky-sock-b7mten_f/worker-26801-0.sock        0s    worker.receive_task +0s (29σ)    
+unix:///tmp/frisky-sock-b7mten_f/worker-26802-0.sock        0s    worker.handle_event +0s (7σ)     
+unix:///tmp/frisky-sock-b7mten_f/worker-26795-0.sock        0s    worker.receive_task +0s (9σ)     
+unix:///tmp/frisky-sock-b7mten_f/worker-26799-0.sock        0s    worker.store_data +0s (5σ)       
+unix:///tmp/frisky-sock-b7mten_f/worker-26792-0.sock        0s    worker.task_complete +0s (5σ)    
+Each worker's top-3 most unusual span types; Excess = total extra seconds over the median worker across them. Drill into one with observe timeline tile/spans.json --worker unix:///tmp/frisky-sock-b7mten_f/worker-26801-0.sock.

@@ -1,0 +1,50 @@
+Overview  tile/spans.json
+
+  perf    wall-clock 1187.2s   workers 16   tasks 324   spans 32070
+  memory 26.53 GiB / 96.00 GiB (28% peak)   spilled 0 B   unspilled 0 B   network recv 0 B
+
+Components
+           │0s         200         400        600         800         1000   1187s│     Total
+           ├──────────────────────────────────────────────────────────────────────┤
+   compute │▇████████████████████████████████████████████████████████████████████▃│ 18740.7 s
+ scheduler │▁▁▁▁▁▁▁ ▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│    18.5 s
+     other │▁▁▁▁▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│ 21361.3 s
+           └──────────────────────────────────────────────────────────────────────┘
+→ zoom / full view: observe timeline tile/spans.json --view component
+
+Costliest span types — over time
+                              │0s         200         400        600         800         1000   1186s│     Total
+                              ├──────────────────────────────────────────────────────────────────────┤
+worker.exec.call              │▇████████████████████████████████████████████████████████████████████▄│ 18699.8 s
+worker.exec.deserialize       │▁   ▁▁▁ ▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  │    40.9 s
+worker.send_data_to_scheduler │    ▁▁▁ ▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│    12.1 s
+worker.handle_event           │    ▁▁▁ ▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│    5.6 ms
+worker.receive_task           │▁   ▁▁▁ ▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁    │    3.2 ms
+worker.exec.gil               │▁   ▁▁▁ ▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  │    2.1 ms
+worker.store_data             │    ▁▁▁ ▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│    1.5 ms
+worker.task_complete          │    ▁▁▁ ▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│  697.3 µs
+                              └──────────────────────────────────────────────────────────────────────┘
+Memory                        │▁▂▂▃▃▂▂▂▃▂▂▂▃▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▃▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▃▃▂▂▂▃▂▂▂▃▂▂▂▂▂▂▂▂▂▂▂▂▂▂│     26% peak
+
+                     Costliest span types                      
+Name                                Total    Per-wkr    Max wkr
+worker.exec.call                 18699.8s    1168.7s    1179.5s
+worker.exec.deserialize             40.9s       2.6s       2.8s
+worker.send_data_to_scheduler       12.1s       0.8s       0.9s
+worker.handle_event                  0.0s       0.0s       0.0s
+worker.receive_task                  0.0s       0.0s       0.0s
+worker.exec.gil                      0.0s       0.0s       0.0s
+worker.store_data                    0.0s       0.0s       0.0s
+worker.task_complete                 0.0s       0.0s       0.0s
+Per-wkr = mean over the workers that ran it; Max wkr = the busiest single worker. Max wkr ≫ Per-wkr means a few workers carry the work (imbalance).
+→ one op over time: observe timeline tile/spans.json --view detailed --prefix worker.exec.call   raw: observe spans tile/spans.json --name worker.exec.call
+
+                                    Workers unlike their peers                                     
+Worker                                                  Excess    Top deviations (vs median worker)
+unix:///tmp/frisky-sock-b7mten_f/worker-26801-0.sock        0s    worker.receive_task +0s (29σ)    
+unix:///tmp/frisky-sock-b7mten_f/worker-26802-0.sock        0s    worker.handle_event +0s (7σ)     
+unix:///tmp/frisky-sock-b7mten_f/worker-26795-0.sock        0s    worker.receive_task +0s (9σ)     
+unix:///tmp/frisky-sock-b7mten_f/worker-26799-0.sock        0s    worker.store_data +0s (5σ)       
+unix:///tmp/frisky-sock-b7mten_f/worker-26792-0.sock        0s    worker.task_complete +0s (5σ)    
+Each worker's top-3 most unusual span types vs the median worker; Excess = total extra seconds across them.
+→ rank all: observe stragglers tile/spans.json   one worker: observe timeline tile/spans.json --worker unix:///tmp/frisky-sock-b7mten_f/worker-26801-0.sock
