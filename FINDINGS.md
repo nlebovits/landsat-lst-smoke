@@ -415,6 +415,71 @@ ps -eo pid,rss,args --sort=-rss \
   | xargs -r kill -9
 ```
 
+### The quarter tile does not run, and the reason is architectural
+
+Two configurations were run against the real grid on a 128 GiB box. Neither
+completed. `frisky observe` gave the reason, from the live dashboard.
+
+**Attempt 1**, `load 2048 / chunk 1024 / time_chunk 50`, chosen to minimise
+task count at 260k:
+
+```
+state    waiting 136,056   processing 1,581   memory 21,423   queued 3,695
+Worker I/O   produced 1.85 TiB   spilled 14,313 objects (360.12 GiB)
+blocked  ('lwir11-...', 29, 2, 0)  waiting on 50  blocker ('open-lwir11-...', 34) Queued
+```
+
+Every read task waited on 50 dependencies, one per scene in the time chunk, and
+each block was 839 MB. **Minimising task count was the wrong objective.** Frisky
+schedules 250,000-400,000 tasks/s, so even 1.4M tasks is about 5 seconds of
+scheduling. Working set is the constraint, and `time_chunk 50` multiplied it.
+
+**Attempt 2**, `load 1024 / chunk 512 / time_chunk 10`, the shape validated at
+711 scenes. It read at 69 MB/s with a 3.0 GiB peak, against 0 MB/s and 100.8 GiB
+for attempt 1. It still stalled:
+
+```
+state    waiting 503,696   processing 17,121   memory 167,209
+memory   57.07 GiB / 104.00 GiB
+spilled  1.21 TiB   unspilled 373.95 GiB   network recv 225.07 GiB
+```
+
+`frisky observe transfers` isolates the cause:
+
+```
+Transfers  96,229 messages, 112,461 keys
+  bytes    241.70 GiB logical -> 162.59 GiB wire
+  costs    queue 26.8m, cpu 31.6m, wire 11.8m
+
+Prefix           Msgs     Logical      Wire      Queue      CPU
+rechunk-merge  19,893  182.62 GiB  120.77 GiB   12.3m    23.8m
+```
+
+**`rechunk-merge` is 76% of all shuffled bytes.** The p95 forces a reorganisation
+of `81 Mpx × 1765 scenes × 4 bytes` = **572 GB of float32** from time-major read
+blocks into space-major reduce blocks. That is a half-terabyte all-to-all
+shuffle, and no block size avoids it. 1.21 TiB spilled for a 58 GB input.
+
+### The fix is to shard, not to tune
+
+A 512 x 512 shard holds `512² × 1765 × 4` = 1.85 GB for its complete time
+stack. That fits in one worker with no shuffle at all. A 9000 x 9000 quarter
+tile is 324 such shards, each independent, each a small graph.
+
+The department composite works precisely because it *is* one shard: 8.5 Mpx is
+small enough that the rechunk stays local. Scaling it by widening the bbox
+scales the shuffle quadratically. The pipeline needs a different decomposition,
+not different parameters.
+
+### Orphaned workers contaminated two measurements
+
+Frisky workers spawn with a bare `-c` command line, so `pkill` by script name
+misses them, and an RSS threshold misses the small ones. Orphans survived into
+a later run twice. The second time, 26.6 GB of dead cluster made a healthy run
+look like it was failing, and I read the wrong dashboard port before noticing
+two schedulers were listening. Kill by process age relative to the current run,
+and confirm against `ss -tlnp` that only one dashboard is up.
+
 ### A third error, found the same way
 
 The quarter-tile runs used `--crs epsg:3857 --resolution 30`, carried over from
@@ -432,7 +497,7 @@ about two minutes and costs nothing.
 
 ## Cost
 
-Four EC2 sessions, eight completed full-scale runs plus the quarter-tile attempts, about **$3.35** total.
+Five EC2 sessions, eight completed department-scale runs, one completed 200-scene quarter-tile smoke run, and two quarter-tile attempts that did not complete. About **$4.45** total.
 
 ## Files
 

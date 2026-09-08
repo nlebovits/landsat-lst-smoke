@@ -1,0 +1,65 @@
+Transfers  96,229 messages, 112,461 keys (1.2 keys/msg)
+  bytes      241.70 GiB logical -> 162.59 GiB wire (1.49x)
+  costs      queue 26.8m, cpu 31.6m, wire 11.8m (7ms/msg)
+             queue waits before transfer work can proceed; CPU is serialize/compress/decompress/deserialize; wire is socket read/write time.
+  bandwidth  349.45 MiB/s per stream
+  network   internal 162.59 GiB wire all-time
+             internal = worker-to-worker transfer wire bytes; external incoming/outgoing are not retained for this range.
+                                                             Per-prefix transfer costs                                                              
+Prefix                     Source             Msgs    Keys/msg       Logical          Wire     Factor    Queue      CPU    Wire time       BW/stream
+rechunk-merge              transpose        19,893         1.1    182.62 GiB    120.77 GiB      1.51x    12.3m    23.8m         8.3m    373.67 MiB/s
+getitem-sum                shuffle-split    66,035         1.2     28.72 GiB     19.14 GiB      1.50x    11.3m     4.5m         2.3m    211.95 MiB/s
+shuffle-split              invert            5,260         1.1     12.69 GiB      9.68 GiB      1.31x     1.1m     1.2m        27.8s    467.87 MiB/s
+transpose                  rechunk-merge       685         1.2      6.84 GiB      6.11 GiB      1.12x    57.6s    41.2s        18.3s    383.28 MiB/s
+sum-partial                sum               2,030         1.0      3.96 GiB      2.06 GiB      1.92x    22.6s    29.1s         8.3s    489.91 MiB/s
+rechunk-split              rechunk-merge        66         1.0      3.84 GiB      2.69 GiB      1.43x     6.3s    23.0s         6.3s    620.96 MiB/s
+invert                     rechunk-merge       208         1.1      2.02 GiB      1.63 GiB      1.24x    18.4s    15.5s         4.8s    433.60 MiB/s
+getitem-sum-sum-partial    shuffle-split     1,898         1.1    709.84 MiB    443.30 MiB      1.60x    19.2s     6.7s         3.2s    219.58 MiB/s
+sum                        getitem-sum          79         1.0    147.22 MiB     83.48 MiB      1.76x    921ms     1.2s        311ms    473.16 MiB/s
+qa_pixel                   open                 42         2.1     83.08 KiB     83.08 KiB      1.00x     67ms    143ms         53ms      1.54 MiB/s
+lwir11                     open                 24         2.1     46.03 KiB     46.03 KiB      1.00x     76ms     82ms         33ms      1.37 MiB/s
+where                      lwir11                9         1.0    180.00 MiB    749.94 KiB    245.78x    909ms     6.5s         27ms      6.40 GiB/s
+  network   all-time incoming 61.00 GiB, inter-worker 0 B, outgoing 2.31 GiB
+  network   now incoming 273.40 MiB/s, inter-worker 0 B/s, outgoing 273.40 MiB/s
+             now = live worker NIC rates; inter-worker is total worker NIC minus external incoming/outgoing.
+
+Transfer sizes  96,314 span messages, 112,541 keys (1.2 keys/msg) (retained recv-span sample, limit 200,000)
+  messages  p50 512.04 KiB, p90 10.00 MiB; per-key p50 512.04 KiB, p90 10.00 MiB
+  bandwidth 349.51 MiB/s per stream (from recv spans)
+                             Transfer size distribution                             
+Size                      Msgs     Msg bytes      Keys     Key bytes       BW/stream
+0 B-4.00 KiB               221    142.22 KiB       335    158.59 KiB    366.37 KiB/s
+4.00 KiB-16.00 KiB           3     16.37 KiB         0           0 B     24.78 MiB/s
+64.00 KiB-256.00 KiB     2,811    404.38 MiB     5,533    920.57 MiB     96.03 MiB/s
+256.00 KiB-1.00 MiB     62,317     25.74 GiB    76,881     28.56 GiB    208.58 MiB/s
+1.00 MiB-4.00 MiB       10,779     20.88 GiB     8,523     18.88 GiB    422.80 MiB/s
+4.00 MiB-16.00 MiB      19,242    173.88 GiB    21,215    189.60 GiB    382.10 MiB/s
+16.00 MiB-64.00 MiB        910     17.77 GiB        23    740.00 MiB    330.69 MiB/s
+64.00 MiB-256.00 MiB        31      3.09 GiB        31      3.09 GiB    550.30 MiB/s
+
+                                                                                                          Transfers in flight (16 of 16 groups, 9.50 MiB total) — largest first                                                                                                           
+Data key                                                           Size    Dests         Total    Age (oldest)    From                                                   To                                                     For task (example)                                        
+('invert-61caac17d1422edeb80e4b288e5189ae', 16, 14, 2)         2.50 MiB        1      2.50 MiB            44ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4323-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    ('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 3469)  
+('invert-61caac17d1422edeb80e4b288e5189ae', 31, 4, 2)          2.50 MiB        1      2.50 MiB            40ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4324-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4327-0.sock    ('shuffle-split-4f0d7730718270d8cb0e289556006d58', 5704)  
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 7359)     512.00 KiB        1    512.00 KiB            36ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4326-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 3, 14, 2)
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 21840)    512.00 KiB        1    512.00 KiB            50ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4328-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 12, 5, 1)
+('shuffle-split-4f0d7730718270d8cb0e289556006d58', 7900)     512.00 KiB        1    512.00 KiB            33ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4329-0.sock    ('getitem-sum-1cfe35524913a9c1122b5222769f4a40', 4, 4, 2) 
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 6278)     512.00 KiB        1    512.00 KiB            33ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4328-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4325-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 3, 4, 2) 
+('shuffle-split-4f0d7730718270d8cb0e289556006d58', 7901)     256.00 KiB        1    256.00 KiB            33ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4325-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4329-0.sock    ('getitem-sum-1cfe35524913a9c1122b5222769f4a40', 4, 4, 2) 
+('shuffle-split-4f0d7730718270d8cb0e289556006d58', 7896)     256.00 KiB        1    256.00 KiB            33ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4329-0.sock    ('getitem-sum-1cfe35524913a9c1122b5222769f4a40', 4, 4, 2) 
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 7361)     256.00 KiB        1    256.00 KiB            36ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4327-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 3, 14, 2)
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 4343)     256.00 KiB        1    256.00 KiB            16ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4328-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 2, 4, 3) 
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 6281)     256.00 KiB        1    256.00 KiB            33ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4325-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 3, 4, 2) 
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 6276)     256.00 KiB        1    256.00 KiB            33ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4327-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4325-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 3, 4, 2) 
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 7357)     256.00 KiB        1    256.00 KiB            36ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4327-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 3, 14, 2)
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 6277)     256.00 KiB        1    256.00 KiB            33ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4325-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 3, 4, 2) 
+('shuffle-split-4f0d7730718270d8cb0e289556006d58', 7898)     256.00 KiB        1    256.00 KiB            33ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4325-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4329-0.sock    ('getitem-sum-1cfe35524913a9c1122b5222769f4a40', 4, 4, 2) 
+('shuffle-split-6f28ee869379e508fcdeba38e00233d6', 4339)     256.00 KiB        1    256.00 KiB            16ms    unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    unix:///tmp/frisky-sock-yk5yewp8/worker-4328-0.sock    ('getitem-sum-aff8bef2c4322be14ea9b9adc7b355db', 2, 4, 3) 
+
+Next transfer checks:
+  - Zoom transfer accounting: use a bounded window when all-time totals hide a short burst.
+    frisky observe transfers --duration 30s --url 'http://127.0.0.1:38321'
+  - Timeline: see when transfer stages ran and whether queue, CPU, or wire dominates.
+    frisky observe timeline 'http://127.0.0.1:38321' --view detailed
+  - Task prefixes: compare transfer cost with compute, disk, and task state by prefix.
+    frisky observe prefixes 'http://127.0.0.1:38321'

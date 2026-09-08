@@ -1,0 +1,23 @@
+                                                                                                   Workers                                                                                                   
+Address                                                CPU %                  Memory               Managed     Transient        Unacct      LivePin     ArenaFree    Occup    Proc    Ready    Wait    In Mem
+unix:///tmp/frisky-sock-yk5yewp8/worker-4323-0.sock      130    7.37 GiB / 13.00 GiB      6.85 GiB (11143)      2.66 MiB    526.41 MiB     1.38 GiB    127.72 MiB    15.6s    1293        0       0     16799
+unix:///tmp/frisky-sock-yk5yewp8/worker-4328-0.sock      188    7.96 GiB / 13.00 GiB      7.39 GiB (13088)     10.60 MiB    577.56 MiB     1.41 GiB    143.98 MiB    14.2s    1049        0       2     21233
+unix:///tmp/frisky-sock-yk5yewp8/worker-4324-0.sock      145    8.22 GiB / 13.00 GiB      7.65 GiB (12885)     22.66 MiB    569.52 MiB     1.41 GiB    148.49 MiB    14.8s    1121        0       0     21463
+unix:///tmp/frisky-sock-yk5yewp8/worker-4325-0.sock      183    8.13 GiB / 13.00 GiB      7.59 GiB (13051)    977.78 KiB    554.20 MiB     1.39 GiB    123.79 MiB    13.9s     857        1       1     21567
+unix:///tmp/frisky-sock-yk5yewp8/worker-4326-0.sock      177    7.49 GiB / 13.00 GiB      6.95 GiB (12039)     23.48 MiB    528.26 MiB     1.39 GiB    132.65 MiB    14.2s     995        2       0     20131
+unix:///tmp/frisky-sock-yk5yewp8/worker-4327-0.sock      185    8.73 GiB / 13.00 GiB      8.09 GiB (14164)    126.00 KiB    659.09 MiB     1.40 GiB    229.49 MiB    14.5s     820        0       0     22718
+unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock      184    8.45 GiB / 13.00 GiB      7.80 GiB (12731)     10.66 MiB    654.78 MiB     1.40 GiB    244.91 MiB    14.5s     842        0       0     20796
+unix:///tmp/frisky-sock-yk5yewp8/worker-4329-0.sock      161    8.29 GiB / 13.00 GiB      7.65 GiB (12778)     10.15 MiB    642.63 MiB     1.41 GiB    214.06 MiB    14.6s     919        0       0     21149
+TOTAL                                                   1353               64.65 GiB    59.97 GiB (101879)     81.30 MiB      4.60 GiB    11.18 GiB      1.33 GiB     1.9m    7896        3       3    165856
+
+                                                    Worker I/O                                                     
+Address                                                  Produced      Received          Sent               Spilled
+unix:///tmp/frisky-sock-yk5yewp8/worker-4323-0.sock    264.59 GiB     21.29 GiB     36.30 GiB      5665 (38.44 GiB)
+unix:///tmp/frisky-sock-yk5yewp8/worker-4328-0.sock    312.80 GiB     30.30 GiB     29.41 GiB      8137 (54.58 GiB)
+unix:///tmp/frisky-sock-yk5yewp8/worker-4324-0.sock    318.65 GiB     32.90 GiB     28.98 GiB      8614 (57.58 GiB)
+unix:///tmp/frisky-sock-yk5yewp8/worker-4325-0.sock    316.15 GiB     31.78 GiB     29.08 GiB      8470 (55.93 GiB)
+unix:///tmp/frisky-sock-yk5yewp8/worker-4326-0.sock    311.24 GiB     29.89 GiB     28.95 GiB      8067 (55.44 GiB)
+unix:///tmp/frisky-sock-yk5yewp8/worker-4327-0.sock    317.99 GiB     32.70 GiB     29.83 GiB      8496 (56.28 GiB)
+unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock    313.85 GiB     31.71 GiB     30.20 GiB      8034 (54.66 GiB)
+unix:///tmp/frisky-sock-yk5yewp8/worker-4329-0.sock    316.18 GiB     31.22 GiB     29.05 GiB      8364 (56.02 GiB)
+TOTAL                                                    2.41 TiB    241.79 GiB    241.79 GiB    63847 (428.92 GiB)

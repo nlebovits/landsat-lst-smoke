@@ -1,0 +1,60 @@
+Overview  http://127.0.0.1:38321
+  frisky  0.7.2
+  state   workers 8 (0 idle)   waiting 443670   processing 10936   memory 164884   erred 0   queued 3486
+          → stuck? observe blocked --url 'http://127.0.0.1:38321'   backlog observe queued --url 'http://127.0.0.1:38321'
+
+  perf    wall-clock 8.3s   workers 8   tasks 2   spans 200000
+  memory 64.46 GiB / 104.00 GiB (62% peak)   spilled 1.24 TiB   unspilled 437.81 GiB   network recv 238.95 GiB
+          → per-worker memory observe workers --url 'http://127.0.0.1:38321'   prefix costs observe prefixes 'http://127.0.0.1:38321'   transfer overview observe transfers --url 'http://127.0.0.1:38321'
+
+Components
+           │0ms             2000             4000            6000           8000ms│     Total
+           ├──────────────────────────────────────────────────────────────────────┤
+   compute │▆▇▇▆▇▇▆▇▇█▇▆▆█▇▇▆▇█▇▇▆▆▇▇▆▆▆▇▇▆█▇▇▆▆▇▆▆▅▆▅▅▅▆▆▅▆▇▅▅▇▇▆▅▃▃▂▂▂▂▂▂▂▂▂▂▂▂ │    51.6 s
+   network │▆▇▇▇▇▇▆▇▇▇▇▅▆▇▆▇▇███▇▅▇█▆█▆▆▇▇▅█▆▄▆▆▇▆▆▅▆▄▄▆▇▇▅▆█▆▆▇▆▇▅▃▃▂▂▁▂▂▂▂▂▂▂▂▁ │    66.6 s
+      disk │▇██████████████████████████▇█▇▇▇▇▇▇▇▇▇▇▇▆▅▅▅▆▇▆▆▇▇▇▇▇▇▄▃▃▂▂▂▂▂▂▂▂▂▂▂▂ │    48.4 s
+ scheduler │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│  968.0 ms
+     other │▂▂▃▂▃▂▂▂▃▃▃▂▂▃▂▂▂▃▃▃▃▂▂▂▂▂▂▂▂▂▂▃▃▂▂▂▃▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▃▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂│    56.9 s
+           └──────────────────────────────────────────────────────────────────────┘
+→ zoom / full view: observe timeline 'http://127.0.0.1:38321' --view component
+
+Costliest span types — over time
+                           │0ms             2000             4000             6000          8000ms│     Total
+                           ├──────────────────────────────────────────────────────────────────────┤
+worker.exec.call           │▅▆▆▆▅▅▄▆▇█▇▄▄▇▇▆▅▅█▇▆▆▄▅▆▅▆▃▄▇▆▆▇▅▆▄▅▅▄▄▄▅▃▄▄▄▄▄▄▅▄▄▅▅▅▅▃▃▂▂▂▃▂▂▂▂▂▂▂▂│    36.9 s
+worker.unspill.decompress  │▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▃▄▄▄▄▄▃▃▃▃▃▃▃▃▃▄▃▄▄▄▄▄▂▂▂▁▁▂▂▁▁▁▁▁▁▁▁│    21.6 s
+worker.unspill.deserialize │▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▃▄▃▃▃▄▃▄▃▄▃▃▃▃▃▄▃▃▃▃▃▄▄▃▂▂▂▂▁▁▂▁▁▁▁▁▁▁▂│    20.2 s
+tcp.send.queue             │▂▃▄▄▂▂▂▂▃▄▂▁▃▃▃▂▃▃▃▄▃▂▂▅▂▃▃▂▂▃▃▄▂▃▂▃▃▂▂▃▂▂▁▂▂▃▄▂▃▄▂▃▃▂▃▂▁▃▂▂▁▂▂▂▁▂▂▁▂▁│    19.4 s
+tcp.send.write_queue       │▂▃▃▃▂▃▂▃▃▃▂▁▂▃▂▂▂▃▃▃▂▂▂▃▂▂▃▂▁▃▃▂▂▂▂▂▂▂▂▃▂▂▁▂▂▃▃▂▃▃▂▂▃▂▂▂▁▂▁▂▁▁▂▂▁▂▂▁▂▁│    12.2 s
+tcp.send.compress          │▂▂▃▂▂▂▂▂▂▂▂▁▂▂▂▁▂▂▃▂▂▂▂▃▂▂▂▂▂▃▂▂▂▂▂▂▂▂▂▂▂▂▁▂▂▂▂▂▂▃▂▂▂▂▂▂▁▁▁▁▁▁▂▂▁▂▂▁▂▁│     7.9 s
+worker.transfer.recv       │▂▂▃▂▂▂▂▂▂▂▂▂▂▃▂▂▂▂▃▂▂▂▂▄▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▁▂▂▃▃▂▂▂▂▂▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁│     7.9 s
+tcp.recv.decompress        │▂▂▃▂▂▂▂▂▂▂▂▂▂▃▂▂▂▂▂▃▂▂▂▃▂▂▂▂▂▃▂▂▃▂▂▂▂▂▁▂▂▂▁▁▂▂▂▂▂▃▂▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│     7.3 s
+                           └──────────────────────────────────────────────────────────────────────┘
+Memory                     │▁▁▁▁▁▁▁▁▁▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅│     61% peak
+Disk Write                 │▁▁▁▁▁▁▁▁▁▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇██████████▇▇▇▇▇▇▇███████████████████│     1.3 GB/s
+Disk Read                  │▁▁▁▁▁▁▁▁▁██████████████████████████▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇│     1.8 GB/s
+Network                    │▁▁▁▁▁▁▁▁▁▇▇▇▇▇▇▇▇███████████████████████████████████▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇│   920.1 MB/s
+
+                  Costliest span types                   
+Name                          Total    Per-wkr    Max wkr
+worker.exec.call              36.9s       4.6s       5.2s
+worker.unspill.decompress     21.6s       2.7s       3.2s
+worker.unspill.deserialize    20.2s       2.5s       2.8s
+tcp.send.queue                19.4s       2.4s       4.6s
+tcp.send.write_queue          12.2s       1.5s       3.4s
+tcp.send.compress              7.9s       1.0s       1.9s
+worker.transfer.recv           7.9s       1.0s       1.3s
+tcp.recv.decompress            7.3s       0.9s       1.3s
+Per-wkr = mean over the workers that ran it; Max wkr = the busiest single worker. Max wkr ≫ Per-wkr means a few workers carry the work (imbalance).
+→ one op over time: observe timeline 'http://127.0.0.1:38321' --view detailed --prefix worker.exec.call   raw: observe spans 'http://127.0.0.1:38321' --name worker.exec.call
+
+                                    Workers unlike their peers                                     
+Worker                                                 Excess    Top deviations (vs median worker) 
+unix:///tmp/frisky-sock-yk5yewp8/worker-4324-0.sock        2s    tcp.send.write_queue +2s (5σ)     
+unix:///tmp/frisky-sock-yk5yewp8/worker-4323-0.sock        1s    worker.unspill.decompress +1s (4σ)
+unix:///tmp/frisky-sock-yk5yewp8/worker-4326-0.sock        0s    tcp.recv.decompress +0s (6σ)      
+                                                                 worker.unspill.read +0s (5σ)      
+unix:///tmp/frisky-sock-yk5yewp8/worker-4322-0.sock        0s    worker.transfer.recv +0s (4σ)     
+                                                                 tcp.recv.read +0s (4σ)            
+Each worker's top-3 most unusual span types vs the median worker; Excess = total extra seconds across them.
+→ rank all: observe stragglers 'http://127.0.0.1:38321'   one worker: observe timeline 'http://127.0.0.1:38321' --worker unix:///tmp/frisky-sock-yk5yewp8/worker-4324-0.sock
