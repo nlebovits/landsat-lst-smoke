@@ -498,9 +498,17 @@ def build_graph(
     So load big and reduce small.
     """
     import numpy as np
+    from odc.geo import CRS
     from odc.stac import stac_load
 
     load_chunk = load_chunk or chunk
+
+    # odc names the spatial dims after the output CRS: x/y when projected,
+    # longitude/latitude when geographic. Getting this wrong is silent on the
+    # chunks argument (the keys are simply ignored, so the array loads
+    # unchunked) and loud on .chunk() (ValueError). Derive it, never assume.
+    ydim, xdim = ("y", "x") if CRS(crs).projected else ("latitude", "longitude")
+
     data = stac_load(
         items,
         bands=("lwir11", "qa_pixel"),
@@ -510,8 +518,12 @@ def build_graph(
         groupby="landsat:scene_id",
         # Spatial chunking is mandatory. Left unchunked, the rechunk that
         # quantile forces would put the whole time stack in one block.
-        chunks={"time": time_chunk, "x": load_chunk, "y": load_chunk},
+        chunks={"time": time_chunk, xdim: load_chunk, ydim: load_chunk},
     )
+    missing = {ydim, xdim} - set(data.dims)
+    if missing:
+        msg = f"expected spatial dims {ydim}/{xdim}, got {tuple(data.dims)}"
+        raise RuntimeError(msg)
 
     dn = data["lwir11"]
     qa = data["qa_pixel"]
@@ -530,7 +542,7 @@ def build_graph(
     # Split the read blocks down before the time rechunk. This is a pure
     # slice, no shuffle, so it costs nothing on the wire.
     if load_chunk != chunk:
-        lst_c = lst_c.chunk({"x": chunk, "y": chunk})
+        lst_c = lst_c.chunk({xdim: chunk, ydim: chunk})
 
     lst_p95 = lst_c.quantile(0.95, dim="time").astype("float32")
     # quantile leaves a scalar `quantile` coord behind; it would become a

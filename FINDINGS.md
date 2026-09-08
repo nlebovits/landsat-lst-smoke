@@ -335,41 +335,68 @@ south-exclusive north-inclusive convention. Pergamino falls entirely inside
 
 Scene counts are measured, not estimated.
 
-### The tuning does not transfer
+### RETRACTED: the memory model was wrong
 
-Rechunk memory is `chunk² × scenes × 4 × 2`, so it scales **linearly with scene
-count**. The configuration that won at 711 scenes cannot run a tile:
+An earlier version of this document claimed rechunk memory is
+`chunk² × scenes × 4 × 2`, that it scales linearly with scene count, and that
+reduce chunk 512 would need 327 GiB at 3,910 scenes. **All of that is wrong**,
+and a local dry run costing nothing showed why.
 
-| reduce chunk | at 711 | at 3,910 (x32 slots, corrected) |
-|---|---|---|
-| 256 | 0.35 GiB | 81.9 GiB |
-| **512** | 1.39 GiB | **327.5 GiB, infeasible** |
+**`--chunk` never controlled the reduce block.** Dask normalises every block to
+its `array.chunk-size` target, 128 MiB by default, during the rechunk that
+`quantile` forces:
 
-The optimum chunk moves with scene count. Nothing in the department-scale
-results generalises without recomputing this term.
+| scenes | chunk requested | block after `.chunk()` | block after `quantile` | size |
+|---|---|---|---|---|
+| 711 | 256 | 256 | **217** | 134 MB |
+| 711 | 512 | 512 | **217** | 134 MB |
+| 1,765 | 256 or 512 | — | **137** | 133 MB |
+| 3,910 | 256 or 512 | — | **92** | 132 MB |
 
-### Read blocks pin memory in proportion to scene count
+At 711 scenes, chunk 256 and chunk 512 produce an **identical** 217-pixel reduce
+block. The block auto-shrinks as scene count rises, holding per-block memory
+near constant. That is why measured peak RSS barely moved across chunk 128, 256
+and 512: 35.5, 30.7 and 28.4 GiB.
 
-A reduce block needs every time slice of the read column containing it, so the
-pinned working set is `load_chunk² × scenes × 4`. **`time_chunk` cancels out**:
-more chunks of smaller size sum to the same total.
+So reduce chunk 512 is **not** infeasible at tile scale, and the optimum does
+not move with scene count for the reason given. `--chunk` does still change the
+*intermediate* rechunk, and therefore task count, which is what the measured
+wall-time differences reflect. The numbers in the table below are real
+measurements. The causal story attached to them was invented.
 
-| load_chunk | at 711 scenes | at 1,765 scenes |
-|---|---|---|
-| 1024 | 3.0 GB | 7.4 GB |
-| 512 | 0.75 GB | 1.85 GB |
+### What actually stalled the quarter tile
 
-At 1,765 scenes with `load_chunk 1024`, eight workers each reached 11 GB, 96 GiB
-in total, **before a single byte of imagery was read**. Each read column feeds
-16 reduce blocks and none of them released. Lowering `time_chunk` did not help,
-as the arithmetic above predicts.
+The observed fact stands: at 1,765 scenes, eight workers each reached 11 GB,
+96 GiB in total, **before a single byte of imagery was read**. The explanation
+offered at the time, that read columns pin memory in proportion to scene count,
+was a guess made without instrumentation.
+
+A local dry run, no cluster and no reads, gives the real answer:
+
+```
+scenes 1765, load_chunk 512, EPSG:3857 @ 30 m
+  build_graph        72.68 s
+  raw tasks       6,278,518
+  dask.optimize     139.63 s
+  fused tasks     4,270,657
+```
+
+**212 seconds of single-threaded client work before anything is dispatched**,
+and 6.3 million tasks against an estimate of 115 thousand, a 50x miss. The
+estimate assumed `--chunk 256` set the reduce block; it did not, so the block
+came out at 137 px and the block count with it.
+
+This is why frisky could not help. Graph construction and `dask.optimize` run
+in the client, before any task reaches the scheduler, so there are no worker
+spans to read. The harness also pipes stdout through `grep`, which
+block-buffers, so no stage line printed until the run ended. Three EC2 runs were
+diagnosed by watching CPU percentage and RSS and guessing.
 
 ### Two harness defects this exposed
 
-**`graph_stats` does not scale.** It materialises the whole graph to count
-tasks, then `dask.optimize` walks it again. That costs a few seconds at 44k
-tasks. At quarter-tile scale, roughly 500k tasks, it held one core for over six
-minutes without finishing and no imagery was read in that time. `--no-graph-stats`
+**`graph_stats` does not scale.** It runs `dask.optimize` over the whole graph.
+That costs a few seconds at 44k tasks. At quarter-tile scale, 6.3M raw tasks, it
+measured 139.6 s on its own and no imagery was read in that time. `--no-graph-stats`
 now disables it, and it should be off above roughly 200k tasks. Because this
 stage sits between graph build and compute, **the quarter-tile stall cannot be
 attributed to the pipeline rather than to this instrumentation.** No successful
@@ -388,13 +415,20 @@ ps -eo pid,rss,args --sort=-rss \
   | xargs -r kill -9
 ```
 
-### What a tile run would need
+### A third error, found the same way
 
-Untested, and stated as arithmetic rather than measurement: reduce chunk 256,
-load chunk 512 or smaller, `--no-graph-stats`, and an instance in the 256 GiB
-class. Sharding the tile spatially and compositing the shards may be sounder
-than one graph over 324 Mpx, because both the memory term and the graph size
-grow with area while the useful parallelism does not.
+The quarter-tile runs used `--crs epsg:3857 --resolution 30`, carried over from
+the department work. The grid is **EPSG:4326 at 1/3600 degree**. Web Mercator
+inflates area by `1/cos(lat)`, so the raster came out 11160 x 9278 rather than
+9000 x 9000: 104 Mpx instead of 81, on the wrong projection. Any tile run must
+pass the grid CRS explicitly.
+
+### The lesson that cost the most
+
+Every one of these was reproducible locally, with no cluster, no reads and no
+money: the argparse failure, the 6.3M task graph, the 139.6 s optimize, the
+chunk override, and the wrong CRS. Build the graph on a laptop first. It takes
+about two minutes and costs nothing.
 
 ## Cost
 
