@@ -318,9 +318,87 @@ starts at compute rather than at search. Earth Search needs no signing, because
 - **This tunes one department at 711 scenes.** A different area or scene count
   will move the optimum, because the memory term scales with both.
 
+## Scaling to a full grid tile
+
+The grid is defined in the sibling `landsat-lst` repo: 5 degree tiles on an
+EPSG:4326 grid at 3600 px per degree, named `N40W075` / `S30W065`, with a
+south-exclusive north-inclusive convention. Pergamino falls entirely inside
+**S30W065**, lat (-35, -30], lon [-65, -60).
+
+| | department | quarter tile | full tile |
+|---|---|---|---|
+| raster | 2985 x 2845 | 9000 x 9000 | 18,000 x 18,000 |
+| pixels | 8.5 Mpx | 81 Mpx | 324 Mpx |
+| scenes | 711 | **1,765** | **3,910** |
+| WRS path/rows | 6 | 13 | 25 |
+| read volume | 6.1 GB | ~58 GB | ~233 GB |
+
+Scene counts are measured, not estimated.
+
+### The tuning does not transfer
+
+Rechunk memory is `chunk² × scenes × 4 × 2`, so it scales **linearly with scene
+count**. The configuration that won at 711 scenes cannot run a tile:
+
+| reduce chunk | at 711 | at 3,910 (x32 slots, corrected) |
+|---|---|---|
+| 256 | 0.35 GiB | 81.9 GiB |
+| **512** | 1.39 GiB | **327.5 GiB, infeasible** |
+
+The optimum chunk moves with scene count. Nothing in the department-scale
+results generalises without recomputing this term.
+
+### Read blocks pin memory in proportion to scene count
+
+A reduce block needs every time slice of the read column containing it, so the
+pinned working set is `load_chunk² × scenes × 4`. **`time_chunk` cancels out**:
+more chunks of smaller size sum to the same total.
+
+| load_chunk | at 711 scenes | at 1,765 scenes |
+|---|---|---|
+| 1024 | 3.0 GB | 7.4 GB |
+| 512 | 0.75 GB | 1.85 GB |
+
+At 1,765 scenes with `load_chunk 1024`, eight workers each reached 11 GB, 96 GiB
+in total, **before a single byte of imagery was read**. Each read column feeds
+16 reduce blocks and none of them released. Lowering `time_chunk` did not help,
+as the arithmetic above predicts.
+
+### Two harness defects this exposed
+
+**`graph_stats` does not scale.** It materialises the whole graph to count
+tasks, then `dask.optimize` walks it again. That costs a few seconds at 44k
+tasks. At quarter-tile scale, roughly 500k tasks, it held one core for over six
+minutes without finishing and no imagery was read in that time. `--no-graph-stats`
+now disables it, and it should be off above roughly 200k tasks. Because this
+stage sits between graph build and compute, **the quarter-tile stall cannot be
+attributed to the pipeline rather than to this instrumentation.** No successful
+quarter-tile run was obtained.
+
+**Frisky workers survive `pkill` by script name.** They spawn through
+multiprocessing, so their command line is a bare `-c`. Killing a run with
+`pkill -f profile_lst_p95` leaves the workers behind. Eight orphans held 88 GB
+across two restarts here and contaminated a memory reading, which produced a
+wrong conclusion until the process list was checked. Match on the venv path and
+kill by PID:
+
+```bash
+ps -eo pid,rss,args --sort=-rss \
+  | awk '$2 > 200000 && /environments-v2/ {print $1}' \
+  | xargs -r kill -9
+```
+
+### What a tile run would need
+
+Untested, and stated as arithmetic rather than measurement: reduce chunk 256,
+load chunk 512 or smaller, `--no-graph-stats`, and an instance in the 256 GiB
+class. Sharding the tile spatially and compositing the shards may be sounder
+than one graph over 324 Mpx, because both the memory term and the graph size
+grow with area while the useful parallelism does not.
+
 ## Cost
 
-Three EC2 sessions, eight full-scale runs, about **$1.55** total.
+Four EC2 sessions, eight completed full-scale runs plus the quarter-tile attempts, about **$3.35** total.
 
 ## Files
 

@@ -564,7 +564,14 @@ def encode_uint16(celsius):
 
 
 def graph_stats(*objs) -> dict:
-    """Task counts by key prefix, before and after fusion."""
+    """Task counts by key prefix, before and after fusion.
+
+    This is expensive and it does not scale. Counting materialises the whole
+    graph, and dask.optimize walks it again. At roughly 44k tasks that costs a
+    few seconds. At a quarter of a 5 degree tile, around 500k tasks, it held one
+    core for more than six minutes without finishing. Turn it off with
+    --no-graph-stats for anything larger than a small area.
+    """
     from collections import Counter
 
     def count(obj) -> Counter:
@@ -787,6 +794,13 @@ def parse_args(argv=None):
     )
     p.add_argument("--boundary-url", default=BOUNDARY_URL)
     p.add_argument(
+        "--bbox",
+        default=None,
+        help="west,south,east,north in EPSG:4326. Overrides the boundary file. "
+        "Use it to run a grid tile instead of the department, e.g. the 5 degree "
+        "tile S30W065 is -65,-35,-60,-30.",
+    )
+    p.add_argument(
         "--source", choices=sorted(SOURCES), default="planetary-computer",
         help="earth-search reads s3://usgs-landsat, which is requester pays",
     )
@@ -795,6 +809,12 @@ def parse_args(argv=None):
         "--compare-passes",
         action="store_true",
         help="also time the two-call variant, to price the extra pass",
+    )
+    p.add_argument(
+        "--no-graph-stats",
+        action="store_true",
+        help="skip task counting and dask.optimize. Both materialise the whole "
+        "graph and do not scale; required above roughly 200k tasks",
     )
     p.add_argument("--force", action="store_true", help="run even if predicted to overflow")
     return p.parse_args(argv)
@@ -878,9 +898,17 @@ def main(argv=None) -> int:
             }
 
         with stage("boundary", url=args.boundary_url) as rec:
-            bbox, path = fetch_boundary(out_dir, args.boundary_url)
+            if args.bbox:
+                bbox = tuple(float(v) for v in args.bbox.split(","))
+                if len(bbox) != 4:
+                    msg = "--bbox needs exactly four values: west,south,east,north"
+                    raise ValueError(msg)
+                rec["meta"]["source"] = "--bbox"
+            else:
+                bbox, path = fetch_boundary(out_dir, args.boundary_url)
+                rec["meta"]["source"] = str(path)
+                rec["meta"]["bytes"] = path.stat().st_size
             rec["meta"]["bbox"] = bbox
-            rec["meta"]["bytes"] = path.stat().st_size
         print(f"bbox          {bbox}")
         run["bbox"] = bbox
 
@@ -992,16 +1020,22 @@ def main(argv=None) -> int:
         print(f"raster        {lst_u16.shape[1]} x {lst_u16.shape[0]} px")
         run["shape"] = list(lst_u16.shape)
 
-        with stage("graph_optimize") as rec:
-            stats = graph_stats(lst_u16, qa_count)
-            rec["meta"].update(
-                {k: stats[k] for k in ("raw_tasks", "optimized_tasks", "fusion_ratio")}
-            )
+        with stage("graph_optimize", skipped=args.no_graph_stats) as rec:
+            if args.no_graph_stats:
+                stats = {"skipped": True}
+            else:
+                stats = graph_stats(lst_u16, qa_count)
+                rec["meta"].update(
+                    {k: stats[k] for k in ("raw_tasks", "optimized_tasks", "fusion_ratio")}
+                )
         (out_dir / "graph.json").write_text(json.dumps(stats, indent=2, default=str))
-        print(
-            f"tasks         {stats['raw_tasks']:,} raw, "
-            f"{stats['optimized_tasks']:,} fused\n"
-        )
+        if args.no_graph_stats:
+            print("tasks         not counted (--no-graph-stats)\n")
+        else:
+            print(
+                f"tasks         {stats['raw_tasks']:,} raw, "
+                f"{stats['optimized_tasks']:,} fused\n"
+            )
 
         print("computing (this is the stage you care about)...")
         with stage("compute", scenes=len(items), chunk=args.chunk) as rec:
