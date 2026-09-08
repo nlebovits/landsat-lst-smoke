@@ -1,0 +1,87 @@
+########## 1w x 32t, chunk 512 ##########
+host          ip-10-0-27-13  16 cores
+source        earth-search  https://earth-search.aws.element84.com/v1
+cluster       1 workers x 32 threads x 48.0 GiB = 48 GiB total
+chunking      read 1024, reduce 512, time 10
+out-dir       /home/ubuntu/topo-1w32t
+raster output disabled: the composite is computed and discarded
+
+bbox          (-60.942796, -34.17645991, -60.138771, -33.54020044)
+dashboard     http://127.0.0.1:36821
+scenes        711  {'landsat-9': 276, 'landsat-8': 435}
+predicted     1.39 GiB per task x 32 concurrent = 44.4 GiB data + 0.7 GiB worker baseline = 45.1 GiB (budget 48 GiB)
+
+raster        2985 x 2845 px
+tasks         64,001 raw, 44,157 fused
+
+computing (this is the stage you care about)...
+
+                                 Stage profile                                  
+┏━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━┓
+┃         ┃        ┃       ┃       ┃    RSS ┃     RSS ┃   tree ┃        ┃      ┃
+┃ stage   ┃ wall s ┃ cpu s ┃ cpu % ┃  start ┃   delta ┃   peak ┃ net MB ┃ MB/s ┃
+┡━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━┩
+│ imports │   2.94 │  4.27 │   145 │    24M │   +154M │   189M │      0 │  0.0 │
+│ bounda… │   0.26 │  0.12 │    45 │   178M │    +51M │   242M │      0 │  0.7 │
+│ cluste… │   0.52 │  0.02 │     3 │   229M │     +7M │   340M │      0 │  0.0 │
+│ stac_s… │   7.21 │  1.17 │    16 │   237M │    +58M │   410M │      1 │  0.1 │
+│ sign_a… │   0.00 │  0.00 │    88 │   295M │     +0M │      - │      - │    - │
+│ graph_… │   6.56 │  6.57 │   100 │   295M │    +43M │   442M │      0 │  0.0 │
+│ graph_… │   1.47 │  1.47 │   100 │   338M │    +42M │   502M │      0 │  0.0 │
+│ compute │ 189.98 │  8.28 │     4 │   380M │   +342M │ 31,71… │  6,113 │ 32.2 │
+│ stats   │   0.18 │  0.28 │   151 │   722M │    +68M │ 1,566M │      0 │  0.0 │
+│ report  │   4.19 │  4.07 │    97 │   790M │    +14M │ 1,722M │    104 │ 25.0 │
+│ TOTAL   │ 213.30 │       │       │        │         │        │        │      │
+└─────────┴────────┴───────┴───────┴────────┴─────────┴────────┴────────┴──────┘
+
+LST p95       min 32.3 C  mean 46.2 C  max 55.9 C  (100.0% valid)
+peak memory   30.98 GiB tree  (1.10 client + 30.38 workers)
+throughput    32.2 MB/s mean, 202.5 MB/s peak, 6,113 MB total, 8.6 MB/scene
+concurrency   14.6x effective of 32 slots (46% used), 0.27 s/scene
+spans         363,707
+artifacts     /home/ubuntu/topo-1w32t
+exit=0 for 1w x 32t
+########## 2w x 16t, chunk 512 ##########
+host          ip-10-0-27-13  16 cores
+source        earth-search  https://earth-search.aws.element84.com/v1
+cluster       2 workers x 16 threads x 24.0 GiB = 48 GiB total
+chunking      read 1024, reduce 512, time 10
+out-dir       /home/ubuntu/topo-2w16t
+raster output disabled: the composite is computed and discarded
+
+bbox          (-60.942796, -34.17645991, -60.138771, -33.54020044)
+dashboard     http://127.0.0.1:43863
+scenes        711  {'landsat-9': 276, 'landsat-8': 435}
+predicted     1.39 GiB per task x 32 concurrent = 44.4 GiB data + 1.4 GiB worker baseline = 45.8 GiB (budget 48 GiB)
+
+raster        2985 x 2845 px
+tasks         64,001 raw, 44,157 fused
+
+computing (this is the stage you care about)...
+
+                                 Stage profile                                  
+┏━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━┓
+┃         ┃        ┃       ┃       ┃    RSS ┃     RSS ┃   tree ┃        ┃      ┃
+┃ stage   ┃ wall s ┃ cpu s ┃ cpu % ┃  start ┃   delta ┃   peak ┃ net MB ┃ MB/s ┃
+┡━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━┩
+│ imports │   0.68 │  2.07 │   303 │    24M │   +145M │   178M │      0 │  0.0 │
+│ bounda… │   0.09 │  0.06 │    63 │   169M │    +54M │   206M │      0 │  0.0 │
+│ cluste… │   0.53 │  0.01 │     1 │   222M │     +4M │   434M │      0 │  0.0 │
+│ stac_s… │   7.30 │  1.12 │    15 │   227M │    +61M │   505M │      1 │  0.1 │
+│ sign_a… │   0.00 │  0.00 │    94 │   288M │     +0M │      - │      - │    - │
+│ graph_… │   6.73 │  6.74 │   100 │   288M │    +44M │   544M │      0 │  0.0 │
+│ graph_… │   1.50 │  1.50 │   100 │   332M │    +43M │   603M │      0 │  0.0 │
+│ compute │ 160.45 │  9.42 │     6 │   375M │   +328M │ 31,68… │  6,164 │ 38.4 │
+│ stats   │   0.20 │  0.31 │   156 │   703M │    +68M │ 1,817M │      0 │  0.0 │
+│ report  │   6.00 │  5.87 │    98 │   771M │    +27M │ 2,225M │    140 │ 23.6 │
+│ TOTAL   │ 183.48 │       │       │        │         │        │        │      │
+└─────────┴────────┴───────┴───────┴────────┴─────────┴────────┴────────┴──────┘
+
+LST p95       min 32.3 C  mean 46.2 C  max 55.9 C  (100.0% valid)
+peak memory   30.94 GiB tree  (1.24 client + 30.35 workers)
+throughput    38.4 MB/s mean, 284.3 MB/s peak, 6,164 MB total, 8.7 MB/scene
+concurrency   13.7x effective of 32 slots (43% used), 0.23 s/scene
+spans         462,671
+artifacts     /home/ubuntu/topo-2w16t
+exit=0 for 2w x 16t
+TOPO DONE

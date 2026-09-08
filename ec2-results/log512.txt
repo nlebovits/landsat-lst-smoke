@@ -1,0 +1,44 @@
+########## reduce chunk 512, all scenes ##########
+host          ip-10-0-22-8  16 cores
+source        earth-search  https://earth-search.aws.element84.com/v1
+cluster       4 workers x 8 threads x 12.0 GiB = 48 GiB total
+chunking      read 1024, reduce 512, time 10
+out-dir       /home/ubuntu/ab-chunk512
+raster output disabled: the composite is computed and discarded
+
+bbox          (-60.942796, -34.17645991, -60.138771, -33.54020044)
+dashboard     http://127.0.0.1:45825
+scenes        711  {'landsat-9': 276, 'landsat-8': 435}
+predicted     1.39 GiB per task x 32 concurrent = 44.4 GiB data + 2.8 GiB worker baseline = 47.2 GiB (budget 48 GiB)
+
+raster        2985 x 2845 px
+tasks         64,001 raw, 44,157 fused
+
+computing (this is the stage you care about)...
+
+                                 Stage profile                                  
+┏━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━┓
+┃         ┃        ┃       ┃       ┃    RSS ┃     RSS ┃   tree ┃        ┃      ┃
+┃ stage   ┃ wall s ┃ cpu s ┃ cpu % ┃  start ┃   delta ┃   peak ┃ net MB ┃ MB/s ┃
+┡━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━┩
+│ imports │   0.69 │  2.07 │   301 │    24M │   +151M │   184M │      0 │  0.0 │
+│ bounda… │   0.20 │  0.06 │    30 │   175M │    +54M │   196M │      0 │  1.3 │
+│ cluste… │   0.57 │  0.01 │     1 │   229M │     +4M │   641M │      0 │  0.0 │
+│ stac_s… │   7.16 │  1.08 │    15 │   233M │    +61M │   722M │      1 │  0.1 │
+│ sign_a… │   0.00 │  0.00 │    92 │   295M │     +0M │      - │      - │    - │
+│ graph_… │   6.48 │  6.48 │   100 │   295M │    +44M │   765M │      0 │  0.0 │
+│ graph_… │   1.28 │  1.28 │   100 │   339M │    +42M │   816M │      0 │  0.0 │
+│ compute │ 132.80 │  9.32 │     7 │   380M │   +348M │ 29,04… │  6,146 │ 46.3 │
+│ stats   │   0.18 │  0.28 │   155 │   729M │    +68M │ 2,357M │      0 │  0.0 │
+│ report  │   7.91 │  7.87 │    99 │   797M │    +91M │ 3,020M │    157 │ 20.1 │
+│ TOTAL   │ 157.27 │       │       │        │         │        │        │      │
+└─────────┴────────┴───────┴───────┴────────┴─────────┴────────┴────────┴──────┘
+
+LST p95       min 32.3 C  mean 46.2 C  max 55.9 C  (100.0% valid)
+peak memory   28.36 GiB tree  (1.41 client + 27.76 workers)
+throughput    46.3 MB/s mean, 260.7 MB/s peak, 6,146 MB total, 8.6 MB/scene
+concurrency   13.0x effective of 32 slots (41% used), 0.19 s/scene
+spans         500,000
+artifacts     /home/ubuntu/ab-chunk512
+exit=0 for chunk 512
+512 DONE

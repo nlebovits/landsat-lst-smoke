@@ -1,0 +1,91 @@
+########## reduce chunk 128, 673 scenes ##########
+start 15:55:17
+host          ip-10-0-22-8  16 cores
+source        earth-search  https://earth-search.aws.element84.com/v1
+cluster       4 workers x 8 threads x 12.0 GiB = 48 GiB total
+chunking      read 1024, reduce 128, time 10
+out-dir       /home/ubuntu/ab-chunk128
+raster output disabled: the composite is computed and discarded
+
+bbox          (-60.942796, -34.17645991, -60.138771, -33.54020044)
+dashboard     http://127.0.0.1:41315
+scenes        711  {'landsat-9': 276, 'landsat-8': 435}
+predicted     0.09 GiB per task x 32 concurrent = 2.8 GiB data + 2.8 GiB worker baseline = 5.6 GiB (budget 48 GiB)
+
+raster        2985 x 2845 px
+tasks         669,733 raw, 527,721 fused
+
+computing (this is the stage you care about)...
+
+                                 Stage profile                                  
+┏━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━┓
+┃         ┃        ┃       ┃       ┃    RSS ┃     RSS ┃   tree ┃        ┃      ┃
+┃ stage   ┃ wall s ┃ cpu s ┃ cpu % ┃  start ┃   delta ┃   peak ┃ net MB ┃ MB/s ┃
+┡━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━┩
+│ imports │   2.76 │  4.10 │   149 │    24M │   +160M │   194M │      0 │  0.0 │
+│ bounda… │   0.26 │  0.11 │    43 │   184M │    +52M │   199M │      0 │  0.2 │
+│ cluste… │   0.56 │  0.02 │     3 │   236M │     +8M │   648M │      0 │  0.0 │
+│ stac_s… │   7.52 │  1.04 │    14 │   243M │    +58M │   728M │      1 │  0.1 │
+│ sign_a… │   0.00 │  0.00 │    93 │   302M │     +0M │      - │      - │    - │
+│ graph_… │   9.47 │  9.48 │   100 │   302M │   +366M │ 1,094M │      0 │  0.0 │
+│ graph_… │  17.24 │ 17.26 │   100 │   668M │   +399M │ 1,764M │      0 │  0.0 │
+│ compute │ 230.47 │ 84.23 │    37 │ 1,067M │ +2,309M │ 36,30… │  6,219 │ 27.0 │
+│ stats   │   0.17 │  0.34 │   199 │ 3,375M │    -48M │ 13,35… │      0 │  0.0 │
+│ report  │  41.04 │ 40.26 │    98 │ 3,327M │    -39M │ 13,33… │    681 │ 16.6 │
+│ TOTAL   │ 309.51 │       │       │        │         │        │        │      │
+└─────────┴────────┴───────┴───────┴────────┴─────────┴────────┴────────┴──────┘
+
+LST p95       min 32.3 C  mean 46.2 C  max 55.9 C  (100.0% valid)
+peak memory   35.46 GiB tree  (5.59 client + 31.87 workers)
+throughput    27.0 MB/s mean, 321.1 MB/s peak, 6,219 MB total, 8.7 MB/scene
+concurrency   1.8x effective of 32 slots (6% used), 0.32 s/scene
+spans         2,000,000
+artifacts     /home/ubuntu/ab-chunk128
+exit=0 for chunk 128
+end 16:00:30
+########## reduce chunk 256, 673 scenes ##########
+start 16:00:30
+host          ip-10-0-22-8  16 cores
+source        earth-search  https://earth-search.aws.element84.com/v1
+cluster       4 workers x 8 threads x 12.0 GiB = 48 GiB total
+chunking      read 1024, reduce 256, time 10
+out-dir       /home/ubuntu/ab-chunk256
+raster output disabled: the composite is computed and discarded
+
+bbox          (-60.942796, -34.17645991, -60.138771, -33.54020044)
+dashboard     http://127.0.0.1:36461
+scenes        711  {'landsat-9': 276, 'landsat-8': 435}
+predicted     0.35 GiB per task x 32 concurrent = 11.1 GiB data + 2.8 GiB worker baseline = 13.9 GiB (budget 48 GiB)
+
+raster        2985 x 2845 px
+tasks         189,337 raw, 144,833 fused
+
+computing (this is the stage you care about)...
+
+                                 Stage profile                                  
+┏━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━┓
+┃         ┃        ┃       ┃       ┃    RSS ┃     RSS ┃   tree ┃        ┃      ┃
+┃ stage   ┃ wall s ┃ cpu s ┃ cpu % ┃  start ┃   delta ┃   peak ┃ net MB ┃ MB/s ┃
+┡━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━┩
+│ imports │   0.64 │  2.02 │   318 │    24M │   +151M │   145M │      0 │  0.0 │
+│ bounda… │   0.19 │  0.06 │    30 │   175M │    +54M │   190M │      0 │  0.1 │
+│ cluste… │   0.55 │  0.01 │     1 │   229M │     +4M │   629M │      0 │  0.0 │
+│ stac_s… │   7.46 │  1.00 │    13 │   233M │    +61M │   722M │      1 │  0.1 │
+│ sign_a… │   0.00 │  0.00 │    91 │   295M │     +0M │      - │      - │    - │
+│ graph_… │   6.99 │  7.00 │   100 │   295M │   +111M │   832M │      0 │  0.0 │
+│ graph_… │   4.65 │  4.66 │   100 │   405M │   +124M │ 1,020M │      0 │  0.0 │
+│ compute │ 144.86 │ 24.85 │    17 │   529M │   +764M │ 31,42… │  6,163 │ 42.6 │
+│ stats   │   0.18 │  0.36 │   200 │ 1,293M │    +51M │ 6,608M │      0 │  0.0 │
+│ report  │  31.01 │ 30.87 │   100 │ 1,344M │    +24M │ 8,561M │    562 │ 18.1 │
+│ TOTAL   │ 196.53 │       │       │        │         │        │        │      │
+└─────────┴────────┴───────┴───────┴────────┴─────────┴────────┴────────┴──────┘
+
+LST p95       min 32.3 C  mean 46.2 C  max 55.9 C  (100.0% valid)
+peak memory   30.69 GiB tree  (3.34 client + 29.49 workers)
+throughput    42.5 MB/s mean, 280.1 MB/s peak, 6,163 MB total, 8.7 MB/scene
+concurrency   13.7x effective of 32 slots (43% used), 0.20 s/scene
+spans         1,800,872
+artifacts     /home/ubuntu/ab-chunk256
+exit=0 for chunk 256
+end 16:03:48
+ALL DONE

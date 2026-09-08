@@ -1,0 +1,50 @@
+Transfers  730 messages, 1,197 keys (1.6 keys/msg)
+  msg size   p10 8.30 MiB, p50 15.57 MiB, p90 21.38 MiB
+  bytes      10.69 GiB logical -> 9.58 GiB wire (ratio 0.90)
+  wire       12.8s at 857.70 MiB/s per stream (p50 960.76 MiB/s); aggregate 70.53 MiB/s over 2.6m
+  queue      send 6.2m + writer 21.3s + recv 1.7m
+             queue = waiting before transfer work can proceed: sender prep, writer backlog, receiver decode slot.
+  cpu        serialize 13.3s, compress 11.4s, decompress 6.8s, deserialize 28.0s
+             cpu = work spent making bytes movable: serialize, compress, decompress, deserialize.
+  network   internal 9.58 GiB wire over 2.6m (63.20 MiB/s aggregate)
+             internal = worker-to-worker transfer wire bytes; external incoming/outgoing are not retained for this range.
+
+            │0s                    50                    100                   150s│Total (% worker cap)
+            ├──────────────────────────────────────────────────────────────────────┤
+  serialize │▁▁ ▁  ▁ ▂▃▂▁ ▄▂▁   ▃▃▁      ▂▃               ▃▁               ▂▂▁▁▁▂▁▁│    13.3 s    4.3%
+ send queue │ ▁ ▁▂ ▅ ▁▂▁▁ ▃▂▃▂ ▁▅▂▁▁    ▁▅▂▁             ▂█▃             ▃▃▅██████▆│   369.1 s  118.9%
+   compress │ ▂▁▁▁▁▁▁▁▂▁▁ ▂▁▁▁ ▁▁▂▁▁ ▁▁ ▁▁▁▁           ▁  ▁▁      ▁▁     ▁ ▁▃▃▃▃▂▃▂│    11.4 s    3.7%
+write queue │ ▁  ▁▁▁  ▁▁▁ ▁▁▁▁ ▁▁▁ ▁    ▁▂▁               ▂▁               ▂▅▇▃▅▅▅▁│    21.3 s    6.9%
+      write │ ▁▁▁▁▁▁▁▁▂▁▁ ▁▁▁▁ ▁▁▁▁▁ ▁  ▁▁▁▁           ▁  ▁▁      ▁▁ ▁     ▁▃▄▂▃▂▃▁│    10.8 s    3.5%
+  wire+read │ ▁▁▁▁▁▁▁▁▂▁▁ ▂▁▁▁ ▁▁▂▁▁ ▁  ▁▁▁▁           ▁  ▂▁      ▁▁ ▁     ▂▃▄▂▃▃▃▂│    12.8 s    4.1%
+       read │ ▁▁▁▁▁▁▁▁▂▁▁ ▁▁▁▁ ▁▁▁▁▁ ▁  ▁▁▁▁           ▁  ▁▁      ▁▁       ▁▃▄▂▃▃▃▂│    11.5 s    3.7%
+ recv queue │     ▁▁▁ ▂▅  █▂ ▁ ▁▅▆      ▁▅▂               ▇▅             ▂▁▅▅▅█▅▃▅▄│   101.5 s   32.7%
+ decompress │ ▂▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁ ▁▁▁▁  ▁   ▁▁▁           ▁  ▁       ▁▁     ▁ ▁▂▃▂▂▂▃▁│     6.8 s    2.2%
+deserialize │ ▂▁▁▁▁▁▁▂▂▃▁ ▃▂▁▁ ▁▃▃▁▁ ▁▁ ▁▂▃▁           ▁  ▃▁      ▁▁ ▁   ▁ ▂▅▇▄▄▄▅▃│    28.0 s    9.0%
+            └──────────────────────────────────────────────────────────────────────┘
+
+                                                    Per-prefix transfer costs                                                     
+Prefix                        Msgs    Keys/msg       Logical          Wire    Ratio    Queue    Codec    Wire time       BW/stream
+rechunk-merge                  600         1.4      8.97 GiB      8.90 GiB     0.99     5.7m    15.4s        10.7s    858.56 MiB/s
+where                           73         1.0      1.29 GiB      1.38 GiB     1.07    848ms     2.4s         1.2s      1.12 GiB/s
+getitem-sum                     24         6.6    109.36 MiB     96.77 MiB     0.88     1.1m     92ms        394ms    277.70 MiB/s
+sum-partial                     21         4.4    233.87 MiB    213.00 MiB     0.91    44.5s    149ms        341ms    686.46 MiB/s
+stack-sum-aggregate-astype      10         3.0     93.84 MiB     84.54 MiB     0.90    36.0s    125ms        164ms    572.09 MiB/s
+shuffle-split                    1         1.6      5.61 MiB      5.61 MiB     1.00     1.2s      2ms         15ms    372.50 MiB/s
+
+Transfer sizes  730 span messages, 1,197 keys (1.6 keys/msg)
+  messages  p50 15.57 MiB, p90 21.38 MiB; per-key p50 9.28 MiB, p90 21.20 MiB
+  bandwidth 857.70 MiB/s per stream (from recv spans)
+                           Transfer size distribution                           
+Size                    Msgs     Msg bytes    Keys     Key bytes       BW/stream
+64.00 KiB-256.00 KiB       2    425.08 KiB      21      4.17 MiB     15.60 MiB/s
+256.00 KiB-1.00 MiB       13      8.63 MiB     110     38.75 MiB     39.38 MiB/s
+1.00 MiB-4.00 MiB         15     31.73 MiB     205    467.14 MiB    196.08 MiB/s
+4.00 MiB-16.00 MiB       347      3.63 GiB     628      5.63 GiB    696.12 MiB/s
+16.00 MiB-64.00 MiB      353      7.02 GiB     233      4.57 GiB      1.00 GiB/s
+
+Next transfer checks:
+  - Timeline: see when transfer stages ran and whether queue, CPU, or wire dominates.
+    frisky observe timeline topo-2w16t/spans.json --view detailed
+  - Task prefixes: compare transfer cost with compute, disk, and task state by prefix.
+    frisky observe prefixes topo-2w16t/spans.json

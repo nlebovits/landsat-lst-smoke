@@ -1,0 +1,63 @@
+Transfers  9,974 messages, 18,375 keys (1.8 keys/msg)
+  msg size   p10 256.04 KiB, p50 1.00 MiB, p90 14.00 MiB
+  bytes      37.58 GiB logical -> 30.19 GiB wire (ratio 0.80)
+  wire       53.1s at 724.11 MiB/s per stream (p50 891.64 MiB/s); aggregate 321.79 MiB/s over 2.0m
+  queue      send 5.4m + writer 4.1m + recv 22.4s
+             queue = waiting before transfer work can proceed: sender prep, writer backlog, receiver decode slot.
+  cpu        serialize 32.1s, compress 49.3s, decompress 42.7s, deserialize 1.2m
+             cpu = work spent making bytes movable: serialize, compress, decompress, deserialize.
+  network   internal 30.19 GiB wire over 2.0m (258.50 MiB/s aggregate)
+             internal = worker-to-worker transfer wire bytes; external incoming/outgoing are not retained for this range.
+
+            │0s         20          40         60          80         100      120s│Total (% worker cap)
+            ├──────────────────────────────────────────────────────────────────────┤
+  serialize │▁▁▁▁▁▁▁▁▁▁▅▃▁▁▂▅▃▁▁▁▁▃▄▁▁▁▁▂▃▁▁▁▁ ▁ ▁ ▂▄▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▁▁▁▄▁▂▁▁▂▂▁▁│    32.1 s    6.7%
+ send queue │▁▁▁▁▁▁▁▁▁▁▃▂▁▁▁▅▂▂▂▁▁▄▅▁▁▁▁▅▅▂▁▁▁ ▁ ▂ ▆▆▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▂▁ ▇█▇▆▇▃█▇▇│   325.9 s   68.1%
+   compress │▁▁▂▁▁▁▁▁▁▁▃▂▁▁▂▃▂▁▁▁▁▃▃▁▁▁▁▂▃▁▁▁▁ ▁ ▂ ▃▃▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▂▁ ▅▄▅▅▃▂▅▄▂│    49.3 s   10.3%
+write queue │▁▁▁▁▁▁▂▁▁▁▆▃▁▁▁▆▁▁▁▁▁▄▄▁▁▁▂▃▆▁▁▁▁ ▁ ▂ ▆█▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▂▁ ▇██▆█▄▇█▇│   245.1 s   51.2%
+      write │▁▁▁▁▁▁▁▁▁▁▃▂▁▁▁▃▂▁▁▁▁▂▃▁▁▁▁▂▃▁▁▁▁ ▁ ▁ ▂▃▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▁▁ ▄▄▅▃▃▂▅▃▂│    42.0 s    8.8%
+  wire+read │▁▁▁▁▁▁▂▁▁▁▄▂▁▁▂▄▂▁▁▁▁▃▃▁▁▁▁▂▃▁▁▁▁ ▁ ▂ ▃▄▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▂▁ ▅▅▅▄▃▂▅▄▃│    53.1 s   11.1%
+       read │▁▁▁▁▁▁▁▁▁▁▃▂▁▁▁▃▂▁▁▁▁▃▃▁▁▁▁▂▃▁▁▁▁ ▁ ▂ ▃▃▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▁▁ ▄▄▅▃▃▂▅▃▂│    45.8 s    9.6%
+ recv queue │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▁▁▁▁▂▃▁▁▁▁▂▂▁▁▁▁ ▁ ▁ ▂▁▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▁▁ ▄▃▁▃▁▁▃▃▁│    22.4 s    4.7%
+ decompress │▁▁▂▁▁▁▁▁▁▁▃▂▁▁▁▄▃▁▁▁▁▂▂▁▁▁▁▂▃▁▁▁▁ ▁ ▁ ▂▃▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▂▁ ▃▃▄▅▃▂▅▄▃│    42.7 s    8.9%
+deserialize │▁▁▂▁▁▁▂▁▁▁▃▃▁▁▂▅▃▂▂▁▁▃▄▁▁▂▂▂▄▂▂▁▁ ▁ ▂ ▃▄▁▁▁▁▁▁▁▁▁▁ ▁ ▁▁▁▁▁▂▂ ▅▆▅▆▄▃▆▆▄│    72.8 s   15.2%
+            └──────────────────────────────────────────────────────────────────────┘
+
+                                                             Per-prefix transfer costs                                                              
+Prefix                                          Msgs    Keys/msg       Logical          Wire    Ratio    Queue    Codec    Wire time       BW/stream
+rechunk-merge                                  2,137         1.4     25.77 GiB     21.62 GiB     0.84     6.9m     1.1m        36.5s    723.00 MiB/s
+getitem-sum                                    5,108         1.8      3.70 GiB      2.90 GiB     0.78     1.7m     9.0s         6.8s    558.52 MiB/s
+sum-partial                                    1,249         1.2      2.64 GiB      1.77 GiB     0.67    54.2s     5.4s         3.7s    732.95 MiB/s
+where                                            208         1.0      3.62 GiB      3.11 GiB     0.86     1.6s     7.3s         3.6s      1.01 GiB/s
+shuffle-split                                    376         1.2    765.07 MiB    619.24 MiB     0.81     2.0s     1.3s        971ms    787.64 MiB/s
+stack-sum-aggregate-astype                       281         1.1    563.60 MiB    362.73 MiB     0.64     5.9s     1.3s        686ms    821.05 MiB/s
+rechunk-split                                      4         1.0    358.22 MiB    294.09 MiB     0.82     55ms    406ms        338ms      1.04 GiB/s
+finalize-hlgfinalizecompute                       70         6.1     78.04 MiB     61.89 MiB     0.79     8.5s    425ms        204ms    383.46 MiB/s
+lwir11                                           260         6.7      5.55 MiB      3.31 MiB     0.60    416ms     10ms         97ms     57.05 MiB/s
+custom_nanquantile-getitem-transpose-astype        3         1.3     21.20 MiB     21.20 MiB     1.00     1.2s     21ms         94ms    226.22 MiB/s
+sum                                               38         1.0     65.32 MiB     64.40 MiB     0.99    107ms     89ms         79ms    821.97 MiB/s
+qa_pixel                                         222         6.4      4.07 MiB      1.83 MiB     0.45    409ms      6ms         68ms     59.41 MiB/s
+transpose                                          2         1.3     18.30 MiB     18.30 MiB     1.00     30ms     30ms         19ms    940.89 MiB/s
+invert                                             2         1.0     11.13 MiB     11.13 MiB     1.00      1ms     19ms         16ms    684.12 MiB/s
+astype                                            15         1.3      5.52 MiB      5.52 MiB     1.00    628ms      6ms          6ms    915.73 MiB/s
+
+Transfer sizes  9,974 span messages, 18,375 keys (1.8 keys/msg)
+  messages  p50 1.00 MiB, p90 14.00 MiB; per-key p50 384.04 KiB, p90 8.30 MiB
+  bandwidth 724.11 MiB/s per stream (from recv spans)
+                            Transfer size distribution                            
+Size                     Msgs     Msg bytes     Keys     Key bytes       BW/stream
+0 B-4.00 KiB              209    269.98 KiB    3,191      3.11 MiB      4.85 MiB/s
+4.00 KiB-16.00 KiB        322      2.81 MiB        0           0 B     21.92 MiB/s
+16.00 KiB-64.00 KiB         2     38.80 KiB       23      1.05 MiB     26.89 MiB/s
+64.00 KiB-256.00 KiB      342     59.92 MiB    1,784    333.84 MiB    218.29 MiB/s
+256.00 KiB-1.00 MiB     4,042      2.03 GiB    7,873      3.02 GiB    501.80 MiB/s
+1.00 MiB-4.00 MiB       2,692      4.51 GiB    2,596      5.04 GiB    733.75 MiB/s
+4.00 MiB-16.00 MiB      1,489     13.13 GiB    2,509     21.22 GiB    760.07 MiB/s
+16.00 MiB-64.00 MiB       873     17.57 GiB      396      7.68 GiB    738.46 MiB/s
+64.00 MiB-256.00 MiB        3    303.24 MiB        3    303.24 MiB      1.33 GiB/s
+
+Next transfer checks:
+  - Timeline: see when transfer stages ran and whether queue, CPU, or wire dominates.
+    frisky observe timeline wc-controlA/spans.json --view detailed
+  - Task prefixes: compare transfer cost with compute, disk, and task state by prefix.
+    frisky observe prefixes wc-controlA/spans.json

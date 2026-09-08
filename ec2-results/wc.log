@@ -1,0 +1,133 @@
+########## controlA : 4w x 8t ##########
+start 16:35:54
+host          ip-10-0-20-235  16 cores
+source        earth-search  https://earth-search.aws.element84.com/v1
+cluster       4 workers x 8 threads x 12.0 GiB = 48 GiB total
+chunking      read 1024, reduce 512, time 10
+out-dir       /home/ubuntu/wc-controlA
+raster output disabled: the composite is computed and discarded
+
+bbox          (-60.942796, -34.17645991, -60.138771, -33.54020044)
+dashboard     http://127.0.0.1:34723
+scenes        711  {'landsat-9': 276, 'landsat-8': 435}
+predicted     1.39 GiB per task x 32 concurrent = 44.4 GiB data + 2.8 GiB worker baseline = 47.2 GiB (budget 48 GiB)
+
+raster        2985 x 2845 px
+tasks         64,001 raw, 44,157 fused
+
+computing (this is the stage you care about)...
+
+                                 Stage profile                                  
+┏━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━┓
+┃         ┃        ┃       ┃       ┃    RSS ┃     RSS ┃   tree ┃        ┃      ┃
+┃ stage   ┃ wall s ┃ cpu s ┃ cpu % ┃  start ┃   delta ┃   peak ┃ net MB ┃ MB/s ┃
+┡━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━┩
+│ imports │   2.85 │  4.16 │   146 │    24M │   +159M │   193M │      0 │  0.0 │
+│ bounda… │   0.28 │  0.12 │    41 │   183M │    +52M │   197M │      0 │  0.7 │
+│ cluste… │   0.56 │  0.02 │     3 │   235M │     +8M │   636M │      0 │  0.0 │
+│ stac_s… │   7.49 │  1.13 │    15 │   242M │    +58M │   721M │      1 │  0.1 │
+│ sign_a… │   0.00 │  0.00 │    93 │   301M │     +0M │      - │      - │    - │
+│ graph_… │   6.62 │  6.63 │   100 │   301M │    +43M │   760M │      0 │  0.0 │
+│ graph_… │   1.41 │  1.41 │   100 │   344M │    +42M │   822M │      0 │  0.0 │
+│ compute │ 123.99 │  9.66 │     8 │   387M │   +343M │ 28,90… │  6,139 │ 49.5 │
+│ stats   │   0.19 │  0.31 │   159 │   729M │    +68M │ 2,492M │      0 │  0.0 │
+│ report  │  25.22 │ 25.18 │   100 │   797M │    +86M │ 3,274M │    166 │  6.6 │
+│ TOTAL   │ 168.61 │       │       │        │         │        │        │      │
+└─────────┴────────┴───────┴───────┴────────┴─────────┴────────┴────────┴──────┘
+
+LST p95       min 32.3 C  mean 46.2 C  max 55.9 C  (100.0% valid)
+peak memory   28.22 GiB tree  (1.67 client + 27.61 workers)
+throughput    49.5 MB/s mean, 339.8 MB/s peak, 6,139 MB total, 8.6 MB/scene
+concurrency   16.8x effective of 32 slots (52% used), 0.17 s/scene
+spans         530,846
+artifacts     /home/ubuntu/wc-controlA
+exit=0 for controlA
+########## eight : 8w x 4t ##########
+start 16:38:44
+host          ip-10-0-20-235  16 cores
+source        earth-search  https://earth-search.aws.element84.com/v1
+cluster       8 workers x 4 threads x 6.0 GiB = 48 GiB total
+chunking      read 1024, reduce 512, time 10
+out-dir       /home/ubuntu/wc-eight
+raster output disabled: the composite is computed and discarded
+
+bbox          (-60.942796, -34.17645991, -60.138771, -33.54020044)
+dashboard     http://127.0.0.1:37957
+scenes        711  {'landsat-9': 276, 'landsat-8': 435}
+predicted     1.39 GiB per task x 32 concurrent = 44.4 GiB data + 5.6 GiB worker baseline = 50.0 GiB (budget 48 GiB)
+
+raster        2985 x 2845 px
+tasks         64,001 raw, 44,157 fused
+
+computing (this is the stage you care about)...
+
+                                 Stage profile                                  
+┏━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━┓
+┃         ┃        ┃       ┃       ┃    RSS ┃     RSS ┃   tree ┃        ┃      ┃
+┃ stage   ┃ wall s ┃ cpu s ┃ cpu % ┃  start ┃   delta ┃   peak ┃ net MB ┃ MB/s ┃
+┡━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━┩
+│ imports │   0.67 │  2.05 │   307 │    24M │   +149M │   184M │      0 │  0.0 │
+│ bounda… │   0.10 │  0.06 │    63 │   173M │    +54M │   236M │      0 │  0.0 │
+│ cluste… │   0.59 │  0.01 │     2 │   227M │     +5M │ 1,042M │      0 │  0.0 │
+│ stac_s… │   7.45 │  1.09 │    15 │   232M │    +62M │ 1,123M │      1 │  0.1 │
+│ sign_a… │   0.00 │  0.00 │    94 │   294M │     +0M │      - │      - │    - │
+│ graph_… │   6.55 │  6.57 │   100 │   294M │    +44M │ 1,161M │      0 │  0.0 │
+│ graph_… │   1.43 │  1.43 │   100 │   337M │    +43M │ 1,223M │      0 │  0.0 │
+│ compute │  93.57 │ 10.05 │    11 │   380M │   +358M │ 32,59… │  6,168 │ 66.0 │
+│ stats   │   0.19 │  0.29 │   156 │   738M │    +68M │ 4,120M │      0 │  0.0 │
+│ report  │  28.77 │ 29.03 │   101 │   806M │   +128M │ 5,123M │    191 │  6.6 │
+│ TOTAL   │ 139.31 │       │       │        │         │        │        │      │
+└─────────┴────────┴───────┴───────┴────────┴─────────┴────────┴────────┴──────┘
+
+LST p95       min 32.3 C  mean 46.2 C  max 55.9 C  (100.0% valid)
+peak memory   31.83 GiB tree  (1.85 client + 31.23 workers)
+throughput    65.9 MB/s mean, 316.0 MB/s peak, 6,168 MB total, 8.7 MB/scene
+concurrency   20.7x effective of 32 slots (65% used), 0.13 s/scene
+spans         600,000
+artifacts     /home/ubuntu/wc-eight
+exit=0 for eight
+########## controlB : 4w x 8t ##########
+start 16:41:05
+host          ip-10-0-20-235  16 cores
+source        earth-search  https://earth-search.aws.element84.com/v1
+cluster       4 workers x 8 threads x 12.0 GiB = 48 GiB total
+chunking      read 1024, reduce 512, time 10
+out-dir       /home/ubuntu/wc-controlB
+raster output disabled: the composite is computed and discarded
+
+bbox          (-60.942796, -34.17645991, -60.138771, -33.54020044)
+dashboard     http://127.0.0.1:40465
+scenes        711  {'landsat-9': 276, 'landsat-8': 435}
+predicted     1.39 GiB per task x 32 concurrent = 44.4 GiB data + 2.8 GiB worker baseline = 47.2 GiB (budget 48 GiB)
+
+raster        2985 x 2845 px
+tasks         64,001 raw, 44,157 fused
+
+computing (this is the stage you care about)...
+
+                                 Stage profile                                  
+┏━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━┓
+┃         ┃        ┃       ┃       ┃    RSS ┃     RSS ┃   tree ┃        ┃      ┃
+┃ stage   ┃ wall s ┃ cpu s ┃ cpu % ┃  start ┃   delta ┃   peak ┃ net MB ┃ MB/s ┃
+┡━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━┩
+│ imports │   0.66 │  2.05 │   310 │    24M │   +149M │   184M │      0 │  0.0 │
+│ bounda… │   0.20 │  0.06 │    30 │   173M │    +54M │   189M │      0 │  0.0 │
+│ cluste… │   0.54 │  0.01 │     1 │   227M │     +5M │   625M │      0 │  0.0 │
+│ stac_s… │   7.43 │  1.07 │    14 │   232M │    +61M │   714M │      1 │  0.1 │
+│ sign_a… │   0.00 │  0.00 │    93 │   293M │     +0M │      - │      - │    - │
+│ graph_… │   6.61 │  6.62 │   100 │   293M │    +44M │   758M │      0 │  0.0 │
+│ graph_… │   1.38 │  1.38 │   100 │   337M │    +41M │   809M │      0 │  0.0 │
+│ compute │ 112.62 │  9.47 │     8 │   379M │   +350M │ 30,92… │  6,154 │ 54.7 │
+│ stats   │   0.19 │  0.29 │   154 │   728M │    +68M │ 2,628M │      0 │  0.0 │
+│ report  │  25.17 │ 25.37 │   101 │   796M │    +84M │ 3,414M │    167 │  6.7 │
+│ TOTAL   │ 154.79 │       │       │        │         │        │        │      │
+└─────────┴────────┴───────┴───────┴────────┴─────────┴────────┴────────┴──────┘
+
+LST p95       min 32.3 C  mean 46.2 C  max 55.9 C  (100.0% valid)
+peak memory   30.20 GiB tree  (1.68 client + 29.60 workers)
+throughput    54.6 MB/s mean, 329.7 MB/s peak, 6,154 MB total, 8.7 MB/scene
+concurrency   17.3x effective of 32 slots (54% used), 0.16 s/scene
+spans         534,543
+artifacts     /home/ubuntu/wc-controlB
+exit=0 for controlB
+WC DONE

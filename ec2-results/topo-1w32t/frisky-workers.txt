@@ -1,0 +1,3 @@
+                                                                    Workers from spans (topo-1w32t/spans.json)                                                                    
+Worker                                                 Spans    Ignored    Span time    Window    Top spans                                                                       
+unix:///tmp/frisky-sock-aepwondm/worker-1792-0.sock    16583          1        47.5m      3.1m    worker.exec.call 46.0m, worker.handle_event 38.4s, worker.exec.deserialize 28.2s

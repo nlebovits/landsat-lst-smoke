@@ -1,0 +1,270 @@
+{
+  "dashboard": "http://127.0.0.1:36821",
+  "span_source": "query_spans",
+  "n_spans": 363707,
+  "dump_truncated_to": 20000,
+  "dump_rule": "longest spans by duration_ns",
+  "n_spans_dumped": 20000,
+  "by_name": {
+    "profile.imports": {
+      "count": 1,
+      "total_ms": 2936.822395,
+      "mean_ms": 2936.822395,
+      "max_ms": 2936.822395
+    },
+    "profile.boundary": {
+      "count": 1,
+      "total_ms": 261.007222,
+      "mean_ms": 261.007222,
+      "max_ms": 261.007222
+    },
+    "profile.cluster_start": {
+      "count": 1,
+      "total_ms": 515.713443,
+      "mean_ms": 515.713443,
+      "max_ms": 515.713443
+    },
+    "scheduler.metrics": {
+      "count": 205,
+      "total_ms": 205018.995622,
+      "mean_ms": 1000.0926615707317,
+      "max_ms": 1001.565071
+    },
+    "comm.recv": {
+      "count": 20512,
+      "total_ms": 614383.51219,
+      "mean_ms": 29.9523943150351,
+      "max_ms": 204283.4269
+    },
+    "profile.stac_search": {
+      "count": 1,
+      "total_ms": 7214.718952,
+      "mean_ms": 7214.718952,
+      "max_ms": 7214.718952
+    },
+    "profile.sign_assets": {
+      "count": 1,
+      "total_ms": 0.006169,
+      "mean_ms": 0.006169,
+      "max_ms": 0.006169
+    },
+    "profile.graph_build": {
+      "count": 1,
+      "total_ms": 6560.827861,
+      "mean_ms": 6560.827861,
+      "max_ms": 6560.827861
+    },
+    "profile.graph_optimize": {
+      "count": 1,
+      "total_ms": 1467.206228,
+      "mean_ms": 1467.206228,
+      "max_ms": 1467.206228
+    },
+    "profile.compute": {
+      "count": 1,
+      "total_ms": 189975.832128,
+      "mean_ms": 189975.832128,
+      "max_ms": 189975.832128
+    },
+    "client.convert_legacy": {
+      "count": 2,
+      "total_ms": 1406.98517,
+      "mean_ms": 703.492585,
+      "max_ms": 703.492585
+    },
+    "client.dask_order": {
+      "count": 10,
+      "total_ms": 1364.93318,
+      "mean_ms": 136.493318,
+      "max_ms": 136.493318
+    },
+    "client.serialize_tasks": {
+      "count": 2,
+      "total_ms": 4052.231712,
+      "mean_ms": 2026.115856,
+      "max_ms": 2026.115856
+    },
+    "client.submit_graph": {
+      "count": 2,
+      "total_ms": 108.632604,
+      "mean_ms": 54.316302,
+      "max_ms": 54.316302
+    },
+    "scheduler.handle_update_graph": {
+      "count": 1,
+      "total_ms": 233.955378,
+      "mean_ms": 233.955378,
+      "max_ms": 233.955378
+    },
+    "scheduler.ingest.add_tasks": {
+      "count": 1,
+      "total_ms": 34.952936,
+      "mean_ms": 34.952936,
+      "max_ms": 34.952936
+    },
+    "scheduler.ingest.reverse_deps": {
+      "count": 1,
+      "total_ms": 40.452682,
+      "mean_ms": 40.452682,
+      "max_ms": 40.452682
+    },
+    "scheduler.ingest.homes": {
+      "count": 1,
+      "total_ms": 87.76341,
+      "mean_ms": 87.76341,
+      "max_ms": 87.76341
+    },
+    "scheduler.ingest.mark_keys": {
+      "count": 1,
+      "total_ms": 0.004849,
+      "mean_ms": 0.004849,
+      "max_ms": 0.004849
+    },
+    "scheduler.ingest.transitions": {
+      "count": 1,
+      "total_ms": 69.789634,
+      "mean_ms": 69.789634,
+      "max_ms": 69.789634
+    },
+    "scheduler.decide_worker": {
+      "count": 26509,
+      "total_ms": 117.632731,
+      "mean_ms": 0.0044374639179146705,
+      "max_ms": 0.261576
+    },
+    "scheduler.ingest.release": {
+      "count": 1,
+      "total_ms": 0.005606,
+      "mean_ms": 0.005606,
+      "max_ms": 0.005606
+    },
+    "scheduler.sender.flush_worker": {
+      "count": 12793,
+      "total_ms": 269.029289,
+      "mean_ms": 0.021029413663722348,
+      "max_ms": 11.409606
+    },
+    "worker.receive_task": {
+      "count": 40450,
+      "total_ms": 1000.015034,
+      "mean_ms": 0.024722250531520395,
+      "max_ms": 28.060606
+    },
+    "worker.exec.gil": {
+      "count": 40271,
+      "total_ms": 17293.276854,
+      "mean_ms": 0.4294225833478185,
+      "max_ms": 130.341097
+    },
+    "worker.exec.deserialize": {
+      "count": 40563,
+      "total_ms": 36383.128276,
+      "mean_ms": 0.8969535851884723,
+      "max_ms": 399.277118
+    },
+    "worker.exec.call": {
+      "count": 40503,
+      "total_ms": 2776960.779668,
+      "mean_ms": 68.5618541754438,
+      "max_ms": 3730.47508
+    },
+    "worker.store_data": {
+      "count": 40368,
+      "total_ms": 65.957745,
+      "mean_ms": 0.0016339116379310344,
+      "max_ms": 1.595339
+    },
+    "worker.handle_event": {
+      "count": 40529,
+      "total_ms": 50514.943144,
+      "mean_ms": 1.2463900699252386,
+      "max_ms": 425.753299
+    },
+    "worker.task_complete": {
+      "count": 40395,
+      "total_ms": 9591.062211,
+      "mean_ms": 0.2374319151132566,
+      "max_ms": 401.261361
+    },
+    "scheduler.tasks_finished": {
+      "count": 20108,
+      "total_ms": 743.023438,
+      "mean_ms": 0.03695163308136065,
+      "max_ms": 2.637954
+    },
+    "worker.idle": {
+      "count": 3,
+      "total_ms": 8.655844,
+      "mean_ms": 2.8852813333333334,
+      "max_ms": 4.250348
+    },
+    "worker.spill.compress": {
+      "count": 72,
+      "total_ms": 1875.880702,
+      "mean_ms": 26.05389863888889,
+      "max_ms": 236.509373
+    },
+    "worker.spill.mutex_wait": {
+      "count": 72,
+      "total_ms": 0.011947,
+      "mean_ms": 0.00016593055555555553,
+      "max_ms": 0.000814
+    },
+    "worker.spill.write": {
+      "count": 72,
+      "total_ms": 734.097125,
+      "mean_ms": 10.195793402777777,
+      "max_ms": 44.444764
+    },
+    "worker.unspill.mutex_wait": {
+      "count": 59,
+      "total_ms": 0.012857,
+      "mean_ms": 0.00021791525423728813,
+      "max_ms": 0.000867
+    },
+    "worker.unspill.read": {
+      "count": 59,
+      "total_ms": 1163.279612,
+      "mean_ms": 19.716603593220338,
+      "max_ms": 47.204524
+    },
+    "worker.unspill.decompress": {
+      "count": 59,
+      "total_ms": 1208.119658,
+      "mean_ms": 20.476604372881358,
+      "max_ms": 58.088762
+    },
+    "worker.unspill.deserialize": {
+      "count": 59,
+      "total_ms": 1950.027013,
+      "mean_ms": 33.051305305084746,
+      "max_ms": 75.366391
+    },
+    "scheduler.sender.flush_client": {
+      "count": 3,
+      "total_ms": 235.802127,
+      "mean_ms": 78.600709,
+      "max_ms": 193.777188
+    },
+    "worker.send_data_to_scheduler": {
+      "count": 2,
+      "total_ms": 286.527409,
+      "mean_ms": 143.2637045,
+      "max_ms": 184.750106
+    },
+    "client.receive_result": {
+      "count": 9,
+      "total_ms": 330.532566,
+      "mean_ms": 36.72584066666666,
+      "max_ms": 51.474629
+    },
+    "profile.stats": {
+      "count": 1,
+      "total_ms": 183.018108,
+      "mean_ms": 183.018108,
+      "max_ms": 183.018108
+    }
+  },
+  "worker_outliers": [],
+  "chrome_events": 20006
+}

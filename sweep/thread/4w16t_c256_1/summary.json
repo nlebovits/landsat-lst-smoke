@@ -1,0 +1,327 @@
+{
+  "dashboard": "http://127.0.0.1:44633",
+  "span_source": "query_spans",
+  "n_spans": 98765,
+  "dump_truncated_to": 1000,
+  "dump_rule": "longest spans by duration_ns",
+  "n_spans_dumped": 1000,
+  "by_name": {
+    "profile.imports": {
+      "count": 1,
+      "total_ms": 567.485648,
+      "mean_ms": 567.485648,
+      "max_ms": 567.485648
+    },
+    "profile.boundary": {
+      "count": 1,
+      "total_ms": 96.376646,
+      "mean_ms": 96.376646,
+      "max_ms": 96.376646
+    },
+    "profile.cluster_start": {
+      "count": 1,
+      "total_ms": 527.150403,
+      "mean_ms": 527.150403,
+      "max_ms": 527.150403
+    },
+    "scheduler.metrics": {
+      "count": 111,
+      "total_ms": 111018.888369,
+      "mean_ms": 1000.1701654864864,
+      "max_ms": 1001.149415
+    },
+    "comm.recv": {
+      "count": 7825,
+      "total_ms": 659497.589302,
+      "mean_ms": 84.28084208332268,
+      "max_ms": 109796.624306
+    },
+    "profile.stac_search": {
+      "count": 1,
+      "total_ms": 3642.068041,
+      "mean_ms": 3642.068041,
+      "max_ms": 3642.068041
+    },
+    "profile.sign_assets": {
+      "count": 1,
+      "total_ms": 188.046365,
+      "mean_ms": 188.046365,
+      "max_ms": 188.046365
+    },
+    "profile.graph_build": {
+      "count": 1,
+      "total_ms": 511.539514,
+      "mean_ms": 511.539514,
+      "max_ms": 511.539514
+    },
+    "profile.graph_optimize": {
+      "count": 1,
+      "total_ms": 458.831338,
+      "mean_ms": 458.831338,
+      "max_ms": 458.831338
+    },
+    "profile.compute": {
+      "count": 1,
+      "total_ms": 105795.079596,
+      "mean_ms": 105795.079596,
+      "max_ms": 105795.079596
+    },
+    "client.convert_legacy": {
+      "count": 8,
+      "total_ms": 2258.2082,
+      "mean_ms": 282.276025,
+      "max_ms": 282.276025
+    },
+    "client.dask_order": {
+      "count": 7,
+      "total_ms": 116.979289,
+      "mean_ms": 16.711327,
+      "max_ms": 16.711327
+    },
+    "client.serialize_tasks": {
+      "count": 2,
+      "total_ms": 1097.083142,
+      "mean_ms": 548.541571,
+      "max_ms": 548.541571
+    },
+    "client.submit_graph": {
+      "count": 2,
+      "total_ms": 37.964524,
+      "mean_ms": 18.982262,
+      "max_ms": 18.982262
+    },
+    "scheduler.handle_update_graph": {
+      "count": 1,
+      "total_ms": 23.622687,
+      "mean_ms": 23.622687,
+      "max_ms": 23.622687
+    },
+    "scheduler.ingest.add_tasks": {
+      "count": 1,
+      "total_ms": 5.117674,
+      "mean_ms": 5.117674,
+      "max_ms": 5.117674
+    },
+    "scheduler.ingest.reverse_deps": {
+      "count": 1,
+      "total_ms": 4.397752,
+      "mean_ms": 4.397752,
+      "max_ms": 4.397752
+    },
+    "scheduler.ingest.homes": {
+      "count": 1,
+      "total_ms": 6.192269,
+      "mean_ms": 6.192269,
+      "max_ms": 6.192269
+    },
+    "scheduler.ingest.mark_keys": {
+      "count": 1,
+      "total_ms": 0.001663,
+      "mean_ms": 0.001663,
+      "max_ms": 0.001663
+    },
+    "scheduler.ingest.transitions": {
+      "count": 1,
+      "total_ms": 7.825985,
+      "mean_ms": 7.825985,
+      "max_ms": 7.825985
+    },
+    "scheduler.decide_worker": {
+      "count": 5146,
+      "total_ms": 21.233277,
+      "mean_ms": 0.004126171200932763,
+      "max_ms": 0.652237
+    },
+    "scheduler.ingest.release": {
+      "count": 1,
+      "total_ms": 0.000361,
+      "mean_ms": 0.000361,
+      "max_ms": 0.000361
+    },
+    "scheduler.sender.flush_worker": {
+      "count": 6370,
+      "total_ms": 64.9066,
+      "mean_ms": 0.010189419152276296,
+      "max_ms": 7.455443
+    },
+    "worker.receive_task": {
+      "count": 8182,
+      "total_ms": 116.207848,
+      "mean_ms": 0.014202865802982157,
+      "max_ms": 12.741096
+    },
+    "worker.exec.gil": {
+      "count": 8159,
+      "total_ms": 1799.076796,
+      "mean_ms": 0.22050211986763082,
+      "max_ms": 158.288834
+    },
+    "worker.exec.deserialize": {
+      "count": 8192,
+      "total_ms": 13655.703767,
+      "mean_ms": 1.6669560262451173,
+      "max_ms": 224.993926
+    },
+    "worker.exec.call": {
+      "count": 8180,
+      "total_ms": 4584095.270869,
+      "mean_ms": 560.402844849511,
+      "max_ms": 38429.596267
+    },
+    "worker.store_data": {
+      "count": 8169,
+      "total_ms": 12.225537,
+      "mean_ms": 0.001496576937201616,
+      "max_ms": 0.21989
+    },
+    "worker.handle_event": {
+      "count": 8177,
+      "total_ms": 2002.259148,
+      "mean_ms": 0.24486476067017243,
+      "max_ms": 27.065518
+    },
+    "worker.task_complete": {
+      "count": 8173,
+      "total_ms": 346.588362,
+      "mean_ms": 0.04240650458827848,
+      "max_ms": 7.371206
+    },
+    "scheduler.tasks_finished": {
+      "count": 6091,
+      "total_ms": 139.721444,
+      "mean_ms": 0.02293899917911673,
+      "max_ms": 3.255064
+    },
+    "tcp.send.serialize": {
+      "count": 1465,
+      "total_ms": 1101.70874,
+      "mean_ms": 0.7520196177474402,
+      "max_ms": 10.811121
+    },
+    "tcp.send.queue": {
+      "count": 1466,
+      "total_ms": 2539.883528,
+      "mean_ms": 1.732526281036835,
+      "max_ms": 114.901252
+    },
+    "tcp.send.compress": {
+      "count": 1466,
+      "total_ms": 1280.242226,
+      "mean_ms": 0.8732893765347886,
+      "max_ms": 115.270451
+    },
+    "tcp.send.write_queue": {
+      "count": 1465,
+      "total_ms": 558.351443,
+      "mean_ms": 0.38112726484641635,
+      "max_ms": 10.960714
+    },
+    "worker.transfer.recv": {
+      "count": 1423,
+      "total_ms": 430.343769,
+      "mean_ms": 0.30242007659873504,
+      "max_ms": 14.91337
+    },
+    "tcp.send.write": {
+      "count": 1420,
+      "total_ms": 271.192167,
+      "mean_ms": 0.19098039929577465,
+      "max_ms": 14.615183
+    },
+    "tcp.recv.read": {
+      "count": 1421,
+      "total_ms": 263.206717,
+      "mean_ms": 0.1852264018296974,
+      "max_ms": 14.641864
+    },
+    "tcp.recv.queue": {
+      "count": 1424,
+      "total_ms": 1259.541747,
+      "mean_ms": 0.8845096537921349,
+      "max_ms": 216.615375
+    },
+    "tcp.recv.decompress": {
+      "count": 1424,
+      "total_ms": 1483.765598,
+      "mean_ms": 1.0419702233146066,
+      "max_ms": 13.607944
+    },
+    "worker.deserialize": {
+      "count": 1420,
+      "total_ms": 1344.80423,
+      "mean_ms": 0.9470452323943662,
+      "max_ms": 8.913073
+    },
+    "scheduler.data_received": {
+      "count": 1359,
+      "total_ms": 6.965564,
+      "mean_ms": 0.005125506990434143,
+      "max_ms": 0.216404
+    },
+    "worker.idle": {
+      "count": 188,
+      "total_ms": 95954.90582,
+      "mean_ms": 510.39843521276595,
+      "max_ms": 3199.737385
+    },
+    "scheduler.sender.flush_client": {
+      "count": 3,
+      "total_ms": 190.050928,
+      "mean_ms": 63.350309333333335,
+      "max_ms": 140.207845
+    },
+    "worker.send_data_to_scheduler": {
+      "count": 2,
+      "total_ms": 194.66584,
+      "mean_ms": 97.33292,
+      "max_ms": 149.479427
+    },
+    "client.receive_result": {
+      "count": 9,
+      "total_ms": 269.248085,
+      "mean_ms": 29.91645388888889,
+      "max_ms": 47.667753
+    },
+    "profile.stats": {
+      "count": 1,
+      "total_ms": 91.689504,
+      "mean_ms": 91.689504,
+      "max_ms": 91.689504
+    }
+  },
+  "worker_outliers": [
+    {
+      "worker": "unix:///tmp/user/1000/frisky-sock-6vzcggv1/worker-3196386-0.sock",
+      "score": 589.9754593135,
+      "deviations": [
+        {
+          "span": "worker.exec.call",
+          "excess_s": 589.9754593135,
+          "sigma": 5.110439874866391
+        }
+      ]
+    },
+    {
+      "worker": "unix:///tmp/user/1000/frisky-sock-6vzcggv1/worker-3196387-0.sock",
+      "score": 2.0827740725,
+      "deviations": [
+        {
+          "span": "tcp.recv.queue",
+          "excess_s": 0.986202903,
+          "sigma": 8.218084563601739
+        },
+        {
+          "span": "worker.exec.gil",
+          "excess_s": 0.9019053295,
+          "sigma": 50.0
+        },
+        {
+          "span": "worker.send_data_to_scheduler",
+          "excess_s": 0.19466584,
+          "sigma": 4.0
+        }
+      ]
+    }
+  ],
+  "chrome_events": 1012
+}

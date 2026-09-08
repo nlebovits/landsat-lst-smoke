@@ -1,0 +1,63 @@
+Transfers  15,316 messages, 24,224 keys (1.6 keys/msg)
+  msg size   p10 212.54 KiB, p50 768.08 KiB, p90 10.00 MiB
+  bytes      50.84 GiB logical -> 23.59 GiB wire (ratio 0.46)
+  wire       1.8m at 481.86 MiB/s per stream (p50 827.39 MiB/s); aggregate 618.26 MiB/s over 1.4m
+  queue      send 8.2m + writer 6.8m + recv 52.6s
+             queue = waiting before transfer work can proceed: sender prep, writer backlog, receiver decode slot.
+  cpu        serialize 1.3m, compress 3.7m, decompress 4.0m, deserialize 3.0m
+             cpu = work spent making bytes movable: serialize, compress, decompress, deserialize.
+  network   internal 23.59 GiB wire over 1.4m (286.89 MiB/s aggregate)
+             internal = worker-to-worker transfer wire bytes; external incoming/outgoing are not retained for this range.
+
+            │0s              20              40               60                80s│Total (% worker cap)
+            ├──────────────────────────────────────────────────────────────────────┤
+  serialize │▁▁▁▁▂▆▂▅▁▁▁▁▁▁▁▁▃▅▅▂▁▁▁▁▁▅▅▂▁▁▁▁▁▃▅▄▂▁▁▁▁▁▃▅▁▁▁▁▁▁▁▁▁▁▂▅▃▂▂▂▁▂▁▁▁▁▁▁▁▁│    80.1 s   11.9%
+ send queue │▁▁▁▁▁▃▂▃▁▁▁▁▁▁▁▁▂▃▄▂▂▁▁▁▁▄▅▄▁▁▁▁▁▄▅▃▂▁▁▁▁▁▃▂▆▄▁▁▁▁▁▁▁▂▃▆▇▅▅▇▇▆▇▇▅▆▅▄▅▁│   490.0 s   72.7%
+   compress │▁▁▁▁▂▅▂▆▁▁▁▁▁▁▁▁▂▄▅▃▂▁▁▁▂▄▅▃▁▁▁▁▁▂▄▃▂▁▁▁▁▂▃▃▄▂▁▁▁▁▁▁▁▂▂▅▇▆▆▇▇▆▇▆▅▄▅▃▄▁│   221.5 s   32.9%
+write queue │▁▁▁▁▂▅▃▄▁▁▁▁▁▁▁▁▃▇▄▂▂▁▁▁▁▄▅▂▁▁▁▁▁▅▄▂▁▁▁▁▁▁▄▃▄▂▁▁▁▁▁▁▁▂▅▇▅▅▅▆▅▆▇▇▃▄▃▂▂▁│   407.2 s   60.4%
+      write │▁▁▁▁▂▄▂▃▁▁▁▁▁▁▁▁▂▅▃▂▁▁▁▁▁▂▃▂▁▁▁▁▁▂▂▁▁▁▁▁▁▁▂▃▂▁▁▁▁▁▁▁▁▁▂▄▃▃▂▃▃▃▃▅▂▂▂▁▂▁│    74.0 s   11.0%
+  wire+read │▁▁▁▁▂▅▂▄▁▁▁▁▁▁▁▁▂▅▃▂▂▁▁▁▂▃▄▂▁▁▁▁▁▃▄▂▁▁▁▁▁▂▃▃▂▂▁▁▁▁▁▂▁▂▃▅▄▄▃▄▄▃▄▅▃▂▂▁▂▁│   108.0 s   16.0%
+       read │▁▁▁▁▂▄▂▃▁▁▁▁▁▁▁▁▂▅▃▂▁▁▁▁▁▃▃▂▁▁▁▁▁▂▂▁▁▁▁▁▁▁▂▃▂▁▁▁▁▁▁▁▁▂▂▄▃▃▃▃▄▃▄▅▂▂▂▁▂▁│    80.9 s   12.0%
+ recv queue │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▁▁▁▁▁▁▂▃▂▁▁▁▁▁▁▂▁▁▁▁▁▁▁▂▁▃▃▁▁▁▁▁▁▁▁▁▂▂▂▂▂▄▂▁▁▂▁▂▂▂▁│    52.6 s    7.8%
+ decompress │▁▁▁▁▁▄▃▅▁▁▁▁▁▁▁▁▁▅▅▃▂▁▁▁▂▄▆▂▁▁▁▁▁▂▆▅▃▁▁▁▁▂▄▄▆▃▁▁▁▁▁▁▁▁▂▇█▇▇█▇█▇▇▇▅▆▄▅▁│   238.1 s   35.3%
+deserialize │▁▁▁▁▂▄▃▄▁▁▁▁▁▁▁▁▁▅▅▄▃▁▁▁▂▃▅▃▁▁▁▂▁▃▅▄▂▁▁▁▁▂▄▄▄▃▁▁▁▁▁▂▁▂▃▆▆▇▆▆▇▆▆▇▇▅▄▄▄▁│   182.1 s   27.0%
+            └──────────────────────────────────────────────────────────────────────┘
+
+                                                              Per-prefix transfer costs                                                              
+Prefix                                          Msgs    Keys/msg       Logical           Wire    Ratio    Queue    Codec    Wire time       BW/stream
+rechunk-merge                                  3,258         1.2     32.83 GiB      15.31 GiB     0.47     9.2m     5.7m         1.3m    426.27 MiB/s
+getitem-sum                                    8,233         1.5      4.58 GiB       1.73 GiB     0.38     4.0m    55.6s        13.2s    354.56 MiB/s
+where                                            352         1.0      6.12 GiB       3.74 GiB     0.61     7.0s    16.1s         6.0s      1.02 GiB/s
+sum-partial                                    1,588         1.1      3.14 GiB       1.22 GiB     0.39     1.7m    24.3s         4.6s    707.14 MiB/s
+rechunk-split                                     24         1.0      2.00 GiB    1001.39 MiB     0.49     1.7s     6.8s         1.8s      1.11 GiB/s
+stack-sum-aggregate-astype                       344         1.1    696.15 MiB     283.17 MiB     0.41    30.5s     7.1s        874ms    796.61 MiB/s
+lwir11                                           450         6.1     48.03 MiB      48.04 MiB     1.00     5.4s     98ms        622ms     77.27 MiB/s
+shuffle-split                                    388         1.2    760.95 MiB     260.43 MiB     0.34     3.9s     2.7s        600ms      1.24 GiB/s
+finalize-hlgfinalizecompute                       95         5.0     84.48 MiB      33.51 MiB     0.40     4.9s     1.8s        551ms    153.22 MiB/s
+sum                                              142         1.0    252.98 MiB     146.16 MiB     0.57    469ms    771ms        313ms    807.21 MiB/s
+qa_pixel                                         323         6.3     14.72 MiB      14.72 MiB     1.00    847ms     20ms        196ms     75.00 MiB/s
+invert                                            23         1.0    214.06 MiB     114.63 MiB     0.54    151ms     1.0s        178ms      1.18 GiB/s
+transpose                                         19         1.0    128.43 MiB     103.34 MiB     0.80     54ms    328ms        130ms    986.78 MiB/s
+astype                                            70         1.1     17.88 MiB      12.63 MiB     0.71     2.4s    195ms        118ms    151.90 MiB/s
+custom_nanquantile-getitem-transpose-astype        7         1.4      6.00 MiB      39.58 KiB     0.01    301ms     30ms         51ms    117.91 MiB/s
+
+Transfer sizes  15,316 span messages, 24,224 keys (1.6 keys/msg)
+  messages  p50 768.08 KiB, p90 10.00 MiB; per-key p50 384.04 KiB, p90 8.30 MiB
+  bandwidth 481.86 MiB/s per stream (from recv spans)
+                            Transfer size distribution                             
+Size                     Msgs     Msg bytes      Keys     Key bytes       BW/stream
+0 B-4.00 KiB              369    518.99 KiB     4,874      4.73 MiB      2.38 MiB/s
+4.00 KiB-16.00 KiB        505      4.21 MiB         1     10.21 KiB     10.46 MiB/s
+16.00 KiB-64.00 KiB         1     20.42 KiB        15    536.57 KiB      2.76 MiB/s
+64.00 KiB-256.00 KiB      793    136.12 MiB     2,198    397.47 MiB    178.58 MiB/s
+256.00 KiB-1.00 MiB     6,945      3.20 GiB    10,189      3.90 GiB    319.98 MiB/s
+1.00 MiB-4.00 MiB       3,309      5.76 GiB     3,237      6.08 GiB    580.00 MiB/s
+4.00 MiB-16.00 MiB      2,465     22.05 GiB     3,075     26.64 GiB    474.47 MiB/s
+16.00 MiB-64.00 MiB       910     17.79 GiB       616     11.91 GiB    493.82 MiB/s
+64.00 MiB-256.00 MiB       19      1.92 GiB        19      1.92 GiB      1.07 GiB/s
+
+Next transfer checks:
+  - Timeline: see when transfer stages ran and whether queue, CPU, or wire dominates.
+    frisky observe timeline wc-eight/spans.json --view detailed
+  - Task prefixes: compare transfer cost with compute, disk, and task state by prefix.
+    frisky observe prefixes wc-eight/spans.json

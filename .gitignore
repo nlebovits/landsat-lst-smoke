@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+
+# Raw frisky span dumps and Chrome traces. Tens of MB each, regenerable by
+# re-running with --span-dump-limit. The aggregates that the findings rest on
+# live in summary.json and the frisky-*.txt reports, which are committed.
+spans.json
+trace.json

@@ -1,0 +1,31 @@
+                              │0s                10                20                 30                40                50    54s│     Total
+                              ├────────────────────────────────────────────────────────────────────────────────────────────────────┤
+worker.exec.call              │           ██████████████████████████████████████████████████████▇█▆▆▆▆▇▇▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▅▅▄▄▃▂▃▁│   862.5 s
+comm.recv                     │  ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃│   312.9 s
+[2mprofile.compute              [0m │          ▂▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▂│[2m    48.1 s[0m
+[2mworker.exec.deserialize      [0m │          ██                                                                                     ▁  │[2m     5.8 s[0m
+[2mprofile.stac_search          [0m │  ▂▃▃▃▃▃▃▂                                                                                          │[2m     3.9 s[0m
+[2mworker.deserialize           [0m │                               ▁          ▁▁    ▁ ▁      ▁      ▁▁▁ ▁  ▁▁  ▁▁      ▁  ▁ ▁▁▁▁  ▁  ▁  │[2m  977.5 ms[0m
+[2mtcp.send.queue               [0m │                                                                                                 ▃  │[2m  872.3 ms[0m
+[2mprofile.imports              [0m │▃▁                                                                                                  │[2m  652.0 ms[0m
+[2mprofile.cluster_start        [0m │ ▂▂                                                                                                 │[2m  542.6 ms[0m
+[2mtcp.send.serialize           [0m │                                                                 ▁▁    ▁   ▁▁           ▁ ▁   ▁  ▁  │[2m  541.3 ms[0m
+[2mtcp.send.compress            [0m │                                                ▁        ▁      ▁▁▁ ▁  ▁▁  ▁▁         ▁ ▁ ▁   ▁  ▁  │[2m  482.6 ms[0m
+[2mworker.transfer.recv         [0m │                                                         ▁       ▁▁ ▁  ▁▁  ▁▁         ▁ ▁ ▁   ▁  ▁  │[2m  311.7 ms[0m
+[2mtcp.send.write               [0m │                                                         ▁       ▁▁ ▁  ▁▁  ▁▁         ▁ ▁ ▁   ▁  ▁  │[2m  302.7 ms[0m
+[2mtcp.recv.read                [0m │                                                         ▁       ▁▁ ▁  ▁▁  ▁▁         ▁ ▁ ▁   ▁  ▁  │[2m  276.6 ms[0m
+[2mprofile.sign_assets          [0m │         ▂▁                                                                                         │[2m  206.7 ms[0m
+[2mprofile.graph_build          [0m │          ▂                                                                                         │[2m  206.3 ms[0m
+[2mscheduler.sender.flush_client[0m │                                                                                                  ▁▁│[2m  194.0 ms[0m
+[2mworker.send_data_to_scheduler[0m │                                                                                                 ▁▁▁│[2m  187.6 ms[0m
+[2mprofile.boundary             [0m │ ▂                                                                                                  │[2m  169.0 ms[0m
+[2mclient.receive_result        [0m │                                                                                                  ▁▁│[2m  124.5 ms[0m
+[2mprofile.stats                [0m │                                                                                                   ▁│[2m  105.1 ms[0m
+[2mclient.serialize_tasks       [0m │          ▁                                                                                         │[2m   98.2 ms[0m
+[2mtcp.recv.decompress          [0m │                                           ▁    ▁               ▁           ▁                       │[2m   65.1 ms[0m
+[2mtcp.send.write_queue         [0m │                                                                                          ▁      ▁  │[2m   61.9 ms[0m
+[2mprofile.graph_optimize       [0m │          ▁                                                                                         │[2m   33.9 ms[0m
+[2mclient.convert_legacy        [0m │          ▁                                                                                         │[2m   26.0 ms[0m
+                              └────────────────────────────────────────────────────────────────────────────────────────────────────┘
+Memory                        │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂│     15% peak
+Network                       │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▂▁▁▁▁▁▁▁▂▂▂▁▁▁▁▃▃▅▅▅▂▂▁▅▅▁▄▄▄▁▁▁▁▁▁▁▁▂▂███▃▃▁▄▄▄▁██│   310.5 MB/s

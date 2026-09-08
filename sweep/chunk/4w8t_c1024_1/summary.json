@@ -1,0 +1,327 @@
+{
+  "dashboard": "http://127.0.0.1:36951",
+  "span_source": "query_spans",
+  "n_spans": 9391,
+  "dump_truncated_to": 1000,
+  "dump_rule": "longest spans by duration_ns",
+  "n_spans_dumped": 1000,
+  "by_name": {
+    "profile.imports": {
+      "count": 1,
+      "total_ms": 651.997712,
+      "mean_ms": 651.997712,
+      "max_ms": 651.997712
+    },
+    "profile.boundary": {
+      "count": 1,
+      "total_ms": 168.971497,
+      "mean_ms": 168.971497,
+      "max_ms": 168.971497
+    },
+    "profile.cluster_start": {
+      "count": 1,
+      "total_ms": 542.587648,
+      "mean_ms": 542.587648,
+      "max_ms": 542.587648
+    },
+    "scheduler.metrics": {
+      "count": 53,
+      "total_ms": 53005.585879,
+      "mean_ms": 1000.1053939433962,
+      "max_ms": 1000.77565
+    },
+    "comm.recv": {
+      "count": 975,
+      "total_ms": 313656.696769,
+      "mean_ms": 321.69917617333334,
+      "max_ms": 51340.205699
+    },
+    "profile.stac_search": {
+      "count": 1,
+      "total_ms": 3854.516925,
+      "mean_ms": 3854.516925,
+      "max_ms": 3854.516925
+    },
+    "profile.sign_assets": {
+      "count": 1,
+      "total_ms": 206.683627,
+      "mean_ms": 206.683627,
+      "max_ms": 206.683627
+    },
+    "profile.graph_build": {
+      "count": 1,
+      "total_ms": 206.339323,
+      "mean_ms": 206.339323,
+      "max_ms": 206.339323
+    },
+    "profile.graph_optimize": {
+      "count": 1,
+      "total_ms": 33.859318,
+      "mean_ms": 33.859318,
+      "max_ms": 33.859318
+    },
+    "profile.compute": {
+      "count": 1,
+      "total_ms": 48095.453021,
+      "mean_ms": 48095.453021,
+      "max_ms": 48095.453021
+    },
+    "client.convert_legacy": {
+      "count": 2,
+      "total_ms": 26.029274,
+      "mean_ms": 13.014637,
+      "max_ms": 13.014637
+    },
+    "client.dask_order": {
+      "count": 2,
+      "total_ms": 2.31783,
+      "mean_ms": 1.158915,
+      "max_ms": 1.158915
+    },
+    "client.serialize_tasks": {
+      "count": 2,
+      "total_ms": 98.203492,
+      "mean_ms": 49.101746,
+      "max_ms": 49.101746
+    },
+    "client.submit_graph": {
+      "count": 2,
+      "total_ms": 3.10568,
+      "mean_ms": 1.55284,
+      "max_ms": 1.55284
+    },
+    "scheduler.handle_update_graph": {
+      "count": 1,
+      "total_ms": 1.039732,
+      "mean_ms": 1.039732,
+      "max_ms": 1.039732
+    },
+    "scheduler.ingest.add_tasks": {
+      "count": 1,
+      "total_ms": 0.291464,
+      "mean_ms": 0.291464,
+      "max_ms": 0.291464
+    },
+    "scheduler.ingest.reverse_deps": {
+      "count": 1,
+      "total_ms": 0.128971,
+      "mean_ms": 0.128971,
+      "max_ms": 0.128971
+    },
+    "scheduler.ingest.homes": {
+      "count": 1,
+      "total_ms": 0.248945,
+      "mean_ms": 0.248945,
+      "max_ms": 0.248945
+    },
+    "scheduler.ingest.mark_keys": {
+      "count": 1,
+      "total_ms": 0.000641,
+      "mean_ms": 0.000641,
+      "max_ms": 0.000641
+    },
+    "scheduler.ingest.transitions": {
+      "count": 1,
+      "total_ms": 0.355463,
+      "mean_ms": 0.355463,
+      "max_ms": 0.355463
+    },
+    "scheduler.decide_worker": {
+      "count": 432,
+      "total_ms": 1.830202,
+      "mean_ms": 0.004236578703703703,
+      "max_ms": 0.033994
+    },
+    "scheduler.ingest.release": {
+      "count": 1,
+      "total_ms": 0.008045,
+      "mean_ms": 0.008045,
+      "max_ms": 0.008045
+    },
+    "scheduler.sender.flush_worker": {
+      "count": 622,
+      "total_ms": 7.65957,
+      "mean_ms": 0.012314421221864952,
+      "max_ms": 0.890734
+    },
+    "worker.receive_task": {
+      "count": 614,
+      "total_ms": 7.183957,
+      "mean_ms": 0.011700255700325733,
+      "max_ms": 0.644123
+    },
+    "worker.exec.gil": {
+      "count": 613,
+      "total_ms": 71.644041,
+      "mean_ms": 0.11687445513866232,
+      "max_ms": 2.090514
+    },
+    "worker.exec.deserialize": {
+      "count": 615,
+      "total_ms": 5995.690106,
+      "mean_ms": 9.749089603252033,
+      "max_ms": 185.394406
+    },
+    "worker.exec.call": {
+      "count": 614,
+      "total_ms": 863267.626502,
+      "mean_ms": 1405.9733330651468,
+      "max_ms": 42886.132735
+    },
+    "worker.store_data": {
+      "count": 615,
+      "total_ms": 1.508357,
+      "mean_ms": 0.002452613008130081,
+      "max_ms": 0.038151
+    },
+    "worker.handle_event": {
+      "count": 611,
+      "total_ms": 124.374652,
+      "mean_ms": 0.20355916857610473,
+      "max_ms": 2.669135
+    },
+    "worker.task_complete": {
+      "count": 615,
+      "total_ms": 74.159377,
+      "mean_ms": 0.12058435284552846,
+      "max_ms": 2.58598
+    },
+    "scheduler.tasks_finished": {
+      "count": 500,
+      "total_ms": 13.07867,
+      "mean_ms": 0.02615734,
+      "max_ms": 0.298618
+    },
+    "tcp.send.serialize": {
+      "count": 257,
+      "total_ms": 596.988157,
+      "mean_ms": 2.3229111167315173,
+      "max_ms": 94.985751
+    },
+    "worker.idle": {
+      "count": 18,
+      "total_ms": 17691.066361,
+      "mean_ms": 982.8370200555556,
+      "max_ms": 4084.303035
+    },
+    "tcp.send.queue": {
+      "count": 257,
+      "total_ms": 974.600727,
+      "mean_ms": 3.792220727626459,
+      "max_ms": 33.868946
+    },
+    "tcp.send.compress": {
+      "count": 257,
+      "total_ms": 636.173935,
+      "mean_ms": 2.4753849610894942,
+      "max_ms": 35.775435
+    },
+    "tcp.send.write_queue": {
+      "count": 257,
+      "total_ms": 237.337818,
+      "mean_ms": 0.9234934552529183,
+      "max_ms": 7.764514
+    },
+    "tcp.send.write": {
+      "count": 205,
+      "total_ms": 432.932048,
+      "mean_ms": 2.111863648780488,
+      "max_ms": 19.826846
+    },
+    "worker.transfer.recv": {
+      "count": 204,
+      "total_ms": 454.716527,
+      "mean_ms": 2.2290025833333336,
+      "max_ms": 19.932273
+    },
+    "tcp.recv.read": {
+      "count": 205,
+      "total_ms": 411.827587,
+      "mean_ms": 2.0089150585365854,
+      "max_ms": 19.891506
+    },
+    "tcp.recv.queue": {
+      "count": 205,
+      "total_ms": 20.704415,
+      "mean_ms": 0.10099714634146342,
+      "max_ms": 4.429164
+    },
+    "tcp.recv.decompress": {
+      "count": 205,
+      "total_ms": 163.539675,
+      "mean_ms": 0.797754512195122,
+      "max_ms": 31.659014
+    },
+    "worker.deserialize": {
+      "count": 205,
+      "total_ms": 1139.646552,
+      "mean_ms": 5.5592514731707325,
+      "max_ms": 60.980515
+    },
+    "scheduler.data_received": {
+      "count": 202,
+      "total_ms": 1.231507,
+      "mean_ms": 0.006096569306930692,
+      "max_ms": 0.03799
+    },
+    "scheduler.sender.flush_client": {
+      "count": 3,
+      "total_ms": 194.006479,
+      "mean_ms": 64.66882633333334,
+      "max_ms": 145.316196
+    },
+    "worker.send_data_to_scheduler": {
+      "count": 2,
+      "total_ms": 187.583389,
+      "mean_ms": 93.7916945,
+      "max_ms": 146.579375
+    },
+    "client.receive_result": {
+      "count": 6,
+      "total_ms": 124.527952,
+      "mean_ms": 20.754658666666668,
+      "max_ms": 48.81241
+    },
+    "profile.stats": {
+      "count": 1,
+      "total_ms": 105.11948,
+      "mean_ms": 105.11948,
+      "max_ms": 105.11948
+    }
+  },
+  "worker_outliers": [
+    {
+      "worker": "unix:///tmp/user/1000/frisky-sock-325icc36/worker-3201835-0.sock",
+      "score": 0.8916998895,
+      "deviations": [
+        {
+          "span": "tcp.send.queue",
+          "excess_s": 0.7952288385,
+          "sigma": 13.66151869612067
+        },
+        {
+          "span": "tcp.send.write_queue",
+          "excess_s": 0.096471051,
+          "sigma": 3.56851930672387
+        }
+      ]
+    },
+    {
+      "worker": "unix:///tmp/user/1000/frisky-sock-325icc36/worker-3201834-0.sock",
+      "score": 0.1417805935,
+      "deviations": [
+        {
+          "span": "worker.send_data_to_scheduler",
+          "excess_s": 0.126077368,
+          "sigma": 4.147790003931331
+        },
+        {
+          "span": "tcp.recv.queue",
+          "excess_s": 0.0157032255,
+          "sigma": 29.291840360537336
+        }
+      ]
+    }
+  ],
+  "chrome_events": 1012
+}

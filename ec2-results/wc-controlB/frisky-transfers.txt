@@ -1,0 +1,62 @@
+Transfers  10,913 messages, 18,427 keys (1.7 keys/msg)
+  msg size   p10 256.04 KiB, p50 985.50 KiB, p90 10.00 MiB
+  bytes      39.34 GiB logical -> 19.69 GiB wire (ratio 0.50)
+  wire       38.2s at 1.03 GiB/s per stream (p50 1.70 GiB/s); aggregate 372.65 MiB/s over 1.8m
+  queue      send 5.6m + writer 2.3m + recv 40.4s
+             queue = waiting before transfer work can proceed: sender prep, writer backlog, receiver decode slot.
+  cpu        serialize 34.6s, compress 56.9s, decompress 1.2m, deserialize 1.3m
+             cpu = work spent making bytes movable: serialize, compress, decompress, deserialize.
+  network   internal 19.69 GiB wire over 1.8m (186.51 MiB/s aggregate)
+             internal = worker-to-worker transfer wire bytes; external incoming/outgoing are not retained for this range.
+
+            │0s          20           40           60           80          100108s│Total (% worker cap)
+            ├──────────────────────────────────────────────────────────────────────┤
+  serialize │▁▁▁▁▁▁▁▁▁▂▂▂▂▄▁▄▄▁▁▁▁▁▁▄▅▁▁▁▁▁▁▁▄▃▁▁▁▁▁▁▁▁▁▁▂▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁▄▁▁▁▂▂▁▃▁▁│    34.6 s    8.0%
+ send queue │▁▁▁▁▁▁▃▁▁▂▁▂▁▄▁▃▄▃▂▁▂▁▁▄▇▂▁▁▁▁▁▁▄▅▁▁▁▁▁▁▁▁▂▁▆▄▁▁▁▁▁▁▁▁▁▁▁▁▂▁▇▆▅▄▇█▅▄▇▄│   336.4 s   77.8%
+   compress │▁▂▁▁▁▁▂▁▁▂▂▂▂▅▁▃▃▁▂▁▁▁▁▄▅▁▁▁▁▁▁▁▃▃▁▁▁▁▁▁▁▁▁▁▂▃▁▁▁▁▁▁▁▁▁▁▁▁▂▁▅▆▄▄▅▄▃▃▅▂│    56.9 s   13.2%
+write queue │▁▁▁▁▁▁▂▁▁▂▁▁▁▃▁▁▂▁▂▁▁▁▁▃▃▁▁▁▁▁▁▁▄▅▁▁▁▁▁▁▁▁▂▁▅▅▁▁▁▁▁▁▁▁▁▁▁▁▁▁▆▆▅▃▆▆▃▄▇▂│   138.6 s   32.0%
+      write │▁▁▁▁▁▁▂▁▁▂▁▁▁▂▁▂▂▁▁▁▁▁▁▂▃▁▁▁▁▁▁▁▃▂▁▁▁▁▁▁▁▁▁▁▂▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▄▃▂▃▂▂▃▃▁│    27.9 s    6.5%
+  wire+read │▁▁▁▁▁▁▂▁▁▂▂▁▂▃▁▂▂▁▁▁▁▁▁▃▃▁▁▁▁▁▁▁▃▃▁▁▁▁▁▁▁▁▂▁▂▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▄▅▃▂▄▃▂▃▄▁│    38.2 s    8.8%
+       read │▁▁▁▁▁▁▂▁▁▂▁▁▁▂▁▂▂▁▁▁▁▁▁▂▃▁▁▁▁▁▁▁▃▂▁▁▁▁▁▁▁▁▁▁▂▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▄▃▂▄▃▂▃▃▁│    30.8 s    7.1%
+ recv queue │▁▁▁▁▁▁▂▁▁▁▁▁▁▂▁▁▃▁▁▁▁▁▁▂▂▃▁▁▁▁▁▁▃▂▁▁▁▁▁▁▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▅▃▁▁▃▁▁▃▃│    40.4 s    9.3%
+ decompress │▁▂▁▁▁▁▃▁▁▁▂▂▂▅▁▅▆▁▂▁▂▁▁▅▅▂▁▁▁▁▁▁▃▂▁▁▁▁▁▁▁▁▁▁▂▃▁▁▁▁▁▁▁▁▁▁▁▁▂▁▅▆▄▄▅▄▅▃▆▃│    71.2 s   16.5%
+deserialize │▁▂▁▁▁▁▃▁▁▂▂▂▂▅▁▃▅▂▂▁▂▂▁▄▄▂▁▁▁▁▁▂▄▄▁▂▁▁▁▁▁▁▁▁▃▄▁▁▁▁▁▂▂▁▁▂▂▁▃▁▆▇▅▄▆▅▄▄▇▃│    78.3 s   18.1%
+            └──────────────────────────────────────────────────────────────────────┘
+
+                                                             Per-prefix transfer costs                                                              
+Prefix                                          Msgs    Keys/msg       Logical          Wire    Ratio    Queue    Codec    Wire time       BW/stream
+rechunk-merge                                  2,622         1.2     27.41 GiB     15.54 GiB     0.57     6.0m     1.6m        29.1s    963.86 MiB/s
+getitem-sum                                    5,476         1.7      3.37 GiB      1.16 GiB     0.34     1.2m    12.8s         4.3s    798.13 MiB/s
+where                                            260         1.0      4.43 GiB      1.86 GiB     0.42     3.2s    10.0s         2.2s      1.99 GiB/s
+sum-partial                                    1,179         1.1      2.39 GiB    751.29 MiB     0.31     1.0m     5.3s         1.3s      1.91 GiB/s
+shuffle-split                                    393         1.1    818.23 MiB    191.40 MiB     0.23     2.5s     1.7s        366ms      2.18 GiB/s
+stack-sum-aggregate-astype                       291         1.0    554.50 MiB    225.36 MiB     0.41     8.8s     1.4s        345ms      1.57 GiB/s
+finalize-hlgfinalizecompute                       79         5.1     70.65 MiB     31.00 MiB     0.44     1.5s    365ms        153ms    461.17 MiB/s
+lwir11                                           264         6.8      1.77 MiB      1.77 MiB     1.00    122ms      3ms        121ms     14.61 MiB/s
+rechunk-split                                      3         1.0    170.59 MiB     99.07 MiB     0.58      2ms    282ms         89ms      1.88 GiB/s
+qa_pixel                                         267         5.7      1.53 MiB      1.54 MiB     1.00    133ms      2ms         69ms     22.10 MiB/s
+sum                                               28         1.1     50.62 MiB     48.73 MiB     0.96     84ms     79ms         57ms    886.84 MiB/s
+invert                                             8         1.0     62.27 MiB     62.27 MiB     1.00     28ms     83ms         45ms      1.35 GiB/s
+custom_nanquantile-getitem-transpose-astype        1         3.2     20.72 MiB     19.19 MiB     0.93     2.2s     17ms         29ms    717.63 MiB/s
+transpose                                          3         1.0     28.30 MiB     28.30 MiB     1.00     18ms     43ms         24ms      1.16 GiB/s
+astype                                            38         1.1     10.44 MiB     10.34 MiB     0.99    666ms     15ms         13ms    819.35 MiB/s
+
+Transfer sizes  10,913 span messages, 18,427 keys (1.7 keys/msg)
+  messages  p50 985.50 KiB, p90 10.00 MiB; per-key p50 384.04 KiB, p90 10.00 MiB
+  bandwidth 1.03 GiB/s per stream (from recv spans)
+                            Transfer size distribution                            
+Size                     Msgs     Msg bytes     Keys     Key bytes       BW/stream
+0 B-4.00 KiB              230    333.37 KiB    3,400      3.32 MiB      9.03 MiB/s
+4.00 KiB-16.00 KiB        361      3.00 MiB        1     10.21 KiB     17.95 MiB/s
+64.00 KiB-256.00 KiB      350     60.36 MiB    1,825    340.76 MiB    434.15 MiB/s
+256.00 KiB-1.00 MiB     4,546      2.30 GiB    7,781      2.95 GiB    703.37 MiB/s
+1.00 MiB-4.00 MiB       2,746      4.64 GiB    2,402      4.60 GiB      1.36 GiB/s
+4.00 MiB-16.00 MiB      1,890     16.64 GiB    2,522     21.84 GiB    995.52 MiB/s
+16.00 MiB-64.00 MiB       788     15.54 GiB      494      9.46 GiB      1.12 GiB/s
+64.00 MiB-256.00 MiB        2    165.02 MiB        2    165.02 MiB      1.83 GiB/s
+
+Next transfer checks:
+  - Timeline: see when transfer stages ran and whether queue, CPU, or wire dominates.
+    frisky observe timeline wc-controlB/spans.json --view detailed
+  - Task prefixes: compare transfer cost with compute, disk, and task state by prefix.
+    frisky observe prefixes wc-controlB/spans.json

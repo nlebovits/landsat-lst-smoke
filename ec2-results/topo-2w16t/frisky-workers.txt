@@ -1,0 +1,4 @@
+                                                            Workers from spans (topo-2w16t/spans.json)                                                             
+Worker                                                 Spans    Ignored    Span time    Window    Top spans                                                        
+unix:///tmp/frisky-sock-icpcj63c/worker-2680-0.sock     7859         54        23.6m      2.6m    worker.exec.call 17.6m, tcp.send.queue 4.2m, tcp.recv.queue 23.6s
+unix:///tmp/frisky-sock-icpcj63c/worker-2681-0.sock     8411         50        22.7m      2.6m    worker.exec.call 18.1m, tcp.send.queue 1.9m, tcp.recv.queue 1.3m 

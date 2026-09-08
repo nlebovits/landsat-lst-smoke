@@ -1,0 +1,52 @@
+Overview  wc-controlA/spans.json
+
+  perf    wall-clock 143.7s   workers 4   tasks 3   spans 530846
+  memory 26.80 GiB / 48.00 GiB (56% peak)   spilled 10.12 GiB   unspilled 5.21 GiB   network recv 37.60 GiB
+
+Components
+           │0s       20        40       60        80        100      120      140s│     Total
+           ├──────────────────────────────────────────────────────────────────────┤
+   compute │          ▃██████████████████████████████████████████████████████████▅│  2187.5 s
+   network │           ▁▃▂▂▃▄▂▁██▂▂██▄▄▂▃█▃▃▂▄█▄▃▁▂▂ ▅▇█▃▁▁▁ ▁▁▁▁▁▁▁▁▁▁▃▄▇███████▁│   858.5 s
+      disk │                             ▂▃▂ ▁▄▂▁▁ ▁ ▁ ▂      ▁ ▁▁ ▁▁ ▁▁  ▄▄▅▅▃▄▁ │    37.3 s
+ scheduler │          ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│     3.1 s
+     other │▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▄▄▃▃▃▃▄▃▃▃▃▃▃▃▃▃▃▃▃▄▃▃▃▃▃▃▃▃▄▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▄▅▄▄▃▃│   929.4 s
+           └──────────────────────────────────────────────────────────────────────┘
+→ zoom / full view: observe timeline wc-controlA/spans.json --view component
+
+Costliest span types — over time
+                     │0s       20        40        60       80        100       120     140s│     Total
+                     ├──────────────────────────────────────────────────────────────────────┤
+worker.exec.call     │           ████████████████████████████████████████████████████▅██████│  2078.5 s
+tcp.send.queue       │           ▁▁▁▁▁▁▁▁▂▂▁▁▂▄▂▂▁▁▆▂▁▁▂▇▂▁▁▁▁▁▂▁▆▅ ▁▁▁▁▁▁▁ ▁▁▁▁▁▁▂▁▆███▆██▆│   325.9 s
+tcp.send.write_queue │           ▁▁▁▁▁▂▁▁▅▃▁▁▂▅▁▁▁▁▅▂▁▁▂▆▂▁▁▁▁▁▂▁▅█ ▁▁▁▁▁▁▁ ▁▁▁▁▁▁▂▁▆██▇█▇█▆│   245.1 s
+worker.deserialize   │           ▁▁▁▁▁▂▁▁▂▃▁▁▃▄▂▂▁▁▄▂▁▂▂▃▂▁▁▁▁▁▂▁▃▃ ▁▁▁▁▁▁▁ ▁▁▁▁▁▁▃▁▄▆▆▅▄▅▆▃│    72.8 s
+worker.transfer.recv │           ▁▁▁▁▁▂▁▁▂▃▁▁▂▃▂▁▁▁▄▂▁▁▂▃▂▁▁▁▁▁▂▁▃▃ ▁▁▁▁▁▁▁ ▁▁▁▁▁▁▂▁▄▅▅▃▃▅▄▂│    53.1 s
+tcp.send.compress    │           ▁▁▁▁▁▁▁▁▂▃▁▁▂▃▁▁▁▁▃▂▁▁▁▃▂▁▁▁▁▁▁▁▃▂ ▁▁▁▁▁▁▁ ▁▁▁▁▁▁▂▁▃▄▅▄▃▅▄▂│    49.3 s
+tcp.recv.read        │           ▁▁▁▁▁▁▁▁▂▃▁▁▂▂▁▁▁▁▃▂▁▁▁▃▂▁▁▁▁▁▂▁▂▃ ▁▁▁▁▁▁▁ ▁▁▁▁▁▁▂▁▃▄▅▃▃▄▄▂│    45.8 s
+tcp.recv.decompress  │           ▁▁▁▁▁▁▁▁▂▃▁▁▂▄▂▁▁▁▃▁▁▁▁▂▂▁▁▁▁▁▁▁▂▂ ▁▁▁▁▁▁▁ ▁▁▁▁▁▁▂▁▂▃▄▄▃▄▄▂│    42.7 s
+                     └──────────────────────────────────────────────────────────────────────┘
+Memory               │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▃▃▃▃▃▃▃▃▃▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▅▅▄▄▅▅▅▄▃▃▃▂│     55% peak
+Disk Write           │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▂▂▂██▂▂▁▃▃▃▁▃▂▁▁▁▁▁▁▂▃▃▂▂▂▃▂▁▃▁▆▆▆▅▃▃▁▁│     1.1 GB/s
+Disk Read            │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▅▇▁▁▃▅▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▅▃██▆▆▁│   603.1 MB/s
+Network              │▁▁▁▁▁▁▁▁▁▁▁▁▂▂▁▁▂▁▁▃▅▃▂▄▄▄▂▂▂▅▅▂▂▂▅▅▂▂▂▁▁▃▁▄▅▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▅▁▆█▅▅▄▇▇▆│     4.4 GB/s
+
+                Costliest span types                 
+Name                      Total    Per-wkr    Max wkr
+worker.exec.call        2078.5s     519.6s     533.5s
+tcp.send.queue           325.9s      81.5s     105.7s
+tcp.send.write_queue     245.1s      61.3s      76.0s
+worker.deserialize        72.8s      18.2s      20.6s
+worker.transfer.recv      53.1s      13.3s      16.8s
+tcp.send.compress         49.3s      12.3s      13.7s
+tcp.recv.read             45.8s      11.4s      14.6s
+tcp.recv.decompress       42.7s      10.7s      13.0s
+Per-wkr = mean over the workers that ran it; Max wkr = the busiest single worker. Max wkr ≫ Per-wkr means a few workers carry the work (imbalance).
+→ one op over time: observe timeline wc-controlA/spans.json --view detailed --prefix worker.exec.call   raw: observe spans wc-controlA/spans.json --name worker.exec.call
+
+                                    Workers unlike their peers                                    
+Worker                                                 Excess    Top deviations (vs median worker)
+unix:///tmp/frisky-sock-inzb560f/worker-1795-0.sock       31s    tcp.send.queue +31s (8σ)         
+unix:///tmp/frisky-sock-inzb560f/worker-1793-0.sock        3s    tcp.recv.decompress +3s (6σ)     
+Each worker's top-3 most unusual span types vs the median worker; Excess = total extra seconds across them.
+→ rank all: observe stragglers wc-controlA/spans.json   one worker: observe timeline wc-controlA/spans.json --worker unix:///tmp/frisky-sock-inzb560f/worker-1795-0.sock

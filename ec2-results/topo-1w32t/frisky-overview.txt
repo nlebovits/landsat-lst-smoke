@@ -1,0 +1,43 @@
+Overview  topo-1w32t/spans.json
+
+  perf    wall-clock 209.2s   workers 1   tasks 3   spans 20000
+  memory 28.49 GiB / 48.00 GiB (59% peak)   spilled 2.02 GiB   unspilled 1.23 GiB   network recv 0 B
+
+Components
+           │0s              50              100              150              200s│     Total
+           ├──────────────────────────────────────────────────────────────────────┤
+   compute │       ███████████████████████████████████████████████████████████████│  2799.1 s
+      disk │                                                   ▃        ▂▁▂▂ ▁▇▃▂▁│     6.9 s
+ scheduler │       ▂                                                             ▂│  721.2 ms
+     other │██████████████████████████████████████████████████████████████████████│   865.8 s
+           └──────────────────────────────────────────────────────────────────────┘
+→ zoom / full view: observe timeline topo-1w32t/spans.json --view component
+
+Costliest span types — over time
+                           │0s              50               100             150              200s│     Total
+                           ├──────────────────────────────────────────────────────────────────────┤
+worker.exec.call           │       ███████████████████████████████████████████████████████████████│  2762.0 s
+worker.handle_event        │       ▃▃▆█▆▆▂▅▅▄▅▄▅▃▄▂▃▄▃▅▂▂▂▁    ▁ ▂▁▁       ▁▁ ▁▂▁       ▁▁▁▁▁▁▆▇▅▆│    38.4 s
+worker.exec.deserialize    │       █▁▂▂▂▆▃▂▂▂▆▁▂▂▁▁▂▃▃▂▇▂▁▁▁▁ ▁▁ ▂▁ ▁▁▁▁ ▁▁▁▁▁▁▄▁▁    ▁▁▁▁▁▁▁▁▂▆▃▄│    28.2 s
+worker.exec.gil            │       ▁▁▂▂▂▂▁▂▂▂▁▁▂▁▂▁▁▂▂▂▁▂▁▁    ▁ ▂ ▁ ▁▁ ▁     ▁▂▁▁       ▁▁▁▁▁▃▂▂▂│     8.9 s
+worker.task_complete       │        ▁▁▁▁▁ ▁▁▂▁▁▂▁▁▁▁▁▁▁▁▁▁▁      ▁            ▁▂▁         ▁▁ ▁▄▃▃▃│     6.1 s
+worker.unspill.deserialize │                                                                  ▃▃▁▁│     2.0 s
+worker.spill.compress      │                                                   ▂▁       ▁▂▂▂▁     │     1.9 s
+worker.unspill.decompress  │                                                                  ▂▂▁▁│     1.2 s
+                           └──────────────────────────────────────────────────────────────────────┘
+Memory                     │▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▂▃▃▃▃▃▃▃▃▄▃▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▅▄▅▄▄▄▄▄▄▅▅▅▅▅▅▄▄▅▄▂▂│     59% peak
+Disk Write                 │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▆▆▁▁▁▁▁▁▁▃▆▇▃█▁▁▁▁▁│   478.0 MB/s
+Disk Read                  │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁██▄▂│   313.8 MB/s
+
+                   Costliest span types                    
+Name                            Total    Per-wkr    Max wkr
+worker.exec.call              2762.0s    2762.0s    2762.0s
+worker.handle_event             38.4s      38.4s      38.4s
+worker.exec.deserialize         28.2s      28.2s      28.2s
+worker.exec.gil                  8.9s       8.9s       8.9s
+worker.task_complete             6.1s       6.1s       6.1s
+worker.unspill.deserialize       2.0s       2.0s       2.0s
+worker.spill.compress            1.9s       1.9s       1.9s
+worker.unspill.decompress        1.2s       1.2s       1.2s
+Per-wkr = mean over the workers that ran it; Max wkr = the busiest single worker. Max wkr ≫ Per-wkr means a few workers carry the work (imbalance).
+→ one op over time: observe timeline topo-1w32t/spans.json --view detailed --prefix worker.exec.call   raw: observe spans topo-1w32t/spans.json --name worker.exec.call

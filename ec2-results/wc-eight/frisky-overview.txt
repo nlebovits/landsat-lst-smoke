@@ -1,0 +1,54 @@
+Overview  wc-eight/spans.json
+
+  perf    wall-clock 85.3s   workers 8   tasks 2   spans 600000
+  memory 30.43 GiB / 48.00 GiB (63% peak)   spilled 19.15 GiB   unspilled 6.95 GiB   network recv 51.41 GiB
+
+Components
+           │0s              20              40              60              80 85s│     Total
+           ├──────────────────────────────────────────────────────────────────────┤
+   compute │████████████████████████████████████████████████████████████████████▃▁│  2143.4 s
+   network │▂▂▂▂▆█▇█▂▁▂▁▂▂▁▂███▇▆▂▁▂▅██▅▁▂▂▃▄██▇▁▁▁▂▂▇███▂▂▂▂▁▂▃▁▇██████████▇███▁▁│  1752.6 s
+      disk │                          ▁▂▁    ▂▃▃ ▁▁▁▁▁▃▆▃▁    ▁▁ ▂▁▅▆▆▇▆▆▆▅▅▅▅▄▃▂ │   124.1 s
+ scheduler │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│     3.5 s
+     other │▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▃▂▂▂▂▂▂▂▂▃▂▂▂▂▃▂▂▂▃▂▂▃▃▂▂▂│   770.4 s
+           └──────────────────────────────────────────────────────────────────────┘
+→ zoom / full view: observe timeline wc-eight/spans.json --view component
+
+Costliest span types — over time
+                     │0s              20              40              60               8085s│     Total
+                     ├──────────────────────────────────────────────────────────────────────┤
+worker.exec.call     │██████████████████████████████████████████████████████▇▇▇▅█▆▆▇█▆███▇▇▂│  1935.8 s
+tcp.send.queue       │▁▁▁▁▁▃▂▃▁▁▁▁▁▁▁▁▂▃▄▂▂▁▁▁▁▄▅▄▁▁▁▁▁▄▅▃▂▁▁▁▁▂▃▃▆▃▁▁▁▁▁▁ ▃▄▆▇▅▆▇▆▆▇▆▅▅▄▅▄▁│   490.0 s
+tcp.send.write_queue │▁▁▁▁▂▅▃▄▁▁▁▁▁▁▁▁▄▇▄▂▂▁▁▁▂▄▅▂▁▁▁▁▁▆▃▁▁▁▁▁▁▂▄▄▄▂▁▁▁▁▁▁ ▃▆▇▆▅▄▆▆▄█▆▃▄▂▂▁▁│   407.2 s
+tcp.recv.decompress  │▁▁▁▁▁▄▃▅▁▁▁▁▁▁▁▁▁▅▅▃▂▁▁▁▂▄▆▂▁▁▁▁▁▂▆▅▃▁▁▁▁▂▄▅▆▃▁▁▁▁▁▁ ▂▃▆█▇▇███▇▇▆▅▄▄▃▁│   238.1 s
+tcp.send.compress    │▁▁▁▁▂▅▂▆▁▁▁▁▁▁▁▁▂▄▅▃▂▁▁▁▂▄▅▂▁▁▁▁▁▂▄▃▂▁▁▁▁▂▃▃▄▂▁▁▁▁▁▁ ▂▄▅▇▆▆▇▇▆▇▆▅▄▄▄▂▁│   221.5 s
+worker.deserialize   │▁▁▁▁▂▄▃▄▁▁▁▁▁▁▁▁▁▅▅▄▃▁▁▁▂▃▅▃▁▁▁▂▂▃▅▃▂▁▁▁▁▂▄▄▄▃▁▂▁▁▁▂ ▂▃▆▇▇▆▆▇▇▆▇▇▅▅▃▃▁│   182.1 s
+worker.transfer.recv │▁▁▁▁▂▅▂▄▁▁▁▁▁▁▁▁▂▅▃▂▂▁▁▁▂▃▄▂▁▁▁▁▁▃▄▂▁▁▁▁▁▂▃▃▂▂▁▁▁▁▁▁ ▃▃▅▄▄▃▄▄▃▅▄▃▂▂▂▂▁│   108.0 s
+tcp.recv.read        │▁▁▁▁▂▄▂▃▁▁▁▁▁▁▁▁▂▅▃▂▁▁▁▁▁▃▃▂▁▁▁▁▁▃▂▁▁▁▁▁▁▁▂▃▂▁▁▁▁▁▁▁ ▂▃▄▃▃▂▄▄▃▅▄▂▂▁▂▁▁│    80.9 s
+                     └──────────────────────────────────────────────────────────────────────┘
+Memory               │▁▂▂▂▂▂▃▃▃▃▃▃▃▃▃▃▃▃▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▅▄▄▄▅▅▅▅▅▅▄▄▄▅▅▅▅▅▅▄▅▅▅▅▅▅▅▅▅▅▅▄▃▂▂│     63% peak
+Disk Write           │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▁▁▁▁▃▅▅▁▁▁▂▂▃▄▇▅▂▁▁▁▁▁▁▁▂▄▅████▆▆▃▄▅▅▃▂▁│     1.6 GB/s
+Disk Read            │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▁▁▁▁▁▃▃▁▁▁▁▁▁▂▃▃▁▁▁▁▁▁▁▁▁▁▂▅▅▄▄▄██▅▆▆▇▇▇│   754.6 MB/s
+Network              │▁▂▂▂▂▅▆▅▅▁▂▂▂▂▂▂▃▅▅▄▄▃▂▂▂▆▆▅▄▂▂▂▂▃▇▇▄▂▁▂▂▄▅▅▆▆▂▂▂▂▂▂▂▂▇▇██▆█▇▇▇▇█▅▄▄▄▁│     4.1 GB/s
+
+                Costliest span types                 
+Name                      Total    Per-wkr    Max wkr
+worker.exec.call        1935.8s     242.0s     260.5s
+tcp.send.queue           490.0s      61.3s      95.3s
+tcp.send.write_queue     407.2s      50.9s      89.5s
+tcp.recv.decompress      238.1s      29.8s      35.1s
+tcp.send.compress        221.5s      27.7s      36.6s
+worker.deserialize       182.1s      22.8s      26.7s
+worker.transfer.recv     108.0s      13.5s      18.8s
+tcp.recv.read             80.9s      10.1s      13.6s
+Per-wkr = mean over the workers that ran it; Max wkr = the busiest single worker. Max wkr ≫ Per-wkr means a few workers carry the work (imbalance).
+→ one op over time: observe timeline wc-eight/spans.json --view detailed --prefix worker.exec.call   raw: observe spans wc-eight/spans.json --name worker.exec.call
+
+                                      Workers unlike their peers                                       
+Worker                                                 Excess    Top deviations (vs median worker)     
+unix:///tmp/frisky-sock-f5vcv2ms/worker-2901-0.sock       15s    tcp.recv.queue +14s (4σ)              
+                                                                 worker.paused +1s (6σ)                
+unix:///tmp/frisky-sock-f5vcv2ms/worker-2904-0.sock        0s    worker.send_data_to_scheduler +0s (7σ)
+unix:///tmp/frisky-sock-f5vcv2ms/worker-2900-0.sock        0s    worker.receive_task +0s (4σ)          
+Each worker's top-3 most unusual span types vs the median worker; Excess = total extra seconds across them.
+→ rank all: observe stragglers wc-eight/spans.json   one worker: observe timeline wc-eight/spans.json --worker unix:///tmp/frisky-sock-f5vcv2ms/worker-2901-0.sock

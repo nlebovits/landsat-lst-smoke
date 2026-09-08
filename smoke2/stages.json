@@ -1,0 +1,719 @@
+{
+  "config": {
+    "out_dir": "smoke2",
+    "chunk": 256,
+    "time_chunk": 10,
+    "workers": 4,
+    "threads_per_worker": 2,
+    "memory_limit_gib": 2.0,
+    "start": "2020-01-01",
+    "end": "2025-01-01",
+    "cloud_cover_lt": 100,
+    "platforms": "landsat-8,landsat-9",
+    "crs": "epsg:3857",
+    "resolution": 30,
+    "max_scenes": 12,
+    "sample_interval": 0.1,
+    "tracing_capacity": 10000000,
+    "span_limit": 2000000,
+    "span_dump_limit": 300000,
+    "boundary_url": "https://raw.githubusercontent.com/nlebovits/landsat-lst/main/data/pergamino_dept.gpkg",
+    "no_tracemalloc": false,
+    "compare_passes": false,
+    "force": false
+  },
+  "gdal": {
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    "GDAL_HTTP_MULTIRANGE": "YES",
+    "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",
+    "GDAL_HTTP_MAX_RETRY": "5",
+    "GDAL_HTTP_RETRY_DELAY": "1",
+    "VSI_CACHE": "TRUE",
+    "VSI_CACHE_SIZE": "67108864",
+    "GDAL_NUM_THREADS": "1"
+  },
+  "host": {
+    "node": "nissim-Laptop-16-AMD-Ryzen-7040-Series",
+    "platform": "Linux-6.8.0-56-generic-x86_64-with-glibc2.39",
+    "python": "3.12.2 (main, Feb 20 2025, 16:49:58) [GCC 13.3.0]",
+    "cpu_count": 16
+  },
+  "encoding": {
+    "dtype": "uint16",
+    "scale": 0.01,
+    "offset": -50.0,
+    "nodata": 0,
+    "units": "celsius",
+    "decode": "celsius = dn * 0.01 + (-50.0)"
+  },
+  "versions": {
+    "frisky": "0.7.2",
+    "dask": "2026.8.0",
+    "xarray": "2026.7.0",
+    "numpy": "2.5.3"
+  },
+  "bbox": [
+    -60.942796,
+    -34.17645991,
+    -60.138771,
+    -33.54020044
+  ],
+  "dashboard": "http://127.0.0.1:45057",
+  "n_scenes": 12,
+  "by_platform": {
+    "landsat-9": 8,
+    "landsat-8": 4
+  },
+  "prediction": {
+    "chunk": 256,
+    "n_scenes": 12,
+    "concurrency": 8,
+    "per_task_gib": 0.0029296875,
+    "per_task_with_sort_gib": 0.005859375,
+    "data_gib": 0.046875,
+    "worker_baseline_gib": 2.8,
+    "aggregate_gib": 2.846875,
+    "budget_gib": 8.0
+  },
+  "signed_at": 1788877088.7115633,
+  "shape": [
+    2845,
+    2985
+  ],
+  "result": {
+    "n_pixels": 8492325,
+    "n_valid": 8492314,
+    "valid_fraction": 0.9999987047127847,
+    "dtype": "uint16",
+    "min_c": 23.129999999999995,
+    "max_c": 55.519999999999996,
+    "mean_c": 43.16137713937568,
+    "p50_c": 43.7,
+    "qa_count": {
+      "dtype": "uint8",
+      "bands": 12,
+      "per_month_mean": {
+        "Jan": 0.0,
+        "Feb": 0.0,
+        "Mar": 0.0,
+        "Apr": 0.0,
+        "May": 0.0,
+        "Jun": 0.0,
+        "Jul": 0.0,
+        "Aug": 0.0,
+        "Sep": 0.0,
+        "Oct": 0.0,
+        "Nov": 0.6241279037248338,
+        "Dec": 5.464482223654889
+      }
+    }
+  },
+  "frisky": {
+    "dashboard": "http://127.0.0.1:45057",
+    "span_source": "query_spans",
+    "n_spans": 76810,
+    "n_spans_dumped": 76810,
+    "by_name": {
+      "profile.imports": {
+        "count": 1,
+        "total_ms": 2292.574116,
+        "mean_ms": 2292.574116,
+        "max_ms": 2292.574116
+      },
+      "profile.boundary": {
+        "count": 1,
+        "total_ms": 412.856858,
+        "mean_ms": 412.856858,
+        "max_ms": 412.856858
+      },
+      "profile.cluster_start": {
+        "count": 1,
+        "total_ms": 520.786898,
+        "mean_ms": 520.786898,
+        "max_ms": 520.786898
+      },
+      "scheduler.metrics": {
+        "count": 83,
+        "total_ms": 83009.903163,
+        "mean_ms": 1000.1193152168674,
+        "max_ms": 1001.077926
+      },
+      "comm.recv": {
+        "count": 6764,
+        "total_ms": 496691.861839,
+        "mean_ms": 73.43167679464814,
+        "max_ms": 81381.406498
+      },
+      "profile.stac_search": {
+        "count": 1,
+        "total_ms": 5588.846352,
+        "mean_ms": 5588.846352,
+        "max_ms": 5588.846352
+      },
+      "profile.sign_assets": {
+        "count": 1,
+        "total_ms": 245.286636,
+        "mean_ms": 245.286636,
+        "max_ms": 245.286636
+      },
+      "profile.graph_build": {
+        "count": 1,
+        "total_ms": 1199.10805,
+        "mean_ms": 1199.10805,
+        "max_ms": 1199.10805
+      },
+      "profile.graph_optimize": {
+        "count": 1,
+        "total_ms": 1863.090778,
+        "mean_ms": 1863.090778,
+        "max_ms": 1863.090778
+      },
+      "profile.compute": {
+        "count": 1,
+        "total_ms": 74001.75961,
+        "mean_ms": 74001.75961,
+        "max_ms": 74001.75961
+      },
+      "client.convert_legacy": {
+        "count": 4,
+        "total_ms": 2829.061504,
+        "mean_ms": 707.265376,
+        "max_ms": 707.265376
+      },
+      "client.dask_order": {
+        "count": 3,
+        "total_ms": 238.296564,
+        "mean_ms": 79.432188,
+        "max_ms": 79.432188
+      },
+      "client.serialize_tasks": {
+        "count": 3,
+        "total_ms": 4702.507428,
+        "mean_ms": 1567.502476,
+        "max_ms": 1567.502476
+      },
+      "client.submit_graph": {
+        "count": 2,
+        "total_ms": 34.348096,
+        "mean_ms": 17.174048,
+        "max_ms": 17.174048
+      },
+      "scheduler.handle_update_graph": {
+        "count": 1,
+        "total_ms": 14.997462,
+        "mean_ms": 14.997462,
+        "max_ms": 14.997462
+      },
+      "scheduler.ingest.add_tasks": {
+        "count": 1,
+        "total_ms": 3.2626,
+        "mean_ms": 3.2626,
+        "max_ms": 3.2626
+      },
+      "scheduler.ingest.reverse_deps": {
+        "count": 1,
+        "total_ms": 2.844194,
+        "mean_ms": 2.844194,
+        "max_ms": 2.844194
+      },
+      "scheduler.ingest.homes": {
+        "count": 1,
+        "total_ms": 4.669268,
+        "mean_ms": 4.669268,
+        "max_ms": 4.669268
+      },
+      "scheduler.ingest.mark_keys": {
+        "count": 1,
+        "total_ms": 0.001453,
+        "mean_ms": 0.001453,
+        "max_ms": 0.001453
+      },
+      "scheduler.ingest.transitions": {
+        "count": 1,
+        "total_ms": 4.164463,
+        "mean_ms": 4.164463,
+        "max_ms": 4.164463
+      },
+      "scheduler.decide_worker": {
+        "count": 4667,
+        "total_ms": 21.72739,
+        "mean_ms": 0.004655536747375188,
+        "max_ms": 0.589335
+      },
+      "scheduler.ingest.release": {
+        "count": 1,
+        "total_ms": 0.0161,
+        "mean_ms": 0.0161,
+        "max_ms": 0.0161
+      },
+      "scheduler.sender.flush_worker": {
+        "count": 5141,
+        "total_ms": 62.530841,
+        "mean_ms": 0.012163166893600466,
+        "max_ms": 6.511399
+      },
+      "worker.receive_task": {
+        "count": 6408,
+        "total_ms": 28.092663,
+        "mean_ms": 0.004383998595505618,
+        "max_ms": 5.076104
+      },
+      "worker.exec.gil": {
+        "count": 6407,
+        "total_ms": 156.016423,
+        "mean_ms": 0.024350932261588888,
+        "max_ms": 31.421697
+      },
+      "worker.exec.deserialize": {
+        "count": 6415,
+        "total_ms": 2583.85866,
+        "mean_ms": 0.40278389088074823,
+        "max_ms": 184.808729
+      },
+      "worker.exec.call": {
+        "count": 6414,
+        "total_ms": 519786.153538,
+        "mean_ms": 81.03931299314002,
+        "max_ms": 6176.775016
+      },
+      "worker.store_data": {
+        "count": 6410,
+        "total_ms": 11.42536,
+        "mean_ms": 0.0017824274570982838,
+        "max_ms": 0.198389
+      },
+      "worker.handle_event": {
+        "count": 6419,
+        "total_ms": 664.77299,
+        "mean_ms": 0.10356332606324972,
+        "max_ms": 16.026052
+      },
+      "worker.task_complete": {
+        "count": 6412,
+        "total_ms": 242.10827,
+        "mean_ms": 0.03775861977542109,
+        "max_ms": 15.947246
+      },
+      "scheduler.tasks_finished": {
+        "count": 5627,
+        "total_ms": 123.557054,
+        "mean_ms": 0.021957891238670695,
+        "max_ms": 2.555144
+      },
+      "tcp.send.serialize": {
+        "count": 905,
+        "total_ms": 1142.993339,
+        "mean_ms": 1.2629760651933701,
+        "max_ms": 33.118965
+      },
+      "tcp.send.queue": {
+        "count": 902,
+        "total_ms": 2037.064887,
+        "mean_ms": 2.2583867926829266,
+        "max_ms": 67.886351
+      },
+      "tcp.send.compress": {
+        "count": 905,
+        "total_ms": 1006.430658,
+        "mean_ms": 1.1120780751381216,
+        "max_ms": 39.259525
+      },
+      "tcp.send.write_queue": {
+        "count": 905,
+        "total_ms": 312.644274,
+        "mean_ms": 0.3454632861878453,
+        "max_ms": 5.809264
+      },
+      "worker.transfer.recv": {
+        "count": 858,
+        "total_ms": 439.182898,
+        "mean_ms": 0.5118681794871796,
+        "max_ms": 11.404393
+      },
+      "tcp.send.write": {
+        "count": 860,
+        "total_ms": 292.826071,
+        "mean_ms": 0.3404954313953489,
+        "max_ms": 10.028138
+      },
+      "tcp.recv.read": {
+        "count": 860,
+        "total_ms": 296.890203,
+        "mean_ms": 0.3452211662790698,
+        "max_ms": 10.399296
+      },
+      "tcp.recv.queue": {
+        "count": 859,
+        "total_ms": 3026.235051,
+        "mean_ms": 3.5229744481955763,
+        "max_ms": 209.37339
+      },
+      "tcp.recv.decompress": {
+        "count": 859,
+        "total_ms": 1324.698226,
+        "mean_ms": 1.542139960419092,
+        "max_ms": 23.096248
+      },
+      "worker.deserialize": {
+        "count": 859,
+        "total_ms": 1209.159769,
+        "mean_ms": 1.4076365180442376,
+        "max_ms": 15.361117
+      },
+      "scheduler.data_received": {
+        "count": 799,
+        "total_ms": 4.600184,
+        "mean_ms": 0.0057574267834793495,
+        "max_ms": 0.116777
+      },
+      "worker.idle": {
+        "count": 33,
+        "total_ms": 12736.112666,
+        "mean_ms": 385.94280806060607,
+        "max_ms": 2951.498117
+      },
+      "scheduler.sender.flush_client": {
+        "count": 3,
+        "total_ms": 186.010685,
+        "mean_ms": 62.00356166666666,
+        "max_ms": 143.119052
+      },
+      "worker.send_data_to_scheduler": {
+        "count": 2,
+        "total_ms": 178.70441,
+        "mean_ms": 89.352205,
+        "max_ms": 136.97259
+      },
+      "client.receive_result": {
+        "count": 6,
+        "total_ms": 120.502784,
+        "mean_ms": 20.083797333333333,
+        "max_ms": 45.53555
+      },
+      "profile.stats": {
+        "count": 1,
+        "total_ms": 98.950301,
+        "mean_ms": 98.950301,
+        "max_ms": 98.950301
+      }
+    },
+    "worker_outliers": [
+      {
+        "worker": "unix:///tmp/user/1000/frisky-sock-ih4tvmt2/worker-3183855-0.sock",
+        "score": 4.220400031,
+        "deviations": [
+          {
+            "span": "tcp.recv.queue",
+            "excess_s": 2.890689329,
+            "sigma": 50.0
+          },
+          {
+            "span": "tcp.recv.decompress",
+            "excess_s": 0.7722773105,
+            "sigma": 4.894419169232186
+          },
+          {
+            "span": "worker.transfer.recv",
+            "excess_s": 0.2408358455,
+            "sigma": 6.502474965489775
+          }
+        ]
+      }
+    ],
+    "chrome_events": 76822
+  },
+  "stages": [
+    {
+      "stage": "imports",
+      "meta": {},
+      "t_mono_start": 110778.253851927,
+      "rss_start_mb": 25.375,
+      "ru_maxrss_start_mb": 26.25,
+      "t_mono_end": 110780.735984807,
+      "wall_s": 2.292556674,
+      "cpu_s": 3.340004227,
+      "rss_end_mb": 203.98828125,
+      "rss_delta_mb": 178.61328125,
+      "ru_maxrss_end_mb": 203.98828125,
+      "ru_maxrss_delta_mb": 177.73828125,
+      "ok": true,
+      "pyheap_current_mb": 68.64021301269531,
+      "pyheap_peak_mb": 68.70981407165527,
+      "memory_window": {
+        "tree_rss_peak_mb": 211.99,
+        "client_rss_peak_mb": 199.11,
+        "workers_rss_peak_mb": 12.88,
+        "sys_available_min_mb": 41328.5,
+        "samples": 22
+      }
+    },
+    {
+      "stage": "boundary",
+      "meta": {
+        "url": "https://raw.githubusercontent.com/nlebovits/landsat-lst/main/data/pergamino_dept.gpkg",
+        "bbox": [
+          -60.942796,
+          -34.17645991,
+          -60.138771,
+          -33.54020044
+        ],
+        "bytes": 139264
+      },
+      "t_mono_start": 110780.736277349,
+      "rss_start_mb": 203.98828125,
+      "ru_maxrss_start_mb": 203.98828125,
+      "t_mono_end": 110781.149231006,
+      "wall_s": 0.41284247,
+      "cpu_s": 0.071960463,
+      "rss_end_mb": 244.98828125,
+      "rss_delta_mb": 41.0,
+      "ru_maxrss_end_mb": 244.98828125,
+      "ru_maxrss_delta_mb": 41.0,
+      "ok": true,
+      "pyheap_current_mb": 70.23103904724121,
+      "pyheap_peak_mb": 70.29290771484375,
+      "memory_window": {
+        "tree_rss_peak_mb": 221.11,
+        "client_rss_peak_mb": 208.24,
+        "workers_rss_peak_mb": 12.88,
+        "sys_available_min_mb": 41325.2,
+        "samples": 4
+      }
+    },
+    {
+      "stage": "cluster_start",
+      "meta": {
+        "workers": 4,
+        "dashboard": "http://127.0.0.1:45057"
+      },
+      "t_mono_start": 110781.149543615,
+      "rss_start_mb": 244.98828125,
+      "ru_maxrss_start_mb": 244.98828125,
+      "t_mono_end": 110781.670445818,
+      "wall_s": 0.520775177,
+      "cpu_s": 0.013477678,
+      "rss_end_mb": 249.36328125,
+      "rss_delta_mb": 4.375,
+      "ru_maxrss_end_mb": 249.36328125,
+      "ru_maxrss_delta_mb": 4.375,
+      "ok": true,
+      "pyheap_current_mb": 70.37813758850098,
+      "pyheap_peak_mb": 70.47130107879639,
+      "memory_window": {
+        "tree_rss_peak_mb": 611.12,
+        "client_rss_peak_mb": 247.61,
+        "workers_rss_peak_mb": 363.51,
+        "sys_available_min_mb": 41045.6,
+        "samples": 4
+      }
+    },
+    {
+      "stage": "stac_search",
+      "meta": {
+        "cloud_lt": 100,
+        "n_items": 12,
+        "platforms": [
+          "landsat-8",
+          "landsat-9"
+        ],
+        "by_platform": {
+          "landsat-9": 8,
+          "landsat-8": 4
+        },
+        "items_without_lwir11": 0
+      },
+      "t_mono_start": 110781.670790066,
+      "rss_start_mb": 249.36328125,
+      "ru_maxrss_start_mb": 249.36328125,
+      "t_mono_end": 110787.259743747,
+      "wall_s": 5.58880768,
+      "cpu_s": 2.392666136,
+      "rss_end_mb": 401.00390625,
+      "rss_delta_mb": 151.640625,
+      "ru_maxrss_end_mb": 404.5234375,
+      "ru_maxrss_delta_mb": 155.16015625,
+      "ok": true,
+      "pyheap_current_mb": 119.41046714782715,
+      "pyheap_peak_mb": 132.53798389434814,
+      "memory_window": {
+        "tree_rss_peak_mb": 794.02,
+        "client_rss_peak_mb": 400.88,
+        "workers_rss_peak_mb": 393.14,
+        "sys_available_min_mb": 40721.2,
+        "samples": 51
+      }
+    },
+    {
+      "stage": "sign_assets",
+      "meta": {
+        "scenes": 12,
+        "signed_at": 1788877088.7115633
+      },
+      "t_mono_start": 110787.275032446,
+      "rss_start_mb": 401.00390625,
+      "ru_maxrss_start_mb": 404.5234375,
+      "t_mono_end": 110787.522058637,
+      "wall_s": 0.245268131,
+      "cpu_s": 0.03486376,
+      "rss_end_mb": 401.12890625,
+      "rss_delta_mb": 0.125,
+      "ru_maxrss_end_mb": 404.5234375,
+      "ru_maxrss_delta_mb": 0.0,
+      "ok": true,
+      "pyheap_current_mb": 119.51612854003906,
+      "pyheap_peak_mb": 119.55654048919678,
+      "memory_window": {
+        "tree_rss_peak_mb": 794.14,
+        "client_rss_peak_mb": 401.0,
+        "workers_rss_peak_mb": 393.14,
+        "sys_available_min_mb": 40721.0,
+        "samples": 2
+      }
+    },
+    {
+      "stage": "graph_build",
+      "meta": {
+        "chunk": 256,
+        "scenes": 12,
+        "shape": [
+          2845,
+          2985
+        ],
+        "chunks": "((1536, 1309), (1536, 1449))"
+      },
+      "t_mono_start": 110787.522332405,
+      "rss_start_mb": 401.12890625,
+      "ru_maxrss_start_mb": 404.5234375,
+      "t_mono_end": 110788.721539458,
+      "wall_s": 1.199087492,
+      "cpu_s": 1.200820649,
+      "rss_end_mb": 409.62109375,
+      "rss_delta_mb": 8.4921875,
+      "ru_maxrss_end_mb": 409.62109375,
+      "ru_maxrss_delta_mb": 5.09765625,
+      "ok": true,
+      "pyheap_current_mb": 125.8803482055664,
+      "pyheap_peak_mb": 125.98198699951172,
+      "memory_window": {
+        "tree_rss_peak_mb": 801.88,
+        "client_rss_peak_mb": 408.75,
+        "workers_rss_peak_mb": 393.14,
+        "sys_available_min_mb": 40719.8,
+        "samples": 11
+      }
+    },
+    {
+      "stage": "graph_optimize",
+      "meta": {
+        "raw_tasks": 17337,
+        "optimized_tasks": 6733,
+        "fusion_ratio": 2.574929451953067
+      },
+      "t_mono_start": 110788.721928199,
+      "rss_start_mb": 409.62109375,
+      "ru_maxrss_start_mb": 409.62109375,
+      "t_mono_end": 110790.585139762,
+      "wall_s": 1.863073677,
+      "cpu_s": 1.86711111,
+      "rss_end_mb": 431.171875,
+      "rss_delta_mb": 21.55078125,
+      "ru_maxrss_end_mb": 432.7265625,
+      "ru_maxrss_delta_mb": 23.10546875,
+      "ok": true,
+      "pyheap_current_mb": 134.28817081451416,
+      "pyheap_peak_mb": 141.82210540771484,
+      "memory_window": {
+        "tree_rss_peak_mb": 824.25,
+        "client_rss_peak_mb": 431.12,
+        "workers_rss_peak_mb": 393.14,
+        "sys_available_min_mb": 40710.2,
+        "samples": 17
+      }
+    },
+    {
+      "stage": "compute",
+      "meta": {
+        "scenes": 12,
+        "chunk": 256,
+        "compute_started_at": 1788877091.7771392,
+        "s_since_signing": 3.0655789375305176
+      },
+      "t_mono_start": 110790.587479881,
+      "rss_start_mb": 431.171875,
+      "ru_maxrss_start_mb": 432.7265625,
+      "t_mono_end": 110864.589359363,
+      "wall_s": 74.001739062,
+      "cpu_s": 4.17424998,
+      "rss_end_mb": 599.71484375,
+      "rss_delta_mb": 168.54296875,
+      "ru_maxrss_end_mb": 815.0234375,
+      "ru_maxrss_delta_mb": 382.296875,
+      "ok": true,
+      "pyheap_current_mb": 248.0665798187256,
+      "pyheap_peak_mb": 265.0550127029419,
+      "memory_window": {
+        "tree_rss_peak_mb": 3265.58,
+        "client_rss_peak_mb": 671.15,
+        "workers_rss_peak_mb": 2777.02,
+        "sys_available_min_mb": 38312.9,
+        "samples": 669
+      }
+    },
+    {
+      "stage": "stats",
+      "meta": {},
+      "t_mono_start": 110864.592493332,
+      "rss_start_mb": 599.71484375,
+      "ru_maxrss_start_mb": 815.0234375,
+      "t_mono_end": 110864.691550392,
+      "wall_s": 0.098928642,
+      "cpu_s": 0.099714257,
+      "rss_end_mb": 673.21484375,
+      "rss_delta_mb": 73.5,
+      "ru_maxrss_end_mb": 815.0234375,
+      "ru_maxrss_delta_mb": 0.0,
+      "ok": true,
+      "pyheap_current_mb": 320.95761489868164,
+      "pyheap_peak_mb": 385.751389503479,
+      "memory_window": {
+        "tree_rss_peak_mb": 1582.35,
+        "client_rss_peak_mb": 673.21,
+        "workers_rss_peak_mb": 909.14,
+        "sys_available_min_mb": 39415.5,
+        "samples": 1
+      }
+    },
+    {
+      "stage": "report",
+      "meta": {},
+      "t_mono_start": 110864.691875295,
+      "rss_start_mb": 673.21484375,
+      "ru_maxrss_start_mb": 815.0234375,
+      "t_mono_end": 110878.616829833,
+      "wall_s": 13.924818976,
+      "cpu_s": 13.974015603,
+      "rss_end_mb": 809.2109375,
+      "rss_delta_mb": 135.99609375,
+      "ru_maxrss_end_mb": 916.10546875,
+      "ru_maxrss_delta_mb": 101.08203125,
+      "ok": true,
+      "pyheap_current_mb": 320.28836250305176,
+      "pyheap_peak_mb": 436.1192035675049,
+      "memory_window": {
+        "tree_rss_peak_mb": 1830.4,
+        "client_rss_peak_mb": 916.11,
+        "workers_rss_peak_mb": 914.29,
+        "sys_available_min_mb": 39397.8,
+        "samples": 127
+      }
+    }
+  ],
+  "memory": {
+    "samples": 913,
+    "interval_s": 0.1,
+    "tree_rss_peak_mb": 3265.58,
+    "client_rss_peak_mb": 916.11,
+    "workers_rss_peak_mb": 2777.02,
+    "sys_available_min_mb": 38312.9
+  }
+}

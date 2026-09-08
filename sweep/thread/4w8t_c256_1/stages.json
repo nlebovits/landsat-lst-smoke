@@ -1,0 +1,771 @@
+{
+  "config": {
+    "out_dir": "/home/nissim/Documents/dev/radiant-earth/landsat-lst-smoke/sweep/thread/4w8t_c256_1",
+    "chunk": 256,
+    "time_chunk": 10,
+    "workers": 4,
+    "threads_per_worker": 8,
+    "memory_limit_gib": 3.0,
+    "start": "2020-01-01",
+    "end": "2025-01-01",
+    "cloud_cover_lt": 100,
+    "platforms": "landsat-8,landsat-9",
+    "crs": "epsg:3857",
+    "resolution": 30,
+    "max_scenes": 24,
+    "sample_interval": 0.1,
+    "gdal_threads": "1",
+    "ingested_bytes": 32768,
+    "http_version": "2",
+    "gdal_extra": "",
+    "tracing_capacity": 10000000,
+    "span_limit": 400000,
+    "span_dump_limit": 1000,
+    "boundary_url": "https://raw.githubusercontent.com/nlebovits/landsat-lst/main/data/pergamino_dept.gpkg",
+    "no_tracemalloc": true,
+    "compare_passes": false,
+    "force": true
+  },
+  "gdal": {
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    "GDAL_HTTP_MULTIRANGE": "YES",
+    "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",
+    "GDAL_INGESTED_BYTES_AT_OPEN": "32768",
+    "GDAL_HTTP_VERSION": "2",
+    "CPL_VSIL_CURL_USE_HEAD": "NO",
+    "GDAL_HTTP_MAX_RETRY": "5",
+    "GDAL_HTTP_RETRY_DELAY": "1",
+    "VSI_CACHE": "TRUE",
+    "VSI_CACHE_SIZE": "67108864",
+    "CPL_VSIL_CURL_CACHE_SIZE": "268435456",
+    "GDAL_NUM_THREADS": "1"
+  },
+  "host": {
+    "node": "nissim-Laptop-16-AMD-Ryzen-7040-Series",
+    "platform": "Linux-6.8.0-56-generic-x86_64-with-glibc2.39",
+    "python": "3.12.2 (main, Feb 20 2025, 16:49:58) [GCC 13.3.0]",
+    "cpu_count": 16
+  },
+  "encoding": {
+    "dtype": "uint16",
+    "scale": 0.01,
+    "offset": -50.0,
+    "nodata": 0,
+    "units": "celsius",
+    "decode": "celsius = dn * 0.01 + (-50.0)"
+  },
+  "versions": {
+    "frisky": "0.7.2",
+    "dask": "2026.8.0",
+    "xarray": "2026.7.0",
+    "numpy": "2.5.3"
+  },
+  "bbox": [
+    -60.942796,
+    -34.17645991,
+    -60.138771,
+    -33.54020044
+  ],
+  "dashboard": "http://127.0.0.1:42995",
+  "n_scenes": 24,
+  "by_platform": {
+    "landsat-9": 13,
+    "landsat-8": 11
+  },
+  "prediction": {
+    "chunk": 256,
+    "n_scenes": 24,
+    "concurrency": 32,
+    "per_task_gib": 0.005859375,
+    "per_task_with_sort_gib": 0.01171875,
+    "data_gib": 0.375,
+    "worker_baseline_gib": 2.8,
+    "aggregate_gib": 3.175,
+    "budget_gib": 12.0
+  },
+  "signed_at": 1788877492.3265185,
+  "shape": [
+    2845,
+    2985
+  ],
+  "result": {
+    "n_pixels": 8492325,
+    "n_valid": 8492315,
+    "valid_fraction": 0.999998822466168,
+    "dtype": "uint16",
+    "min_c": 23.409999999999997,
+    "max_c": 55.49000000000001,
+    "mean_c": 43.06375918344998,
+    "p50_c": 43.53,
+    "qa_count": {
+      "dtype": "uint8",
+      "bands": 12,
+      "per_month_mean": {
+        "Jan": 0.0,
+        "Feb": 0.0,
+        "Mar": 0.0,
+        "Apr": 0.0,
+        "May": 0.0,
+        "Jun": 0.0,
+        "Jul": 0.0,
+        "Aug": 0.0,
+        "Sep": 0.0,
+        "Oct": 0.7938270143924072,
+        "Nov": 3.1519636848566206,
+        "Dec": 5.464482223654889
+      }
+    }
+  },
+  "frisky": {
+    "dashboard": "http://127.0.0.1:42995",
+    "span_source": "query_spans",
+    "n_spans": 98183,
+    "dump_truncated_to": 1000,
+    "dump_rule": "longest spans by duration_ns",
+    "n_spans_dumped": 1000,
+    "by_name": {
+      "profile.imports": {
+        "count": 1,
+        "total_ms": 587.194962,
+        "mean_ms": 587.194962,
+        "max_ms": 587.194962
+      },
+      "profile.boundary": {
+        "count": 1,
+        "total_ms": 483.523236,
+        "mean_ms": 483.523236,
+        "max_ms": 483.523236
+      },
+      "profile.cluster_start": {
+        "count": 1,
+        "total_ms": 542.225788,
+        "mean_ms": 542.225788,
+        "max_ms": 542.225788
+      },
+      "scheduler.metrics": {
+        "count": 113,
+        "total_ms": 113020.264539,
+        "mean_ms": 1000.1793322035398,
+        "max_ms": 1001.282065
+      },
+      "comm.recv": {
+        "count": 7327,
+        "total_ms": 672461.086197,
+        "mean_ms": 91.77850227883172,
+        "max_ms": 112075.620062
+      },
+      "profile.stac_search": {
+        "count": 1,
+        "total_ms": 3812.718865,
+        "mean_ms": 3812.718865,
+        "max_ms": 3812.718865
+      },
+      "profile.sign_assets": {
+        "count": 1,
+        "total_ms": 201.66515,
+        "mean_ms": 201.66515,
+        "max_ms": 201.66515
+      },
+      "profile.graph_build": {
+        "count": 1,
+        "total_ms": 528.028859,
+        "mean_ms": 528.028859,
+        "max_ms": 528.028859
+      },
+      "profile.graph_optimize": {
+        "count": 1,
+        "total_ms": 475.727003,
+        "mean_ms": 475.727003,
+        "max_ms": 475.727003
+      },
+      "profile.compute": {
+        "count": 1,
+        "total_ms": 107367.244485,
+        "mean_ms": 107367.244485,
+        "max_ms": 107367.244485
+      },
+      "client.convert_legacy": {
+        "count": 7,
+        "total_ms": 2069.681558,
+        "mean_ms": 295.668794,
+        "max_ms": 295.668794
+      },
+      "client.dask_order": {
+        "count": 7,
+        "total_ms": 105.382081,
+        "mean_ms": 15.054583,
+        "max_ms": 15.054583
+      },
+      "client.serialize_tasks": {
+        "count": 2,
+        "total_ms": 1115.772774,
+        "mean_ms": 557.886387,
+        "max_ms": 557.886387
+      },
+      "client.submit_graph": {
+        "count": 1,
+        "total_ms": 18.038414,
+        "mean_ms": 18.038414,
+        "max_ms": 18.038414
+      },
+      "scheduler.handle_update_graph": {
+        "count": 1,
+        "total_ms": 29.288639,
+        "mean_ms": 29.288639,
+        "max_ms": 29.288639
+      },
+      "scheduler.ingest.add_tasks": {
+        "count": 1,
+        "total_ms": 4.776711,
+        "mean_ms": 4.776711,
+        "max_ms": 4.776711
+      },
+      "scheduler.ingest.reverse_deps": {
+        "count": 1,
+        "total_ms": 9.338062,
+        "mean_ms": 9.338062,
+        "max_ms": 9.338062
+      },
+      "scheduler.ingest.homes": {
+        "count": 1,
+        "total_ms": 6.979786,
+        "mean_ms": 6.979786,
+        "max_ms": 6.979786
+      },
+      "scheduler.ingest.mark_keys": {
+        "count": 1,
+        "total_ms": 0.002043,
+        "mean_ms": 0.002043,
+        "max_ms": 0.002043
+      },
+      "scheduler.ingest.transitions": {
+        "count": 1,
+        "total_ms": 8.099453,
+        "mean_ms": 8.099453,
+        "max_ms": 8.099453
+      },
+      "scheduler.decide_worker": {
+        "count": 5539,
+        "total_ms": 20.322311,
+        "mean_ms": 0.00366894944935909,
+        "max_ms": 0.684135
+      },
+      "scheduler.ingest.release": {
+        "count": 1,
+        "total_ms": 0.012153,
+        "mean_ms": 0.012153,
+        "max_ms": 0.012153
+      },
+      "scheduler.sender.flush_worker": {
+        "count": 5995,
+        "total_ms": 59.113404,
+        "mean_ms": 0.009860451042535445,
+        "max_ms": 4.722276
+      },
+      "worker.receive_task": {
+        "count": 8175,
+        "total_ms": 65.188099,
+        "mean_ms": 0.007974079388379204,
+        "max_ms": 3.44232
+      },
+      "worker.exec.gil": {
+        "count": 8157,
+        "total_ms": 602.868146,
+        "mean_ms": 0.07390807233051366,
+        "max_ms": 5.733344
+      },
+      "worker.exec.deserialize": {
+        "count": 8189,
+        "total_ms": 7314.213563,
+        "mean_ms": 0.8931754259372329,
+        "max_ms": 233.220828
+      },
+      "worker.exec.call": {
+        "count": 8175,
+        "total_ms": 2188632.519634,
+        "mean_ms": 267.7226323711315,
+        "max_ms": 25715.676943
+      },
+      "worker.store_data": {
+        "count": 8155,
+        "total_ms": 11.781839,
+        "mean_ms": 0.0014447380748007358,
+        "max_ms": 0.249505
+      },
+      "worker.handle_event": {
+        "count": 8186,
+        "total_ms": 1738.341605,
+        "mean_ms": 0.2123554367212314,
+        "max_ms": 20.484795
+      },
+      "worker.task_complete": {
+        "count": 8164,
+        "total_ms": 390.768822,
+        "mean_ms": 0.04786487285644292,
+        "max_ms": 4.967915
+      },
+      "scheduler.tasks_finished": {
+        "count": 5460,
+        "total_ms": 133.995607,
+        "mean_ms": 0.024541319963369963,
+        "max_ms": 2.946315
+      },
+      "tcp.send.serialize": {
+        "count": 1502,
+        "total_ms": 765.0221,
+        "mean_ms": 0.5093356191744342,
+        "max_ms": 6.758113
+      },
+      "tcp.send.queue": {
+        "count": 1501,
+        "total_ms": 2567.682427,
+        "mean_ms": 1.7106478527648235,
+        "max_ms": 53.362693
+      },
+      "tcp.send.compress": {
+        "count": 1502,
+        "total_ms": 1238.13448,
+        "mean_ms": 0.8243238881491345,
+        "max_ms": 9.242495
+      },
+      "tcp.send.write_queue": {
+        "count": 1501,
+        "total_ms": 643.490044,
+        "mean_ms": 0.4287075576282478,
+        "max_ms": 18.397369
+      },
+      "worker.transfer.recv": {
+        "count": 1453,
+        "total_ms": 312.181591,
+        "mean_ms": 0.21485312525808672,
+        "max_ms": 3.947081
+      },
+      "tcp.send.write": {
+        "count": 1454,
+        "total_ms": 197.295756,
+        "mean_ms": 0.1356917166437414,
+        "max_ms": 3.759872
+      },
+      "tcp.recv.read": {
+        "count": 1453,
+        "total_ms": 183.863794,
+        "mean_ms": 0.12654080798348244,
+        "max_ms": 2.728017
+      },
+      "tcp.recv.queue": {
+        "count": 1454,
+        "total_ms": 3270.393686,
+        "mean_ms": 2.2492391237964235,
+        "max_ms": 285.824304
+      },
+      "tcp.recv.decompress": {
+        "count": 1453,
+        "total_ms": 1478.167155,
+        "mean_ms": 1.0173208224363386,
+        "max_ms": 8.03815
+      },
+      "worker.deserialize": {
+        "count": 1456,
+        "total_ms": 1296.012992,
+        "mean_ms": 0.8901188131868132,
+        "max_ms": 6.966732
+      },
+      "scheduler.data_received": {
+        "count": 1393,
+        "total_ms": 7.382579,
+        "mean_ms": 0.005299769562096195,
+        "max_ms": 0.201757
+      },
+      "worker.idle": {
+        "count": 379,
+        "total_ms": 131379.61662,
+        "mean_ms": 346.6480649604222,
+        "max_ms": 4655.032436
+      },
+      "worker.send_data_to_scheduler": {
+        "count": 2,
+        "total_ms": 172.566357,
+        "mean_ms": 86.2831785,
+        "max_ms": 125.887726
+      },
+      "scheduler.sender.flush_client": {
+        "count": 3,
+        "total_ms": 188.301401,
+        "mean_ms": 62.767133666666666,
+        "max_ms": 145.900829
+      },
+      "client.receive_result": {
+        "count": 9,
+        "total_ms": 263.184428,
+        "mean_ms": 29.242714222222222,
+        "max_ms": 47.245728
+      },
+      "profile.stats": {
+        "count": 1,
+        "total_ms": 100.21518,
+        "mean_ms": 100.21518,
+        "max_ms": 100.21518
+      }
+    },
+    "worker_outliers": [
+      {
+        "worker": "unix:///tmp/user/1000/frisky-sock-8hgjyp45/worker-3195517-0.sock",
+        "score": 0.172566357,
+        "deviations": [
+          {
+            "span": "worker.send_data_to_scheduler",
+            "excess_s": 0.172566357,
+            "sigma": 4.0
+          }
+        ]
+      }
+    ],
+    "chrome_events": 1012
+  },
+  "stages": [
+    {
+      "stage": "imports",
+      "meta": {},
+      "t_mono_start": 111185.468225679,
+      "rss_start_mb": 25.08203125,
+      "ru_maxrss_start_mb": 26.5,
+      "t_mono_end": 111186.096177255,
+      "wall_s": 0.587184924,
+      "cpu_s": 1.631537588,
+      "rss_end_mb": 151.52734375,
+      "rss_delta_mb": 126.4453125,
+      "ru_maxrss_end_mb": 151.52734375,
+      "ru_maxrss_delta_mb": 125.02734375,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 135.65,
+        "client_rss_peak_mb": 122.65,
+        "workers_rss_peak_mb": 13.0,
+        "sys_available_min_mb": 40821.3,
+        "samples": 5,
+        "window_s": 0.4548999999969965,
+        "net_recv_mb": 0.0010000000002037268,
+        "net_sent_mb": 0.0,
+        "disk_read_mb": 0.0,
+        "net_recv_mb_s": 0.0021982853378991634,
+        "net_recv_mb_s_peak": 0.009132420093903198
+      }
+    },
+    {
+      "stage": "boundary",
+      "meta": {
+        "url": "https://raw.githubusercontent.com/nlebovits/landsat-lst/main/data/pergamino_dept.gpkg",
+        "bbox": [
+          -60.942796,
+          -34.17645991,
+          -60.138771,
+          -33.54020044
+        ],
+        "bytes": 139264
+      },
+      "t_mono_start": 111186.096290175,
+      "rss_start_mb": 151.52734375,
+      "ru_maxrss_start_mb": 151.52734375,
+      "t_mono_end": 111186.579854968,
+      "wall_s": 0.48351479,
+      "cpu_s": 0.045574591,
+      "rss_end_mb": 191.69921875,
+      "rss_delta_mb": 40.171875,
+      "ru_maxrss_end_mb": 191.69921875,
+      "ru_maxrss_delta_mb": 40.171875,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 187.32,
+        "client_rss_peak_mb": 174.32,
+        "workers_rss_peak_mb": 13.0,
+        "sys_available_min_mb": 40842.6,
+        "samples": 5,
+        "window_s": 0.4402000000118278,
+        "net_recv_mb": 0.1459999999997308,
+        "net_sent_mb": 0.0019999999999527063,
+        "disk_read_mb": 0.0,
+        "net_recv_mb_s": 0.3316674238887049,
+        "net_recv_mb_s_peak": 1.2971481139335903
+      }
+    },
+    {
+      "stage": "cluster_start",
+      "meta": {
+        "workers": 4,
+        "dashboard": "http://127.0.0.1:42995"
+      },
+      "t_mono_start": 111186.57996305,
+      "rss_start_mb": 191.69921875,
+      "ru_maxrss_start_mb": 191.69921875,
+      "t_mono_end": 111187.122237859,
+      "wall_s": 0.542218835,
+      "cpu_s": 0.010138783,
+      "rss_end_mb": 195.69921875,
+      "rss_delta_mb": 4.0,
+      "ru_maxrss_end_mb": 195.69921875,
+      "ru_maxrss_delta_mb": 4.0,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 562.39,
+        "client_rss_peak_mb": 194.32,
+        "workers_rss_peak_mb": 368.07,
+        "sys_available_min_mb": 40731.5,
+        "samples": 4,
+        "window_s": 0.34870000000228174,
+        "net_recv_mb": 0.0,
+        "net_sent_mb": 0.0,
+        "disk_read_mb": 0.0,
+        "net_recv_mb_s": 0.0,
+        "net_recv_mb_s_peak": 0.0
+      }
+    },
+    {
+      "stage": "stac_search",
+      "meta": {
+        "cloud_lt": 100,
+        "n_items": 24,
+        "platforms": [
+          "landsat-8",
+          "landsat-9"
+        ],
+        "by_platform": {
+          "landsat-9": 13,
+          "landsat-8": 11
+        },
+        "items_without_lwir11": 0
+      },
+      "t_mono_start": 111187.122376998,
+      "rss_start_mb": 195.69921875,
+      "ru_maxrss_start_mb": 195.69921875,
+      "t_mono_end": 111190.935148361,
+      "wall_s": 3.812703978,
+      "cpu_s": 0.750146791,
+      "rss_end_mb": 259.81640625,
+      "rss_delta_mb": 64.1171875,
+      "ru_maxrss_end_mb": 263.28125,
+      "ru_maxrss_delta_mb": 67.58203125,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 652.88,
+        "client_rss_peak_mb": 259.57,
+        "workers_rss_peak_mb": 393.32,
+        "sys_available_min_mb": 40672.2,
+        "samples": 35,
+        "window_s": 3.7355999999999767,
+        "net_recv_mb": 0.329000000000633,
+        "net_sent_mb": 0.013999999999668944,
+        "disk_read_mb": 0.014999999999417923,
+        "net_recv_mb_s": 0.08807152800102662,
+        "net_recv_mb_s_peak": 1.1303555150300473
+      }
+    },
+    {
+      "stage": "sign_assets",
+      "meta": {
+        "scenes": 24,
+        "signed_at": 1788877492.3265185
+      },
+      "t_mono_start": 111190.935305354,
+      "rss_start_mb": 259.81640625,
+      "ru_maxrss_start_mb": 263.28125,
+      "t_mono_end": 111191.137013243,
+      "wall_s": 0.201640604,
+      "cpu_s": 0.0199829,
+      "rss_end_mb": 259.94140625,
+      "rss_delta_mb": 0.125,
+      "ru_maxrss_end_mb": 263.28125,
+      "ru_maxrss_delta_mb": 0.0,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 653.26,
+        "client_rss_peak_mb": 259.94,
+        "workers_rss_peak_mb": 393.32,
+        "sys_available_min_mb": 40685.1,
+        "samples": 2,
+        "window_s": 0.10910000000149012,
+        "net_recv_mb": 0.0010000000002037268,
+        "net_sent_mb": 0.0,
+        "disk_read_mb": 0.0,
+        "net_recv_mb_s": 0.00916590284317203,
+        "net_recv_mb_s_peak": 0.00916590284317203
+      }
+    },
+    {
+      "stage": "graph_build",
+      "meta": {
+        "chunk": 256,
+        "scenes": 24,
+        "shape": [
+          2845,
+          2985
+        ],
+        "chunks": "((1024, 1024, 797), (1024, 1024, 937))"
+      },
+      "t_mono_start": 111191.137180705,
+      "rss_start_mb": 259.94140625,
+      "ru_maxrss_start_mb": 263.28125,
+      "t_mono_end": 111191.665253646,
+      "wall_s": 0.528019701,
+      "cpu_s": 0.528941639,
+      "rss_end_mb": 270.640625,
+      "rss_delta_mb": 10.69921875,
+      "ru_maxrss_end_mb": 270.640625,
+      "ru_maxrss_delta_mb": 7.359375,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 662.33,
+        "client_rss_peak_mb": 269.02,
+        "workers_rss_peak_mb": 393.32,
+        "sys_available_min_mb": 40686.3,
+        "samples": 5,
+        "window_s": 0.4397999999928288,
+        "net_recv_mb": 0.0,
+        "net_sent_mb": 0.0010000000002037268,
+        "disk_read_mb": 0.0,
+        "net_recv_mb_s": 0.0,
+        "net_recv_mb_s_peak": 0.0
+      }
+    },
+    {
+      "stage": "graph_optimize",
+      "meta": {
+        "raw_tasks": 22084,
+        "optimized_tasks": 8674,
+        "fusion_ratio": 2.5459995388517407
+      },
+      "t_mono_start": 111191.665353452,
+      "rss_start_mb": 270.640625,
+      "ru_maxrss_start_mb": 270.640625,
+      "t_mono_end": 111192.141122603,
+      "wall_s": 0.475713006,
+      "cpu_s": 0.477070153,
+      "rss_end_mb": 286.3828125,
+      "rss_delta_mb": 15.7421875,
+      "ru_maxrss_end_mb": 288.18359375,
+      "ru_maxrss_delta_mb": 17.54296875,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 675.67,
+        "client_rss_peak_mb": 282.36,
+        "workers_rss_peak_mb": 393.32,
+        "sys_available_min_mb": 40680.9,
+        "samples": 4,
+        "window_s": 0.32880000000295695,
+        "net_recv_mb": 0.0010000000002037268,
+        "net_sent_mb": 0.0,
+        "disk_read_mb": 0.0,
+        "net_recv_mb_s": 0.003041362531005881,
+        "net_recv_mb_s_peak": 0.009149130833514927
+      }
+    },
+    {
+      "stage": "compute",
+      "meta": {
+        "scenes": 24,
+        "chunk": 256,
+        "compute_started_at": 1788877493.331027,
+        "s_since_signing": 1.0045089721679688
+      },
+      "t_mono_start": 111192.141441066,
+      "rss_start_mb": 286.3828125,
+      "ru_maxrss_start_mb": 288.18359375,
+      "t_mono_end": 111299.508735645,
+      "wall_s": 107.367226542,
+      "cpu_s": 2.959286932,
+      "rss_end_mb": 482.76171875,
+      "rss_delta_mb": 196.37890625,
+      "ru_maxrss_end_mb": 699.45703125,
+      "ru_maxrss_delta_mb": 411.2734375,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 2721.11,
+        "client_rss_peak_mb": 699.46,
+        "workers_rss_peak_mb": 2365.81,
+        "sys_available_min_mb": 39402.9,
+        "samples": 976,
+        "window_s": 107.29400000000896,
+        "net_recv_mb": 591.0410000000002,
+        "net_sent_mb": 19.90599999999995,
+        "disk_read_mb": 4.1639999999897555,
+        "net_recv_mb_s": 5.508611851547625,
+        "net_recv_mb_s_peak": 13.692870200952857
+      }
+    },
+    {
+      "stage": "stats",
+      "meta": {},
+      "t_mono_start": 111299.508918195,
+      "rss_start_mb": 482.76171875,
+      "ru_maxrss_start_mb": 699.45703125,
+      "t_mono_end": 111299.609185072,
+      "wall_s": 0.10019935,
+      "cpu_s": 0.126166766,
+      "rss_end_mb": 556.28125,
+      "rss_delta_mb": 73.51953125,
+      "ru_maxrss_end_mb": 699.45703125,
+      "ru_maxrss_delta_mb": 0.0,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 1603.71,
+        "client_rss_peak_mb": 556.28,
+        "workers_rss_peak_mb": 1047.43,
+        "sys_available_min_mb": 39851.1,
+        "samples": 1,
+        "window_s": 0.0,
+        "net_recv_mb": 0.0,
+        "net_sent_mb": 0.0,
+        "disk_read_mb": 0.0,
+        "net_recv_mb_s": 0.0,
+        "net_recv_mb_s_peak": 0.0
+      }
+    },
+    {
+      "stage": "report",
+      "meta": {},
+      "t_mono_start": 111299.609334421,
+      "rss_start_mb": 556.28125,
+      "ru_maxrss_start_mb": 699.45703125,
+      "t_mono_end": 111300.674564939,
+      "wall_s": 1.065165016,
+      "cpu_s": 1.069965168,
+      "rss_end_mb": 569.453125,
+      "rss_delta_mb": 13.171875,
+      "ru_maxrss_end_mb": 699.45703125,
+      "ru_maxrss_delta_mb": 0.0,
+      "ok": true,
+      "memory_window": {
+        "tree_rss_peak_mb": 1749.16,
+        "client_rss_peak_mb": 693.01,
+        "workers_rss_peak_mb": 1056.15,
+        "sys_available_min_mb": 39817.1,
+        "samples": 9,
+        "window_s": 0.8812000000034459,
+        "net_recv_mb": 30.692000000000007,
+        "net_sent_mb": 30.684000000000196,
+        "disk_read_mb": 0.0,
+        "net_recv_mb_s": 34.82977757589649,
+        "net_recv_mb_s_peak": 280.4844606916493
+      }
+    }
+  ],
+  "memory": {
+    "samples": 1052,
+    "interval_s": 0.1,
+    "tree_rss_peak_mb": 2721.11,
+    "client_rss_peak_mb": 699.46,
+    "workers_rss_peak_mb": 2365.81,
+    "sys_available_min_mb": 39402.9
+  },
+  "throughput": {
+    "net_recv_mb": 591.0410000000002,
+    "wall_s": 107.367226542,
+    "mb_per_s": 5.504854870855738,
+    "mb_per_s_peak": 13.692870200952857,
+    "mb_per_scene": 24.62670833333334,
+    "s_per_scene": 4.47363443925,
+    "concurrency": 32,
+    "exec_s": 2188.632519634,
+    "effective_parallelism": 20.384549271912586,
+    "utilisation_pct": 63.70171647472683
+  }
+}
