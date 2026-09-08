@@ -233,6 +233,22 @@ def parse_args(argv=None):
     p.add_argument("--read-threads", type=int, default=4,
                    help="threads used to read scenes inside one shard")
     p.add_argument("--max-shards", type=int, default=None, help="cap, for smoke runs")
+    p.add_argument(
+        "--shard-slice",
+        default=None,
+        metavar="A:B",
+        help="process only shards[A:B] of the plan. The plan is deterministic "
+        "and anchored to whole degrees, so slice i on one machine and slice j "
+        "on another cover the tile exactly once between them",
+    )
+    p.add_argument(
+        "--merge",
+        nargs="+",
+        default=None,
+        metavar="DIR",
+        help="assemble a finished tile from the part files written by "
+        "--shard-slice runs, then exit",
+    )
     p.add_argument("--out-dir", type=Path, default=Path("./shard-run"))
     p.add_argument("--force", action="store_true",
                    help="run even if slots x read-threads oversubscribes the cores")
@@ -243,8 +259,60 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def merge_parts(dirs, out_dir: Path) -> int:
+    """Assemble one tile from the parts written by --shard-slice runs."""
+    import numpy as np
+
+    parts = sorted(f for d in dirs for f in Path(d).glob("part-*.npz"))
+    if not parts:
+        raise SystemExit(f"no part-*.npz under {dirs}")
+
+    meta = json.loads((Path(parts[0]).parent / "part-meta.json").read_text())
+    h, w = meta["raster"]
+    lst = np.zeros((h, w), dtype="uint16")
+    qa = np.zeros((12, h, w), dtype="uint8")
+
+    seen = np.zeros((h, w), dtype=bool)
+    n = 0
+    for f in parts:
+        with np.load(f) as z:
+            for key in z.files:
+                if not key.startswith("lst_"):
+                    continue
+                tag = key[4:]
+                y0, x0 = (int(v) for v in tag.split("_"))
+                a = z[key]
+                q = z["qa_" + tag]
+                lst[y0:y0 + a.shape[0], x0:x0 + a.shape[1]] = a
+                qa[:, y0:y0 + q.shape[1], x0:x0 + q.shape[2]] = q
+                seen[y0:y0 + a.shape[0], x0:x0 + a.shape[1]] = True
+                n += 1
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    covered = float(seen.mean())
+    valid = lst != LST_NODATA_DN
+    print(f"merged        {n} shards from {len(parts)} part files")
+    print(f"raster        {w} x {h}   coverage {covered*100:.2f}%")
+    if covered < 1.0:
+        missing = int((~seen).sum())
+        print(f"WARNING       {missing:,} px never written; a slice is missing")
+    if valid.any():
+        cel = lst[valid].astype("float64") * LST_SCALE + LST_OFFSET
+        print(f"LST p95       min {cel.min():.1f} C  mean {cel.mean():.1f} C  "
+              f"max {cel.max():.1f} C  ({100*valid.mean():.1f}% valid)")
+    np.save(out_dir / "lst_p95_dn.npy", lst)
+    np.save(out_dir / "qa_count.npy", qa)
+    (out_dir / "merge.json").write_text(json.dumps(
+        {"shards": n, "parts": len(parts), "coverage": covered,
+         "raster": [h, w], "meta": meta}, indent=2, default=str))
+    print(f"artifacts     {out_dir.resolve()}")
+    return 0 if covered == 1.0 else 2
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if args.merge:
+        return merge_parts(args.merge, args.out_dir)
     bbox = tuple(float(v) for v in args.bbox.split(","))
     if len(bbox) != 4:
         raise SystemExit("--bbox needs west,south,east,north")
@@ -347,6 +415,12 @@ def main(argv=None) -> int:
         idx = items_for_shard(sh, item_bboxes)
         if idx:
             work.append((sh, [item_dicts[i] for i in idx]))
+    if args.shard_slice:
+        a, _, b = args.shard_slice.partition(":")
+        lo = int(a) if a else 0
+        hi = int(b) if b else len(work)
+        work = work[lo:hi]
+        print(f"slice         shards[{lo}:{hi}] of {len(shards)} planned")
     if args.max_shards:
         work = work[: args.max_shards]
     counts = [len(d) for _, d in work]
@@ -443,6 +517,25 @@ def main(argv=None) -> int:
     except Exception as exc:
         summary["span_error"] = repr(exc)
     cluster.close()
+
+    # Write this slice as a part file so other machines' slices can be merged.
+    import numpy as _np
+
+    payload = {}
+    for sh, _d in work:
+        tag = f"{sh.y0}_{sh.x0}"
+        a = lst_out[sh.y0:sh.y0 + sh.ny, sh.x0:sh.x0 + sh.nx]
+        if not a.any():
+            continue
+        payload["lst_" + tag] = a
+        payload["qa_" + tag] = qa_out[:, sh.y0:sh.y0 + sh.ny, sh.x0:sh.x0 + sh.nx]
+    if payload:
+        _np.savez_compressed(args.out_dir / "part-000.npz", **payload)
+        (args.out_dir / "part-meta.json").write_text(json.dumps(
+            {"raster": [height, width], "bbox": bbox, "crs": args.crs,
+             "pixels_per_degree": args.pixels_per_degree,
+             "shard_px": args.shard, "n_shards": len(work)}, indent=2))
+        print(f"part written  {args.out_dir/'part-000.npz'} ({len(payload)//2} shards)")
 
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
     print(f"artifacts     {args.out_dir.resolve()}")

@@ -569,3 +569,45 @@ Five EC2 sessions, eight completed department-scale runs, one completed 200-scen
 | `ec2-results/` | eight EC2 runs: stages, memory series, graph stats, frisky reports |
 | `smoke/`, `smoke2/`, `split/`, `sweep/` | local runs with full frisky spans and traces |
 | `full/` | the 673-scene local run, ended early by a network change |
+
+## Splitting one tile across machines
+
+The shard plan is deterministic and anchored to whole degrees, so a shard covers
+the same pixels regardless of which request produced it. That makes a tile
+splittable across machines with no coordination beyond the slice index.
+
+```bash
+# four machines, one tile
+uv run shard_lst_p95.py --bbox=-65,-35,-60,-30 --pixels-per-degree 3600 \
+    --shard-slice 0:324   --out-dir ./part0     # machine 0
+uv run shard_lst_p95.py ... --shard-slice 324:648  --out-dir ./part1
+uv run shard_lst_p95.py ... --shard-slice 648:972  --out-dir ./part2
+uv run shard_lst_p95.py ... --shard-slice 972:1296 --out-dir ./part3
+
+# then anywhere
+uv run shard_lst_p95.py --merge part0 part1 part2 part3 --out-dir ./tile
+```
+
+Verified locally: four slices of a full tile cover **324,000,000 px exactly**,
+with no gaps and no overlap, and a merge round-trip reproduces the source array
+bit for bit. Merging an incomplete set reports the missing pixel count and exits
+non-zero rather than writing a quietly wrong raster.
+
+### Wall clock per tile
+
+Cost is flat, because the work is CPU-bound and you are buying core-hours either
+way. Only wall time changes.
+
+| hardware for one tile | compute | cost |
+|---|---|---|
+| 1 x `c6i.16xlarge` (64 vCPU) | ~20 min | $0.88 |
+| 2 x `c6i.16xlarge` | ~10 min | $0.88 |
+| 4 x `c6i.16xlarge` | **~5 min** | $0.89 |
+
+Add roughly 160 s for boot and dependency install on a cold instance, and 40 s
+for the STAC search. Keeping an instance warm removes the first; caching the
+item list removes most of the second.
+
+Note that `c6i` beats the `r6i` used for the measurements on both axes: the peak
+was 26.5 GiB of 96, so the memory-optimised instance was renting RAM the job
+never touched.
