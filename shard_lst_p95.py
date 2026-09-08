@@ -328,17 +328,6 @@ def main(argv=None) -> int:
     # are I/O-bound and want oversubscription. So size slots to cores and let
     # read threads be the only multiplier.
     concurrency = args.workers * args.threads_per_worker
-    total_threads = concurrency * args.read_threads
-    cores = os.cpu_count() or 1
-    print(f"concurrency   {concurrency} shard slots x {args.read_threads} read "
-          f"threads = {total_threads} threads on {cores} cores")
-    if total_threads > cores * 6:
-        raise SystemExit(
-            f"{total_threads} threads on {cores} cores will thrash. Slots and "
-            f"read threads multiply. Try --workers {cores} "
-            f"--threads-per-worker 1 --read-threads 4, or pass --force."
-            if not args.force else ""
-        )
 
     print(f"bbox          {bbox}")
     print(f"grid          {args.crs} @ 1/{args.pixels_per_degree} deg")
@@ -347,6 +336,16 @@ def main(argv=None) -> int:
           f"({max(s.row for s in shards)+1} x {max(s.col for s in shards)+1})")
 
     if args.dry_run:
+        if args.shard_slice:
+            a, _, b = args.shard_slice.partition(":")
+            lo = int(a) if a else 0
+            hi = int(b) if b else len(shards)
+            mine = shards[lo:hi]
+            px = sum(sh.ny * sh.nx for sh in mine)
+            print(f"slice         shards[{lo}:{hi}] -> {len(mine)} shards, "
+                  f"{px:,} px ({100*px/(width*height):.1f}% of the tile)")
+            ys = [sh.y0 for sh in mine]; xs = [sh.x0 for sh in mine]
+            print(f"              rows {min(ys)}..{max(ys)}  cols {min(xs)}..{max(xs)}")
         edge = [s for s in shards if s.ny != args.shard or s.nx != args.shard]
         print(f"edge shards   {len(edge)} smaller than {args.shard} px")
         cover = sum(s.ny * s.nx for s in shards)
@@ -381,6 +380,19 @@ def main(argv=None) -> int:
         return 0
 
     # ---------------- execute ----------------
+    # Checked here, not before the dry run: planning a slice must never be
+    # blocked by a runtime concurrency decision.
+    total_threads = concurrency * args.read_threads
+    cores = os.cpu_count() or 1
+    print(f"concurrency   {concurrency} shard slots x {args.read_threads} read "
+          f"threads = {total_threads} threads on {cores} cores")
+    if total_threads > cores * 6 and not args.force:
+        raise SystemExit(
+            f"{total_threads} threads on {cores} cores will thrash: slots and "
+            f"read threads multiply. Try --workers {cores} "
+            f"--threads-per-worker 1 --read-threads 4, or pass --force."
+        )
+
     import numpy as np
     import psutil
 
