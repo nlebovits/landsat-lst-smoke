@@ -18,6 +18,7 @@ from shard_lst_p95 import (  # noqa: E402
     configure_read_env,
     items_for_shard,
     plan_shards,
+    SHARD_FIXED_GIB,
     shard_bytes,
 )
 
@@ -147,17 +148,49 @@ class TestItemsForShard:
 
 
 class TestShardBytes:
-    def test_the_quarter_tile_working_set(self):
-        """FINDINGS.md: a 512 px shard needs 1.85 GB for 1,765 scenes."""
+    """The budget a fleet instance is sized from.
+
+    These assertions used to encode a float32-only model that reported 0.39 GiB
+    for a shard measured at 1.52. Reading the low number put 64 workers wanting
+    97 GiB on a 128 GiB box, and they died at cluster start. So the anchor is
+    now a measurement rather than a figure quoted from the document.
+    """
+
+    def test_it_matches_the_measured_peak(self):
+        """MEASURED: 1.52 GiB peak RSS, 404 scenes at 512 px, one process.
+
+        `scratchpad/fdprobe.py` samples /proc/self/statm through one real
+        `process_shard` call over synthetic scenes. The model has to land on
+        that, because everything downstream is sized from it.
+        """
+        assert shard_bytes(512, 404) == pytest.approx(1.52, abs=0.05)
+
+    def test_it_counts_every_array_that_is_live_at_once(self):
+        """Five arrays, 13 bytes per pixel-scene, not the decoded stack alone.
+
+        dn uint16 and qa uint16 at 2 each, celsius float32 at 4, the valid mask
+        at 1, and the copy `nanpercentile` partitions at 4.
+        """
+        arrays = shard_bytes(512, 1765) - SHARD_FIXED_GIB
+        float32_only = 512 * 512 * 1765 * 4 / 1024**3
+        assert arrays == pytest.approx(float32_only * 13 / 4, rel=1e-6)
+
+    def test_the_arrays_scale_with_the_square_of_the_edge(self):
+        """The fixed term does not scale, so compare the arrays alone."""
+        big = shard_bytes(1024, 1765) - SHARD_FIXED_GIB
+        small = shard_bytes(512, 1765) - SHARD_FIXED_GIB
+        assert big == pytest.approx(4 * small)
+
+    def test_a_quarter_tile_shard_no_longer_fits_a_small_worker(self):
+        """1,765 scenes at 512 px is 6.3 GB, not the 1.85 GB long quoted.
+
+        6.0 GB of that is array and the rest is per-worker overhead. The
+        difference decides how many workers an instance can hold, which is what
+        the failed run got wrong.
+        """
         gib = shard_bytes(512, 1765)
-        assert round(gib * 1024**3 / 1e9, 2) == 1.85
-
-    def test_it_scales_with_the_square_of_the_edge(self):
-        assert shard_bytes(1024, 1765) == pytest.approx(4 * shard_bytes(512, 1765))
-
-    def test_the_1024_px_worst_case_from_the_corrections_section(self):
-        """FINDINGS.md puts the worst 1024 px shard at 2.83 GiB."""
-        assert shard_bytes(1024, 723) == pytest.approx(2.83, abs=0.01)
+        assert round(gib * 1024**3 / 1e9, 1) == 6.3
+        assert gib > 1.8, "a 1.8 GiB worker limit cannot hold this shard"
 
 
 class TestConfigureReadEnv:

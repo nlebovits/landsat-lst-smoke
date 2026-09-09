@@ -19,10 +19,11 @@ This version splits the *problem* instead of the array. Each shard is a small
 bbox processed entirely inside one worker: load, mask, reduce, encode, return.
 Nothing crosses a worker boundary, so there is no rechunk and no shuffle.
 
-    512 x 512 px x 1765 scenes x 4 bytes = 1.85 GB per shard
+    512 x 512 px x 1765 scenes x 13 bytes = 6.0 GB per shard
 
-That fits in one worker with room to spare, and it stays constant as the area
-grows. A quarter tile is 324 shards; a full tile is 1,296. Frisky schedules
+Thirteen bytes, not four: the decoded float32 stack is one of five arrays that
+are live at once. See `shard_bytes`, which counted only that one until a fleet
+instance ran out of memory. The figure stays constant as the area grows. A quarter tile is 324 shards; a full tile is 1,296. Frisky schedules
 250,000-400,000 tasks/s, so the task count is free.
 
     uv run shard_lst_p95.py --bbox=-62.5,-35.0,-60.0,-32.5 \
@@ -209,9 +210,39 @@ def items_for_shard(shard: Shard, item_bboxes) -> list[int]:
     ]
 
 
+#: Bytes per pixel-scene that one shard holds at its peak. `process_shard` has
+#: five arrays live at once, not the one an earlier version of this function
+#: counted:
+#:
+#:     dn      uint16   2      the raw thermal stack
+#:     qa      uint16   2      the QA stack
+#:     celsius float32  4      the decoded stack
+#:     valid   bool     1      the mask, kept for the monthly counts
+#:     copy    float32  4      nanpercentile partitions a copy, not in place
+#:
+#: MEASURED at 1.52 GiB peak RSS for 404 scenes at 512 px, against 1.28 GiB of
+#: array and about 0.25 GiB of interpreter, numpy and GDAL.
+SHARD_BYTES_PER_PIXEL_SCENE = 13
+
+#: Per-worker overhead outside the arrays, in GiB. From the same measurement.
+SHARD_FIXED_GIB = 0.25
+
+
 def shard_bytes(shard_px: int, n_scenes: int) -> float:
-    """Peak float32 working set for one shard's complete time stack, in GiB."""
-    return shard_px * shard_px * n_scenes * 4 / GIB
+    """Peak working set for one shard, in GiB.
+
+    Counting only the float32 stack understated this by 3.9x, and every memory
+    decision in the pipeline read the low number: the dry-run budget, the shard
+    size, and the worker count a fleet instance is launched with. A run
+    configured from it put 64 workers wanting 97 GiB on a 128 GiB box that had
+    just written 78 GB of staged scenes into page cache, and the workers died
+    at cluster start.
+
+    `FINDINGS.md` recorded the symptom before the model was fixed: memory ran
+    at 94% of a 1.6 GiB limit that this function called 0.39 GiB.
+    """
+    arrays = shard_px * shard_px * n_scenes * SHARD_BYTES_PER_PIXEL_SCENE / GIB
+    return arrays + SHARD_FIXED_GIB
 
 
 # --------------------------------------------------------------------------
