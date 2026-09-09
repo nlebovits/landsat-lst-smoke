@@ -3,7 +3,7 @@
 # dependencies = [
 #   "frisky>=0.7.2", "dask", "odc-stac", "pystac-client",
 #   "planetary-computer", "xarray", "numpy", "geopandas",
-#   "psutil", "rich", "boto3",
+#   "psutil", "rich", "boto3", "pyarrow>=16",
 # ]
 # ///
 """Sharded p95 LST composite. One shard, one task, no shuffle.

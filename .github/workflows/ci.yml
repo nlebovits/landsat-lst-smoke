@@ -94,3 +94,12 @@ jobs:
 
       - name: pytest
         run: uv run pytest
+
+      # A script has to run on the dependencies its own PEP 723 block declares,
+      # not on the dev group, which is the union of every script's. The suite
+      # above runs inside that union and cannot tell the two apart. This step
+      # can: it copies the scripts to a fresh path and runs them there, which
+      # is what a fleet instance holds after git clone. A missing line here
+      # once cost a live c6id.16xlarge.
+      - name: Script environments resolve on their own metadata
+        run: uv run pytest -m packaging

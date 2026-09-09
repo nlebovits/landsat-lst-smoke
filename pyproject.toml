@@ -69,8 +69,10 @@ testpaths = ["tests"]
 #
 #     uv run pytest -m "network and not s3"     # free, Earth Search only
 #     AWS_PROFILE=... uv run pytest -m s3       # costs money
-addopts = "-q --timeout=60 -m 'not network and not s3'"
+#     uv run pytest -m packaging                # resolves the script env
+addopts = "-q --timeout=60 -m 'not network and not s3 and not packaging'"
 markers = [
   "network: reaches Earth Search or the USGS bulk metadata service",
   "s3: reads s3://usgs-landsat, which is requester-pays and costs money",
+  "packaging: runs a script in its own PEP 723 environment, which resolves against PyPI",
 ]
