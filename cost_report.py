@@ -21,14 +21,48 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-# us-west-2 Linux on-demand list prices, USD/hr. Pinned because the Pricing API
-# needs pricing:GetProducts, which the SSO role used here does not have. Update
-# deliberately; a stale rate is a wrong report.
-RATES = {
+# Fallback only. Live rates come from AWS's public price list, which needs no
+# credentials; the Pricing API needs pricing:GetProducts, which this SSO role
+# lacks. A pinned rate that has gone stale is a wrong report, so these are used
+# only when the fetch fails, and the report says which source it used.
+RATES_FALLBACK = {
     "c6i.16xlarge": 2.72, "c6i.32xlarge": 5.44, "c6i.8xlarge": 1.36,
     "m6i.4xlarge": 0.768, "m6i.8xlarge": 1.536,
     "r6i.4xlarge": 1.008, "r6i.8xlarge": 2.016, "r6i.16xlarge": 4.032,
 }
+PRICE_URL = ("https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/"
+             "current/ec2-ondemand-without-sec-sel/{loc}/Linux/index.json")
+LOCATIONS = {"us-west-2": "US West (Oregon)", "us-east-1": "US East (N. Virginia)",
+             "eu-central-1": "EU (Frankfurt)", "eu-west-1": "EU (Ireland)"}
+
+
+def fetch_rates(region):
+    """VERIFIED rates from the public price list. Returns (rates, source)."""
+    import gzip
+    import urllib.parse
+    import urllib.request
+
+    loc = LOCATIONS.get(region)
+    if not loc:
+        return RATES_FALLBACK, f"pinned fallback (no location map for {region})"
+    url = PRICE_URL.format(loc=urllib.parse.quote(loc))
+    try:
+        with urllib.request.urlopen(url, timeout=45) as r:
+            raw = r.read()
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        d = json.loads(raw)
+        out = {}
+        for items in d.get("regions", {}).values():
+            for v in items.values():
+                t = v.get("Instance Type")
+                if t and v.get("price"):
+                    out[t] = float(v["price"])
+        if out:
+            return out, "VERIFIED from AWS public price list"
+    except Exception as exc:
+        return RATES_FALLBACK, f"pinned fallback (fetch failed: {type(exc).__name__})"
+    return RATES_FALLBACK, "pinned fallback (empty response)"
 EBS_GP3_GB_MONTH = 0.08          # USD per GB-month
 IPV4_HR = 0.005                  # USD per public IPv4 per hour
 S3_GET_PER_1000 = 0.0004         # USD, Standard, requester pays
@@ -94,6 +128,7 @@ def main() -> int:
     p.add_argument("--json", type=argparse.FileType("w"), default=None)
     a = p.parse_args()
 
+    RATES, rate_src = fetch_rates(a.region)
     rows = lifetimes(a.tag, a.profile, a.region)
     if not rows:
         raise SystemExit(f"no instances matching {a.tag} (terminated ones age out ~1h)")
@@ -121,7 +156,8 @@ def main() -> int:
         by_type[r["type"]] = by_type.get(r["type"], 0.0) + r["seconds"]
         ebs_gb_sec += (a.ebs_gb or r["ebs_gb"] or 0) * r["seconds"]
 
-    print(f"\n=== DERIVED: EC2, from pinned us-west-2 Linux on-demand rates ===")
+    print(f"\n=== DERIVED: EC2 ===")
+    print(f"  rate source: {rate_src}")
     ec2 = 0.0
     missing_rate = []
     for t, sec in sorted(by_type.items()):
@@ -167,7 +203,9 @@ def main() -> int:
     if s3 is None:
         print( "  S3 requests                = UNKNOWN, excluded")
         print(f"  => total is a LOWER BOUND of ${known:.4f}")
-    print("\n  Rates are pinned list prices, not billed amounts. Cost Explorer is")
+    print(f"\n  EC2 rate: {rate_src}.")
+    print("  EBS, IPv4 and S3 rates are published values, not fetched.")
+    print("  These are list prices, not billed amounts. Cost Explorer is")
     print("  authoritative; this report is not a bill.")
 
     if a.json:
@@ -179,7 +217,7 @@ def main() -> int:
                 "shard_scene_reads": a.shard_scene_reads},
             "derived": {"ec2_usd": ec2, "ebs_usd": ebs, "ipv4_usd": ip4, "s3_usd": s3},
             "unknown": [] if s3 is not None else ["s3_request_charge"],
-            "rates": {"ec2": RATES, "ebs_gb_month": EBS_GP3_GB_MONTH,
+            "rates": {"ec2_source": rate_src, "ec2": RATES, "ebs_gb_month": EBS_GP3_GB_MONTH,
                       "ipv4_hr": IPV4_HR, "s3_get_per_1000": S3_GET_PER_1000},
         }, a.json, indent=2, default=str)
     return 0

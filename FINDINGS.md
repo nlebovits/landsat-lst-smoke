@@ -748,10 +748,10 @@ second past a 60-second minimum, so `cost = instance_seconds / 3600 x rate`.
 | Public IPv4 | 0.7133 ih x $0.005 | $0.004 |
 | S3 to EC2 transfer, same region | | $0.00 |
 
-The $2.72/hr rate is a pinned list price. The Pricing API returns `AccessDenied`
-for this SSO role, so it is unverified in-session; spot at $0.89-$1.03 is
-consistent with it. Cost Explorer is also `AccessDenied`, so no billed figure
-exists to check against. **This is not a bill.**
+The $2.72/hr rate is now **VERIFIED** against AWS's public price list, which
+needs no credentials (see "Establishing pricing empirically" below). Cost
+Explorer remains `AccessDenied`, so no *billed* figure exists to check against.
+**This is arithmetic on a verified rate, not a bill.**
 
 #### UNKNOWN
 
@@ -884,3 +884,67 @@ Until `measure_s3_requests.py` runs:
 - the full-tile cost is a **lower bound of ~$1.96**, not a total
 - the 520-tile global figure is **EC2 only**, $469-$539 on-demand
 - no chunk-size or architecture change is justified on cost grounds
+
+## Establishing pricing empirically
+
+Three unknowns stood between measured usage and a defensible cost. One is now
+closed, one is a bounded test, one needs a permission.
+
+### 1. EC2 rate — CLOSED, verified, no credentials
+
+AWS publishes on-demand rates as a public JSON file that needs no auth, which
+matters because `pricing:GetProducts` is `AccessDenied` for this SSO role:
+
+```
+https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/
+  ec2-ondemand-without-sec-sel/US%20West%20(Oregon)/Linux/index.json
+```
+
+It is gzipped despite the `.json` name. 1,322 instance types, and it confirms
+`c6i.16xlarge` at **$2.72/hr**, matching the pinned value. `cost_report.py` now
+fetches it at run time and prints `VERIFIED from AWS public price list`, falling
+back to the pinned table only if the fetch fails, and saying so when it does.
+
+The equivalent S3, EBS and IPv4 endpoints use different URL shapes and were not
+located. Those three rates remain published-but-unverified; together they were
+under 1% of this run.
+
+### 2. S3 requester-pays requests — BOUNDED TEST, ~$0.20
+
+The one unknown that can change a decision. `measure_s3_requests.py` counts the
+actual wire requests rather than assuming a multiplier:
+
+```bash
+uv run measure_s3_requests.py --shards 3                  # default load path
+uv run measure_s3_requests.py --shards 3 --load-chunk 2048  # and a larger one
+```
+
+Run in-region on one instance, a few minutes, a few thousand GETs. It emits
+`requests_per_band_read` as min, mean and max, which feeds
+`cost_report.py --requests-per-read`. Running it at two `--load-chunk` values
+is what would settle the retracted chunk-size question, since the claim was
+that larger blocks cut request count.
+
+### 3. Billed reconciliation — NEEDS A PERMISSION
+
+Nothing in this repo has ever been checked against an actual bill.
+`ce:GetCostAndUsage` returns `AccessDenied` for this role. It is read-only and
+cheap to grant. With it:
+
+```bash
+aws ce get-cost-and-usage --time-period Start=<day> End=<day+1> \
+  --granularity DAILY --metrics UnblendedCost UsageQuantity \
+  --group-by Type=DIMENSION,Key=SERVICE
+```
+
+Tag every instance with a run id, wait 24-48 h for Cost Explorer to settle, then
+compare the derived figure against the billed one. That converts "list price
+arithmetic" into a verified model. Until then every total here is arithmetic.
+
+### The one-hour window
+
+`describe-instances` keeps terminated instances for about an hour. After that
+`LaunchTime` and `StateTransitionReason` are gone and the lifetime is
+unrecoverable — `cost_report.py` reports exactly this if run too late, as it did
+for the fleet above. **Run the report immediately after teardown**, or capture
+the instance records into the artifacts directory before terminating.
