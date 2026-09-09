@@ -1,0 +1,89 @@
+{
+  "inputs": {
+    "bbox": [
+      -62.5,
+      -35.0,
+      -60.0,
+      -32.5
+    ],
+    "shard_index": 0,
+    "shard_bbox": [
+      -62.5,
+      -32.64222222222222,
+      -62.35777777777778,
+      -32.5
+    ],
+    "shard_pixels": [
+      512,
+      512
+    ],
+    "crs": "EPSG:4326",
+    "pixels_per_degree": 3600,
+    "resolution_deg": 0.0002777777777777778,
+    "start": "2020-01-01",
+    "end": "2025-01-01",
+    "platforms": "landsat-8,landsat-9",
+    "cloud_cover_lt": 100,
+    "source": "earth-search",
+    "n_scenes_loaded": 120,
+    "n_scenes_intersecting": 527,
+    "n_scenes_in_bbox": 1765
+  },
+  "rejections": {
+    "samples": 31457280,
+    "rejected_raw_fill": 9422215,
+    "rejected_qa_bits_1_to_5": 8979475,
+    "rejected_non_finite": 0,
+    "rejected_below_minus_50_c": 42,
+    "rejected_above_80_c": 0,
+    "qa_bits_set_anywhere": {
+      "dilated_cloud_bit_1": 345940,
+      "cirrus_bit_2": 3264696,
+      "cloud_bit_3": 7458684,
+      "cloud_shadow_bit_4": 878731,
+      "snow_bit_5": 527085
+    },
+    "legacy_qa_bits_3_and_4_removed": 8337415,
+    "rejected_total": 18401732,
+    "kept": 13055548
+  },
+  "valid_observations": {
+    "before": 13697650,
+    "after": 13055548,
+    "removed": 642102,
+    "observation_count_pixels_changed": 254562,
+    "pixels_with_zero_observations_before": 0,
+    "pixels_with_zero_observations_after": 0
+  },
+  "output": {
+    "pixels": 262144,
+    "valid_pixels_before": 262144,
+    "valid_pixels_after": 262144,
+    "pixels_changed": 247922,
+    "pixels_changed_fraction": 0.9457473754882812,
+    "valid_to_nodata": 0,
+    "nodata_to_valid": 0,
+    "both_valid": 262144,
+    "p95_difference_c": {
+      "min": -2.280000000000001,
+      "p50": 0.14000000000000057,
+      "p95": 0.6299999999999955,
+      "p99": 0.9200000000000017,
+      "max": 2.1500000000000057,
+      "mean": 0.20352573394775395
+    },
+    "before_celsius": {
+      "min": 37.18000000000001,
+      "max": 52.53,
+      "mean": 45.2458984375,
+      "outside_trusted_range": 0
+    },
+    "after_celsius": {
+      "min": 37.400000000000006,
+      "max": 52.57000000000001,
+      "mean": 45.44942417144775,
+      "outside_trusted_range": 0
+    },
+    "p95_outside_trusted_range_before_encoding": 0
+  }
+}

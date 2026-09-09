@@ -64,6 +64,7 @@ hooks = [
   {
     id = "vulture",
     args = [
+      "compare_qa_masks.py",
       "cost_report.py",
       "measure_s3_requests.py",
       "profile_lst_p95.py",

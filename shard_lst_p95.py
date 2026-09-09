@@ -38,6 +38,13 @@ import sys
 import time
 from pathlib import Path
 
+from lst_qa import (
+    LST_NODATA_DN,
+    LST_OFFSET,
+    LST_SCALE,
+    encode_celsius,
+    masked_celsius,
+)
 from stac_window import DEFAULT_END, DEFAULT_START, datetime_range
 
 STAC_EARTH_SEARCH = "https://earth-search.aws.element84.com/v1"
@@ -48,13 +55,6 @@ SOURCES = {
 }
 COLLECTION = "landsat-c2-l2"
 
-LWIR_SCALE = 0.00341802
-LWIR_OFFSET_C = 149.0 - 273.15
-LWIR_FILL_DN = 0
-QA_CLOUD_BITS = 0b11000
-
-LST_SCALE, LST_OFFSET = 0.01, -50.0
-LST_NODATA_DN, LST_MIN_DN, LST_MAX_DN = 0, 1, 65535
 MONTHS = [
     "Jan",
     "Feb",
@@ -186,8 +186,7 @@ def rehearse_shard(
     rng = np.random.default_rng(shard.row * 10007 + shard.col)
     n = max(len(item_dicts), 1)
     lst = rng.normal(45.0, 6.0, (shard.ny, shard.nx)).astype("float32")
-    dn = np.rint((lst - LST_OFFSET) / LST_SCALE)
-    dn[(dn < LST_MIN_DN) | (dn > LST_MAX_DN)] = LST_NODATA_DN
+    dn = encode_celsius(lst)
     qa = np.full((12, shard.ny, shard.nx), min(n // 12, 255), dtype="uint8")
     time.sleep(0.01)
     return {
@@ -195,7 +194,7 @@ def rehearse_shard(
         "col": shard.col,
         "y0": shard.y0,
         "x0": shard.x0,
-        "lst_p95": dn.astype("uint16"),
+        "lst_p95": dn,
         "qa_count": qa,
         "n_scenes": n,
         "load_s": 0.0,
@@ -239,14 +238,14 @@ def process_shard(
     ).compute(scheduler="threads", num_workers=read_threads)
     t_load = time.perf_counter() - t0
 
-    dn = data["lwir11"].values
-    qa = data["qa_pixel"].values
-    valid = ((qa & QA_CLOUD_BITS) == 0) & (dn != LWIR_FILL_DN)
-    del qa
-
-    lst = dn.astype("float32") * np.float32(LWIR_SCALE) + np.float32(LWIR_OFFSET_C)
-    del dn
-    lst[~valid] = np.nan
+    # One definition of a usable observation, shared with the array-graph path
+    # in profile_lst_p95. It drops source fill, QA_PIXEL bits 1 to 5, and any
+    # decoded value outside [-50, 80] C. The range check is what removes the
+    # reprojected scene edges, where interpolation against the DN 0 fill leaves
+    # small nonzero values that decode near -124 C and that an exact fill
+    # comparison cannot see. All of it happens before the percentile, because a
+    # value that reaches nanpercentile has already moved the answer.
+    lst, valid = masked_celsius(data["lwir11"].values, data["qa_pixel"].values)
 
     t1 = time.perf_counter()
     with np.errstate(all="ignore"):
@@ -260,15 +259,13 @@ def process_shard(
         if sel.any():
             qa_count[m - 1] = np.minimum(valid[sel].sum(axis=0), 255).astype("uint8")
 
-    dn_out = np.rint((p95 - LST_OFFSET) / LST_SCALE)
-    bad = ~np.isfinite(dn_out) | (dn_out < LST_MIN_DN) | (dn_out > LST_MAX_DN)
-    dn_out[bad] = LST_NODATA_DN
+    dn_out = encode_celsius(p95)
     return {
         "row": shard.row,
         "col": shard.col,
         "y0": shard.y0,
         "x0": shard.x0,
-        "lst_p95": dn_out.astype("uint16"),
+        "lst_p95": dn_out,
         "qa_count": qa_count,
         "n_scenes": int(lst.shape[0]),
         "load_s": t_load,

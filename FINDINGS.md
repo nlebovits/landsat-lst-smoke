@@ -26,6 +26,13 @@ assembled 1,296 of 1,296 shards at **100.00% coverage** in 13.3 s, peaking at
 LST p95   min -49.7 C   mean 45.8 C   max 90.6 C   (100.0% valid)
 ```
 
+Read the two ends of that range as evidence of a defect, not as temperatures.
+The run used a mask that let cirrus, dilated cloud, and snow through, and an
+encoder whose floor was DN 1. Under the mask the pipeline now applies, -49.7 C
+sits below the trusted minimum and 90.6 C sits above any land skin temperature,
+so both become nodata. The figures stand as what was measured. They are not what
+the pipeline would write today.
+
 S3 requester-pays requests are 54% of that $4.28 and EC2 is 45%. Shard size, not
 instance count, moves the larger half.
 
@@ -485,6 +492,95 @@ reduction, because it forces the time axis into one chunk.
 **6. One chunk size for two jobs.** Large blocks speed up reads and small blocks
 speed up the percentile. Separating them was the largest department-scale win.
 
+### The pixel mask was narrower than the mask it came from
+
+`nlebovits/landsat-lst` masks QA_PIXEL bits 1 to 5: dilated cloud, cirrus,
+cloud, cloud shadow, and snow. This repository masked bits 3 and 4, which is
+cloud and cloud shadow alone. The narrower mask dropped the rules below.
+
+**Cirrus and dilated cloud stayed in the stack.** Thin cloud and cloud edges
+leave per-scene warm and cool residuals behind, and a residual that follows a
+scene footprint is what produces striping in a composite.
+
+**An exact fill test cannot see a reprojected scene edge.** The raw band uses
+DN 0 for fill, and `dn != 0` removes it. Reprojection then interpolates between
+a valid DN and the fill beside it, which leaves small nonzero values along the
+edge. DN 5 decodes to -124.13 C. Nothing about it equals the fill value.
+Rejecting a decoded Celsius value outside `[-50, 80]` is what removes it.
+
+**The filter has to run before the percentile.** A range check on the finished
+P95 comes too late. The invalid samples were in the sample the percentile was
+drawn from, so they have already moved the answer, whatever the encoder does
+next.
+
+Invalid values are masked, never clipped. Clipping -124 C into range writes
+-49.99 C, which reads as a real, cold, believable pixel. A gap does not.
+`LST_MIN_TRUSTED_DN` is 2 for the same reason: DN 0 means fill and DN 1 is
+reachable only from the encoding floor, so DN 1 marks a failed retrieval.
+
+`lst_qa.py` now holds the rule and both P95 paths call it. `shard_lst_p95.py`
+wraps it in numpy and `profile_lst_p95.py` wraps it in xarray. The predicates
+are the same objects in both.
+
+### One shard, before and after the QA change
+
+MEASURED, 2026-09-09. `compare_qa_masks.py` ran shard r0 c0 of the quarter tile
+twice in one process, over one loaded stack. Everything except the mask was
+held fixed, the year window included, so nothing here is contaminated by the
+2021-2025 change.
+
+| input | value |
+|---|---|
+| shard | r0 c0, 512 x 512 px, bbox `(-62.5, -32.642222, -62.357778, -32.5)` |
+| grid | EPSG:4326 at 1/3600 degree |
+| window | 2020-01-01 to 2025-01-01, the window every other figure used |
+| scenes | 120 loaded, sampled evenly from the 527 that intersect the shard, of 1,765 in the bbox |
+| source | Earth Search, `landsat-8,landsat-9`, `eo:cloud_cover < 100` |
+
+Rejections over 31,457,280 samples, counted in the order the rules run:
+
+| rule | samples removed |
+|---|---|
+| raw thermal DN 0 | 9,422,215 |
+| QA_PIXEL bits 1 to 5 | 8,979,475 |
+| non-finite after decoding | 0 |
+| below -50 C | 42 |
+| above 80 C | 0 |
+| **kept** | **13,055,548** |
+
+The 42 samples below -50 C are the reprojected scene edge. They are 0.0001% of
+the stack and no exact fill test reaches them. QA bits 3 and 4 alone removed
+8,337,415 of the non-fill samples, so bits 1, 2, and 5 add 642,060. Counting
+each bit on its own across the whole stack: cloud 7,458,684, cirrus 3,264,696,
+cloud shadow 878,731, snow 527,085, dilated cloud 345,940.
+
+| output | before | after |
+|---|---|---|
+| valid observations in the stack | 13,697,650 | 13,055,548 |
+| valid output pixels of 262,144 | 262,144 | 262,144 |
+| pixels changed | 247,922 (94.57%) | |
+| pixels moving valid to nodata | 0 | |
+| pixels moving nodata to valid | 0 | |
+| P95 min, max | 37.18 C, 52.53 C | 37.40 C, 52.57 C |
+| finite outputs outside [-50, 80] C | 0 | 0 |
+
+Pixelwise difference, after minus before, over the 262,144 pixels valid in
+both: min -2.28 C, P50 +0.14 C, P95 +0.63 C, P99 +0.92 C, max +2.15 C, mean
++0.20 C. The composite warms, which is what removing cool cloud contamination
+from a ninety-fifth percentile does.
+
+`qa-parity/qa_difference.png` holds the two rasters and their difference. This
+shard sits inside a WRS footprint, so it shows field-shaped differences and no
+scene boundary. A shard chosen on a footprint edge would show the boundary
+case. The image is diagnostic. The table is the measurement.
+
+The year change was measured on its own. A dry run of the same quarter tile
+over 2021-01-01 to 2025-12-31T23:59:59Z returns **1,984 scenes** against the
+1,765 the 2020-2024 window returned. Scenes per shard become min 199, P50 536,
+P95 797, max 798, which puts the worst 512 px shard at 0.78 GiB and 24.9 GiB
+across 32 slots. Do not compare that run's output with a 2020-2024 run as
+though only the mask had changed.
+
 ### Rehearsal mode finds them on a laptop
 
 Almost every failure here was findable on a laptop, and this session kept
@@ -622,6 +718,17 @@ a zero count.
 - **The department tuning covers one department at 711 scenes.** A different
   area or scene count moves the optimum, because the memory term scales with
   both.
+- **This pipeline does not destripe.** The QA and nodata rules match
+  `nlebovits/landsat-lst` at the pixel level. They are not the destriping
+  algorithm. Scene-offset correction, the monthly climatology it fits, the
+  ASTER GED gap handling, and the temporal sampling rule are all absent here,
+  and the P95 itself is unchanged. A tighter mask removes some of what feeds
+  scene-edge artifacts. It does not make this composite equal to the production
+  one.
+- **The QA comparison covers one 512 px shard at 120 scenes.** That shard sits
+  inside a WRS footprint, so it measures the interior case and not the boundary
+  case.
+- **No 2021-2025 composite has been built.** Only its scene count is measured.
 
 ## Corrections to earlier versions of this document
 
@@ -630,6 +737,15 @@ mistake: it presented an estimate as a measurement.
 
 **The full tile cost $10.70.** Wrong. That assumed each instance ran an hour.
 Each ran 642 s, so the fleet cost $1.94 of EC2 time.
+
+**QA_PIXEL bits 3 and 4 are the mask.** Wrong. The mask this workflow was
+ported from covers bits 1 to 5, and it also drops any decoded value outside
+[-50, 80] C before the percentile runs. Bits 3 and 4 alone leave cirrus,
+dilated cloud, and snow in the stack, and an exact `dn != 0` test leaves the
+reprojected scene edge in it. On one 512 px shard over 120 scenes the wider
+rule removes 642,102 more observations and moves 94.57% of the output pixels,
+by a median of 0.14 C. The timings, scene counts, request counts, and costs
+published above were all computed under the narrow mask.
 
 **The window is 2020-01-01 to 2025-01-01.** Wrong twice over. The asset spec
 asks for a five-year composite covering 2021 through 2025. That window included
@@ -693,6 +809,10 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 |---|---|
 | `shard_lst_p95.py` | the sharded pipeline, the slicer, and the merge |
 | `profile_lst_p95.py` | the array-graph profiling harness |
+| `lst_qa.py` | the QA, fill, range, and nodata rules both P95 paths call |
+| `stac_window.py` | the composite window, and the cache identity it fixes |
+| `compare_qa_masks.py` | one shard, run under both masks, in one process |
+| `qa-parity/` | that comparison, with both rasters and the difference image |
 | `sweep_throughput.py` | configuration sweep driver |
 | `cost_report.py` | the labelled, deterministic cost report |
 | `measure_s3_requests.py` | counts the S3 GET requests one shard issues |
