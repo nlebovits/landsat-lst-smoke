@@ -1,0 +1,73 @@
+# Vale and proselint over the handwritten prose. The rules live in styles/
+# and their provenance in styles/NOTICE.
+#
+# The gate is `--minAlertLevel=error`. The suggestion-level audit runs too,
+# and reports without failing, so a drift shows up in the log before it
+# becomes a blocker.
+name: Prose
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  VALE_VERSION: "3.19.0"
+
+jobs:
+  prose:
+    name: Vale and proselint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Vale
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v${VALE_VERSION}" \
+            --repo vale-cli/vale \
+            --pattern "vale_${VALE_VERSION}_Linux_64-bit.tar.gz" \
+            --output vale.tar.gz
+          tar xzf vale.tar.gz vale
+          sudo install -m 0755 vale /usr/local/bin/vale
+          vale --version
+
+      - name: Fetch the pinned style packages
+        run: vale sync
+
+      - name: Report every Vale finding
+        run: |
+          mapfile -d '' files < <(git ls-files -z -- '*.md' '*.mdx')
+          if ((${#files[@]})); then
+            vale --minAlertLevel=suggestion --output=line "${files[@]}" || true
+          fi
+
+      - name: Report proselint findings
+        run: |
+          mapfile -d '' files < <(git ls-files -z -- '*.md' '*.mdx')
+          if ((${#files[@]})); then
+            uvx --from proselint==0.16.0 proselint check \
+              --config proselint.json "${files[@]}" || true
+          fi
+
+      - name: Gate on Vale errors
+        run: |
+          mapfile -d '' files < <(git ls-files -z -- '*.md' '*.mdx')
+          if ((${#files[@]})); then
+            vale --minAlertLevel=error --output=line "${files[@]}"
+          fi

@@ -39,21 +39,36 @@ CONFIGS = [
 
 
 def run_one(label, workers, threads, chunk, gdal_threads, extra, scenes, out_root):
-    out_dir = out_root / label.split()[0] / f"{workers}w{threads}t_c{chunk}_{gdal_threads}"
+    out_dir = (
+        out_root / label.split()[0] / f"{workers}w{threads}t_c{chunk}_{gdal_threads}"
+    )
     if out_dir.exists():
         shutil.rmtree(out_dir)
     cmd = [
-        "uv", "run", "--python", "3.12", str(SCRIPT),
-        "--max-scenes", str(scenes),
-        "--workers", str(workers),
-        "--threads-per-worker", str(threads),
-        "--chunk", str(chunk),
-        "--memory-limit-gib", "3",
-        "--gdal-threads", gdal_threads,
+        "uv",
+        "run",
+        "--python",
+        "3.12",
+        str(SCRIPT),
+        "--max-scenes",
+        str(scenes),
+        "--workers",
+        str(workers),
+        "--threads-per-worker",
+        str(threads),
+        "--chunk",
+        str(chunk),
+        "--memory-limit-gib",
+        "3",
+        "--gdal-threads",
+        gdal_threads,
         "--no-tracemalloc",
-        "--span-limit", "400000",
-        "--span-dump-limit", "1000",
-        "--out-dir", str(out_dir),
+        "--span-limit",
+        "400000",
+        "--span-dump-limit",
+        "1000",
+        "--out-dir",
+        str(out_dir),
         "--force",
     ]
     if extra:
@@ -118,8 +133,10 @@ def main():
         print("\nall configurations failed")
         return 1
     best = max(ok, key=lambda r: r["mb_s"] or 0)
-    print(f"\n{'config':24s}{'slots':>6}{'wall s':>9}{'MB/s':>8}{'peak MB/s':>11}"
-          f"{'par':>7}{'use%':>7}{'peak GiB':>10}{'s/scene':>9}")
+    print(
+        f"\n{'config':24s}{'slots':>6}{'wall s':>9}{'MB/s':>8}{'peak MB/s':>11}"
+        f"{'par':>7}{'use%':>7}{'peak GiB':>10}{'s/scene':>9}"
+    )
     for r in ok:
         print(
             f"{r['label']:24s}{r['slots']:6d}{r['wall_s']:9.1f}{r['mb_s']:8.1f}"

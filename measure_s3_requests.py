@@ -95,8 +95,9 @@ def parse_log(text: str) -> dict:
     }
 
 
-def count_requests(shard, item_dicts, crs, resolution, read_threads,
-                   log_path: Path | None) -> dict:
+def count_requests(
+    shard, item_dicts, crs, resolution, read_threads, log_path: Path | None
+) -> dict:
     """Load one shard with curl verbose on, and count what crossed the wire.
 
     The load call mirrors `shard_lst_p95.process_shard` exactly. Any difference
@@ -112,8 +113,12 @@ def count_requests(shard, item_dicts, crs, resolution, read_threads,
     t0 = time.perf_counter()
     with capture_gdal_log() as lines:
         data = stac_load(
-            items, bands=("lwir11", "qa_pixel"), crs=crs, resolution=resolution,
-            bbox=shard.bbox, groupby="landsat:scene_id",
+            items,
+            bands=("lwir11", "qa_pixel"),
+            crs=crs,
+            resolution=resolution,
+            bbox=shard.bbox,
+            groupby="landsat:scene_id",
             chunks={"time": 1, ydim: -1, xdim: -1},
         ).compute(scheduler="threads", num_workers=read_threads)
         shape = data["lwir11"].values.shape
@@ -128,7 +133,8 @@ def count_requests(shard, item_dicts, crs, resolution, read_threads,
     n = len(items)
     band_reads = n * 2
     return {
-        "row": shard.row, "col": shard.col,
+        "row": shard.row,
+        "col": shard.col,
         "n_scenes": n,
         "pixels": [int(shape[1]), int(shape[2])],
         "log_records": len(lines),
@@ -139,8 +145,8 @@ def count_requests(shard, item_dicts, crs, resolution, read_threads,
         # Requests per million output pixels covered, per scene. Requests per
         # band-read rises with shard size by construction, so it cannot answer
         # whether a larger read block cuts the total. This can.
-        "requests_per_scene_megapixel":
-            counts["get_requests"] / max(n * shape[1] * shape[2] / 1e6, 1e-9),
+        "requests_per_scene_megapixel": counts["get_requests"]
+        / max(n * shape[1] * shape[2] / 1e6, 1e-9),
     }
 
 
@@ -149,28 +155,47 @@ def main() -> int:
     ap.add_argument("--bbox", default="-62.5,-35.0,-60.0,-32.5")
     ap.add_argument("--pixels-per-degree", type=int, default=3600)
     ap.add_argument("--crs", default="EPSG:4326")
-    ap.add_argument("--shard", type=int, default=512,
-                    help="shard edge in pixels; this is the read size knob")
+    ap.add_argument(
+        "--shard",
+        type=int,
+        default=512,
+        help="shard edge in pixels; this is the read size knob",
+    )
     ap.add_argument("--shards", type=int, default=3, help="how many to measure")
-    ap.add_argument("--read-threads", type=int, default=4,
-                    help="must match shard_lst_p95 --read-threads")
+    ap.add_argument(
+        "--read-threads",
+        type=int,
+        default=4,
+        help="must match shard_lst_p95 --read-threads",
+    )
     ap.add_argument("--source", default="earth-search")
     ap.add_argument("--start", default="2020-01-01")
     ap.add_argument("--end", default="2025-01-01")
     ap.add_argument("--cloud-cover-lt", type=int, default=100)
     ap.add_argument("--platforms", default="landsat-8,landsat-9")
-    ap.add_argument("--max-scenes", type=int, default=None,
-                    help="cap scenes per shard, sampled evenly across the "
-                         "shard's items. The reported figure is a ratio per "
-                         "band-read, so a cap lowers the spend without changing "
-                         "what is measured")
-    ap.add_argument("--keep-logs", action="store_true",
-                    help="write the gzipped curl log beside --out, as evidence")
+    ap.add_argument(
+        "--max-scenes",
+        type=int,
+        default=None,
+        help="cap scenes per shard, sampled evenly across the "
+        "shard's items. The reported figure is a ratio per "
+        "band-read, so a cap lowers the spend without changing "
+        "what is measured",
+    )
+    ap.add_argument(
+        "--keep-logs",
+        action="store_true",
+        help="write the gzipped curl log beside --out, as evidence",
+    )
     ap.add_argument("--out", type=Path, default=Path("s3-requests.json"))
     args = ap.parse_args()
 
-    from shard_lst_p95 import (configure_read_env, items_for_shard, plan_shards,
-                               search_items)
+    from shard_lst_p95 import (
+        configure_read_env,
+        items_for_shard,
+        plan_shards,
+        search_items,
+    )
 
     # Same settings as the real run, and curl verbose on top of them.
     configure_read_env(args.source)
@@ -182,8 +207,10 @@ def main() -> int:
 
     items, boxes = search_items(args, bbox)
     dicts = [i.to_dict() for i in items]
-    print(f"scenes {len(items)}   shards planned {len(shards)}   "
-          f"shard {args.shard}px   threads {args.read_threads}")
+    print(
+        f"scenes {len(items)}   shards planned {len(shards)}   "
+        f"shard {args.shard}px   threads {args.read_threads}"
+    )
 
     # Pick shards spread across the plan, skipping barren ones.
     picks, step = [], max(len(shards) // (args.shards + 1), 1)
@@ -206,21 +233,27 @@ def main() -> int:
             log_path = args.out.with_suffix(f".r{sh.row}c{sh.col}.log.gz")
         r = count_requests(sh, d, args.crs, res, args.read_threads, log_path)
         out.append(r)
-        print(f"  shard r{r['row']:>2} c{r['col']:<2} {r['n_scenes']:>4} scenes  "
-              f"{r['get_requests']:>7,} GETs  "
-              f"{r['requests_per_band_read']:5.2f} per band-read  "
-              f"{r['wall_s']:6.1f}s")
+        print(
+            f"  shard r{r['row']:>2} c{r['col']:<2} {r['n_scenes']:>4} scenes  "
+            f"{r['get_requests']:>7,} GETs  "
+            f"{r['requests_per_band_read']:5.2f} per band-read  "
+            f"{r['wall_s']:6.1f}s"
+        )
         if r["http_4xx"] or r["http_5xx"] or r["retries"]:
-            print(f"    WARNING {r['http_4xx']} 4xx, {r['http_5xx']} 5xx, "
-                  f"{r['retries']} retries; the count includes failed requests")
+            print(
+                f"    WARNING {r['http_4xx']} 4xx, {r['http_5xx']} 5xx, "
+                f"{r['retries']} retries; the count includes failed requests"
+            )
 
     if not out:
         print("no shard had any scene; nothing measured")
         return 1
 
     if sum(x["get_requests"] for x in out) == 0:
-        print("\nZERO GETs captured. The log was not intercepted, or the reads "
-              "never happened. Do not feed this into cost_report.py.")
+        print(
+            "\nZERO GETs captured. The log was not intercepted, or the reads "
+            "never happened. Do not feed this into cost_report.py."
+        )
         return 1
 
     per = [x["requests_per_band_read"] for x in out]
@@ -235,15 +268,20 @@ def main() -> int:
         "requests_per_band_read_mean": sum(per) / len(per),
         "requests_per_band_read_max": max(per),
         "requests_per_scene_megapixel_mean": sum(permp) / len(permp),
-        "clean": all(x["http_4xx"] == 0 and x["http_5xx"] == 0
-                     and x["retries"] == 0 for x in out),
+        "clean": all(
+            x["http_4xx"] == 0 and x["http_5xx"] == 0 and x["retries"] == 0 for x in out
+        ),
         "detail": out,
     }
     args.out.write_text(json.dumps(summary, indent=2))
-    print(f"\nrequests per band-read: min {min(per):.2f} "
-          f"mean {sum(per)/len(per):.2f} max {max(per):.2f}")
-    print(f"requests per scene-megapixel: mean {sum(permp)/len(permp):.2f} "
-          f"(compare shard sizes on this, not on the line above)")
+    print(
+        f"\nrequests per band-read: min {min(per):.2f} "
+        f"mean {sum(per) / len(per):.2f} max {max(per):.2f}"
+    )
+    print(
+        f"requests per scene-megapixel: mean {sum(permp) / len(permp):.2f} "
+        f"(compare shard sizes on this, not on the line above)"
+    )
     print(f"written {args.out}")
     print("\nFeed the mean into cost_report.py --requests-per-read.")
     return 0
