@@ -390,13 +390,33 @@ class TestSetParity:
         region. An extra whose own footprint does intersect the region is a
         scene Earth Search should have returned and did not, and that fails.
         """
+        import numpy as np
+        import pyarrow as pa
         from shapely.geometry import Polygon, box, shape
 
         from stac_reference import fetch_items_by_id
-        from usgs_inventory import footprint_arrays
+        from usgs_inventory import filter_to_window, footprint_arrays
 
         bounds = SET_PARITY_REGIONS[region]
         table = scan_bulk(_bulk_path(), start=SET_PARITY_START, end=SET_PARITY_END)
+
+        # `scan_bulk` returns a superset in time as well as space: its date
+        # filter runs a day wide at each end so the centre-time cut can be
+        # exact. `build_inventory` applies that cut, so this has to as well.
+        # Without it the margin rows look like scenes the catalogue owes us,
+        # and three scenes acquired at 22:11 on the day before the window
+        # opened were reported as a parity failure.
+        start_t = np.asarray(
+            table.column("Start Time").to_pylist(), dtype="datetime64[us]"
+        )
+        stop_t = np.asarray(
+            table.column("Stop Time").to_pylist(), dtype="datetime64[us]"
+        )
+        centre = start_t + (stop_t - start_t) // 2
+        table = table.filter(
+            pa.array(filter_to_window(centre, SET_PARITY_START, SET_PARITY_END))
+        )
+
         lons, lats, crossing = footprint_arrays(table)
         display = table.column("Display ID").to_pylist()
 
