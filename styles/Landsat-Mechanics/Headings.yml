@@ -1,0 +1,53 @@
+extends: capitalization
+message: "'%s' should use sentence case."
+level: error
+scope: heading
+match: $sentence
+exceptions:
+  - ADR
+  - AGENTS
+  - API
+  - APIs
+  - ARI
+  - ASTER
+  - AWS
+  - CI
+  - CLAUDE
+  - CLI
+  - COG
+  - COGs
+  - CORS
+  - Coiled
+  - Dask
+  - Dependabot
+  - EC2
+  - EPSG
+  - Flesch
+  - GDAL
+  - GED
+  - GeoJSON
+  - GeoParquet
+  - GeoTIFF
+  - GitHub
+  - HTTP
+  - I
+  - JSON
+  - LLM
+  - LLMs
+  - LST
+  - MapBiomas
+  - Markdown
+  - P95
+  - PR
+  - README
+  - S3
+  - SQL
+  - STAC
+  - URL
+  - URLs
+  - USD
+  - UTC
+  - Vale
+  - YAML
+  - landsat-lst
+  - landsat-lst-smoke

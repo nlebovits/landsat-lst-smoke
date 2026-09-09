@@ -1,0 +1,83 @@
+{
+  "shard_px": 512,
+  "max_scenes": 60,
+  "read_threads": 4,
+  "shards_measured": 3,
+  "scenes_searched": 1765,
+  "requests_per_band_read_min": 4.6,
+  "requests_per_band_read_mean": 4.766666666666667,
+  "requests_per_band_read_max": 5.0,
+  "requests_per_scene_megapixel_mean": 36.366780598958336,
+  "clean": true,
+  "detail": [
+    {
+      "row": 0,
+      "col": 0,
+      "n_scenes": 60,
+      "pixels": [
+        512,
+        512
+      ],
+      "log_records": 26861,
+      "get_requests": 600,
+      "range_requests": 600,
+      "connections": 0,
+      "http_200": 0,
+      "http_206": 600,
+      "http_4xx": 0,
+      "http_5xx": 0,
+      "requester_charged": 600,
+      "retries": 0,
+      "wall_s": 21.990518543985672,
+      "requests_per_scene": 10.0,
+      "requests_per_band_read": 5.0,
+      "requests_per_scene_megapixel": 38.14697265625
+    },
+    {
+      "row": 4,
+      "col": 9,
+      "n_scenes": 60,
+      "pixels": [
+        512,
+        512
+      ],
+      "log_records": 25580,
+      "get_requests": 552,
+      "range_requests": 552,
+      "connections": 0,
+      "http_200": 0,
+      "http_206": 552,
+      "http_4xx": 0,
+      "http_5xx": 0,
+      "requester_charged": 552,
+      "retries": 0,
+      "wall_s": 19.05258601301466,
+      "requests_per_scene": 9.2,
+      "requests_per_band_read": 4.6,
+      "requests_per_scene_megapixel": 35.09521484375
+    },
+    {
+      "row": 9,
+      "col": 0,
+      "n_scenes": 60,
+      "pixels": [
+        512,
+        512
+      ],
+      "log_records": 25786,
+      "get_requests": 564,
+      "range_requests": 564,
+      "connections": 0,
+      "http_200": 0,
+      "http_206": 564,
+      "http_4xx": 0,
+      "http_5xx": 0,
+      "requester_charged": 564,
+      "retries": 0,
+      "wall_s": 20.035754647979047,
+      "requests_per_scene": 9.4,
+      "requests_per_band_read": 4.7,
+      "requests_per_scene_megapixel": 35.858154296875
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+The Landsat-* Vale rules are adapted from the Portolan prose rules:
+
+  https://github.com/portolan-sdi/portolan-ops
+  commit 30e8ea74aeb428e563c1e823df0871e055ae5986
+
+The adapted rules remain available under the Apache License, Version 2.0.
+They were renamed and narrowed to this repository. The Portolan lexicon rules
+(Spec, Formats, Urls, AiReady, Parts) were dropped, because they encode facts
+about the Portolan project. Headings.yml carries this repository's exception
+list, and Casing.yml adds the Landsat terms.

@@ -12,3 +12,11 @@ trace.json
 # Regenerable; the logs and summaries beside them are committed.
 fulltile/part*/part-000.npz
 fulltile/tile/*.npy
+
+# Vale packages fetched by `vale sync`; .vale.ini pins each release.
+styles/Google/
+styles/Microsoft/
+styles/Readability/
+styles/ai-tells/
+# `vale sync` also unpacks the ai-tells agent template here.
+styles/config/templates/

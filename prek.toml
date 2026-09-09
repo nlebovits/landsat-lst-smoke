@@ -1,0 +1,150 @@
+# prek configuration - Tier 1 CI
+# All hooks BLOCK on failure. No warnings, no skips.
+# Install: prek install (requires: uv tool install prek)
+
+fail_fast = true
+
+# =============================================================================
+# Built-in hooks (native Rust, no network fetch required)
+# =============================================================================
+[[repos]]
+repo = "builtin"
+hooks = [
+  # --- Format & whitespace ---
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "mixed-line-ending" },
+
+  # --- Syntax validation ---
+  { id = "check-yaml" },
+  { id = "check-toml" },
+
+  # --- Safety & security ---
+  { id = "check-merge-conflict" },
+  { id = "detect-private-key" },
+  { id = "check-case-conflict" },
+  { id = "no-commit-to-branch", args = ["--branch", "main"] },
+  {
+    id = "check-added-large-files",
+    args = ["--maxkb=500"],
+    # uv.lock is 728 KB and belongs in the repository: without it CI has
+    # nothing to install from and re-resolves against the ranges in
+    # pyproject.toml on every run. Excluded by name rather than by raising
+    # --maxkb, so the 500 KB ceiling still catches a COG or a parquet committed
+    # by accident.
+    # src/landsat_lst/data/ged_gap_mask.npz is the packaged ASTER GED gap-cell
+    # artifact (#118): the only mask source a fleet VM can find, rebuilt
+    # deterministically by scripts/build_ged_gap_mask.py and pinned by content
+    # hash in ged.py. Excluded by exact path.
+    exclude = { glob = ["tests/fixtures/**", "uv.lock", "src/landsat_lst/data/ged_gap_mask.npz"] },
+  },
+]
+
+# =============================================================================
+# External tool hooks
+# =============================================================================
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "v0.14.1"
+hooks = [
+  { id = "ruff", args = ["--fix"] },
+  { id = "ruff-format" },
+]
+
+[[repos]]
+repo = "https://github.com/jendrikseipp/vulture"
+rev = "v2.14"
+hooks = [
+  {
+    id = "vulture",
+    args = ["src/landsat_lst", "tests", "vulture_whitelist.py", "--min-confidence", "80"],
+  },
+]
+
+[[repos]]
+repo = "https://github.com/rubik/xenon"
+rev = "v0.9.3"
+hooks = [
+  {
+    id = "xenon",
+    args = ["--max-absolute=C", "--max-modules=B", "--max-average=A", "src/landsat_lst/"],
+    pass_filenames = false,
+  },
+]
+
+# Prose rules. Third-party packages are pinned in .vale.ini; repository-owned
+# rules and their rationale live in styles/ and docs/PROSE.md.
+[[repos]]
+repo = "https://github.com/vale-cli/vale"
+rev = "v3.19.0"
+hooks = [
+  { id = "vale", name = "vale sync", args = ["sync"], pass_filenames = false },
+  {
+    id = "vale",
+    name = "vale (documentation errors)",
+    args = ["--output=line", "--minAlertLevel=error"],
+    types = ["markdown"],
+    exclude = "^(AGENTS\\.md|docs/evidence/|results/)",
+  },
+  {
+    id = "vale",
+    alias = "vale-audit",
+    name = "vale (full prose audit)",
+    args = ["--output=line", "--minAlertLevel=suggestion"],
+    types = ["markdown"],
+    stages = ["manual"],
+    exclude = "^(AGENTS\\.md|docs/evidence/|results/)",
+  },
+]
+
+# These editorial checks are advisory because their findings require judgment.
+# Run them explicitly with `uv run prek run proselint --all-files --stage manual`.
+[[repos]]
+repo = "https://github.com/amperser/proselint"
+rev = "v0.16.0"
+hooks = [
+  {
+    id = "proselint",
+    args = ["check", "--config", "proselint.json"],
+    types = ["markdown"],
+    stages = ["manual"],
+    exclude = "^(AGENTS\\.md|docs/evidence/|results/)",
+  },
+]
+
+# =============================================================================
+# Local hooks
+# =============================================================================
+[[repos]]
+repo = "local"
+hooks = [
+  # Type checking
+  {
+    id = "ty",
+    name = "ty type check",
+    entry = "uv run ty check src/",
+    language = "system",
+    types = ["python"],
+    pass_filenames = false,
+  },
+
+  # Spell checking
+  {
+    id = "codespell",
+    name = "spell check",
+    entry = "uv run codespell src/ tests/ docs/",
+    language = "system",
+    types = ["python", "markdown"],
+    pass_filenames = false,
+  },
+
+  # Unit tests on pre-push
+  {
+    id = "pytest-unit",
+    name = "unit tests",
+    entry = "uv run pytest tests/unit -x -q --timeout=30",
+    language = "system",
+    pass_filenames = false,
+    stages = ["pre-push"],
+  },
+]
