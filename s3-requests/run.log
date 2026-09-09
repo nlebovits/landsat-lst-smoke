@@ -1,0 +1,26 @@
+===== shard 512 =====
+/home/nissim/.cache/uv/environments-v2/measure-s3-requests-27ab4ad60de47478/lib/python3.12/site-packages/rasterio/warp.py:390: NotGeoreferencedWarning: Dataset has no geotransform, gcps, or rpcs. The identity matrix will be returned.
+  dest = _reproject(
+scenes 1765   shards planned 324   shard 512px   threads 4
+  shard r 0 c0    60 scenes      600 GETs   5.00 per band-read    22.0s
+  shard r 4 c9    60 scenes      552 GETs   4.60 per band-read    19.1s
+  shard r 9 c0    60 scenes      564 GETs   4.70 per band-read    20.0s
+
+requests per band-read: min 4.60 mean 4.77 max 5.00
+requests per scene-megapixel: mean 36.37 (compare shard sizes on this, not on the line above)
+written s3-requests/shard512.json
+
+Feed the mean into cost_report.py --requests-per-read.
+===== shard 1024 =====
+/home/nissim/.cache/uv/environments-v2/measure-s3-requests-27ab4ad60de47478/lib/python3.12/site-packages/rasterio/warp.py:390: NotGeoreferencedWarning: Dataset has no geotransform, gcps, or rpcs. The identity matrix will be returned.
+  dest = _reproject(
+scenes 1765   shards planned 81   shard 1024px   threads 4
+  shard r 0 c0    60 scenes      840 GETs   7.00 per band-read    39.3s
+  shard r 2 c2    60 scenes      780 GETs   6.50 per band-read    31.6s
+  shard r 4 c4    60 scenes      840 GETs   7.00 per band-read    34.9s
+
+requests per band-read: min 6.50 mean 6.83 max 7.00
+requests per scene-megapixel: mean 13.03 (compare shard sizes on this, not on the line above)
+written s3-requests/shard1024.json
+
+Feed the mean into cost_report.py --requests-per-read.

@@ -125,16 +125,36 @@ def main() -> int:
     p.add_argument("--bands", type=int, default=2)
     p.add_argument("--requests-per-read", type=float, default=None,
                    help="MEASURED by measure_s3_requests.py. Omit and S3 is UNKNOWN")
+    p.add_argument("--recorded", action="append", default=[],
+                   metavar="TYPE:COUNT:SECONDS",
+                   help="price a fleet from recorded lifetimes instead of the "
+                        "API, for a run whose instances have aged out of "
+                        "describe-instances. Repeatable")
     p.add_argument("--json", type=argparse.FileType("w"), default=None)
     a = p.parse_args()
 
     RATES, rate_src = fetch_rates(a.region)
-    rows = lifetimes(a.tag, a.profile, a.region)
-    if not rows:
-        raise SystemExit(f"no instances matching {a.tag} (terminated ones age out ~1h)")
 
-    print(f"=== MEASURED: instances tagged {a.tag} in {a.region} ===")
-    print(f"{'instance':21}{'type':15}{'AMI':23}{'launch':10}{'term':10}{'sec':>7}")
+    recorded = []
+    for spec in a.recorded:
+        try:
+            t, count, sec = spec.split(":")
+            recorded.append((t, int(count), float(sec)))
+        except ValueError:
+            raise SystemExit(f"--recorded wants TYPE:COUNT:SECONDS, got {spec!r}")
+
+    rows = lifetimes(a.tag, a.profile, a.region) if not recorded else []
+    if not rows and not recorded:
+        print(f"=== EC2: UNAVAILABLE ===")
+        print(f"  no instances matching {a.tag} in {a.region}.")
+        print( "  Terminated instances age out of describe-instances after about")
+        print( "  an hour. Pass --recorded TYPE:COUNT:SECONDS to price a past run")
+        print( "  from its recorded lifetimes, or run this straight after teardown.")
+        print( "  Every EC2 line below is omitted, not zero.")
+
+    if rows:
+        print(f"=== MEASURED: instances tagged {a.tag} in {a.region} ===")
+        print(f"{'instance':21}{'type':15}{'AMI':23}{'launch':10}{'term':10}{'sec':>7}")
     total_sec, unknown = 0.0, []
     for r in rows:
         t = r["term"].strftime("%H:%M:%S") if r["term"] else "-"
@@ -150,13 +170,24 @@ def main() -> int:
 
     by_type: dict[str, float] = {}
     ebs_gb_sec = 0.0
+    n_instances = len([r for r in rows if r["seconds"] is not None])
     for r in rows:
         if r["seconds"] is None:
             continue
         by_type[r["type"]] = by_type.get(r["type"], 0.0) + r["seconds"]
         ebs_gb_sec += (a.ebs_gb or r["ebs_gb"] or 0) * r["seconds"]
 
-    print(f"\n=== DERIVED: EC2 ===")
+    if recorded:
+        print(f"=== MEASURED: recorded lifetimes, not from the API ===")
+        for t, count, sec in recorded:
+            print(f"  {t:15} {count} x {sec:.0f}s = {count * sec:.0f}s")
+            by_type[t] = by_type.get(t, 0.0) + count * sec
+            ebs_gb_sec += (a.ebs_gb or 0) * count * sec
+            total_sec += count * sec
+            n_instances += count
+
+    have_ec2 = bool(by_type)
+    print("\n=== DERIVED: EC2 ===" if have_ec2 else "\n=== DERIVED: EC2, OMITTED ===")
     print(f"  rate source: {rate_src}")
     ec2 = 0.0
     missing_rate = []
@@ -174,10 +205,11 @@ def main() -> int:
         print(f"  WARNING rate not pinned for: {', '.join(missing_rate)}")
 
     ebs = ebs_gb_sec / SEC_PER_MONTH * EBS_GP3_GB_MONTH
-    ip4 = total_sec / 3600 * IPV4_HR * len([r for r in rows if r["seconds"] is not None])
-    print(f"\n=== DERIVED: storage and address ===")
-    print(f"  EBS gp3   {ebs_gb_sec:,.0f} GB-s / {SEC_PER_MONTH:,} x ${EBS_GP3_GB_MONTH} = ${ebs:.4f}")
-    print(f"  IPv4      {total_sec/3600:.4f} ih x ${IPV4_HR}{'':16}= ${ip4:.4f}")
+    ip4 = total_sec / 3600 * IPV4_HR * n_instances
+    if have_ec2:
+        print(f"\n=== DERIVED: storage and address ===")
+        print(f"  EBS gp3   {ebs_gb_sec:,.0f} GB-s / {SEC_PER_MONTH:,} x ${EBS_GP3_GB_MONTH} = ${ebs:.4f}")
+        print(f"  IPv4      {total_sec/3600:.4f} ih x ${IPV4_HR}{'':16}= ${ip4:.4f}")
 
     print(f"\n=== S3 (requester pays) ===")
     s3 = None
@@ -200,6 +232,9 @@ def main() -> int:
     known = ec2 + ebs + ip4 + (s3 or 0.0)
     print(f"\n=== TOTAL ===")
     print(f"  known lines                = ${known:.4f}")
+    if not have_ec2:
+        print( "  EC2, EBS, IPv4             = UNAVAILABLE, excluded")
+        print( "  => this total covers S3 requests only")
     if s3 is None:
         print( "  S3 requests                = UNKNOWN, excluded")
         print(f"  => total is a LOWER BOUND of ${known:.4f}")

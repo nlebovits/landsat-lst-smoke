@@ -60,6 +60,31 @@ GIB = 1024.0**3
 
 
 # --------------------------------------------------------------------------
+# Read environment
+# --------------------------------------------------------------------------
+
+def configure_read_env(source: str = "earth-search") -> None:
+    """Set the GDAL and AWS variables that every S3 read path depends on.
+
+    The number of HTTP requests GDAL issues is a function of these settings.
+    `GDAL_DISABLE_READDIR_ON_OPEN` suppresses a directory listing on each open,
+    and `GDAL_HTTP_MERGE_CONSECUTIVE_RANGES` collapses adjacent block reads into
+    one request. A request count measured without them describes a different
+    pipeline, so anything that reads scenes must call this first.
+    """
+    os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+    os.environ.setdefault("GDAL_HTTP_MULTIRANGE", "YES")
+    os.environ.setdefault("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
+    os.environ.setdefault("GDAL_NUM_THREADS", "1")
+    os.environ.setdefault("VSI_CACHE", "TRUE")
+    if source == "earth-search":
+        os.environ.setdefault("AWS_REQUEST_PAYER", "requester")
+        os.environ.setdefault(
+            "AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-west-2"))
+
+
+
+# --------------------------------------------------------------------------
 # Shard geometry
 # --------------------------------------------------------------------------
 
@@ -428,14 +453,7 @@ def main(argv=None) -> int:
 
     import frisky
 
-    os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-    os.environ.setdefault("GDAL_HTTP_MULTIRANGE", "YES")
-    os.environ.setdefault("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
-    os.environ.setdefault("GDAL_NUM_THREADS", "1")
-    os.environ.setdefault("VSI_CACHE", "TRUE")
-    if args.source == "earth-search":
-        os.environ.setdefault("AWS_REQUEST_PAYER", "requester")
-        os.environ.setdefault("AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-west-2"))
+    configure_read_env(args.source)
     os.environ.setdefault("FRISKY_TRACING_CAPACITY", "2000000")
 
     t_search = time.perf_counter()
