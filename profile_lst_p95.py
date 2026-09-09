@@ -48,6 +48,15 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
+from lst_qa import (
+    LST_NODATA_DN,
+    LST_OFFSET,
+    LST_SCALE,
+    encode_celsius_xr,
+    masked_celsius_xr,
+)
+from stac_window import DEFAULT_END, DEFAULT_START, datetime_range
+
 # --------------------------------------------------------------------------
 # Constants from the source data and the encoding contract.
 # --------------------------------------------------------------------------
@@ -62,24 +71,6 @@ SOURCES = {
     "earth-search": STAC_EARTH_SEARCH,
 }
 COLLECTION = "landsat-c2-l2"
-
-# Landsat Collection 2 Level 2 surface temperature, band ST_B10 / lwir11.
-LWIR_SCALE = 0.00341802
-LWIR_OFFSET_K = 149.0
-KELVIN_ZERO_C = 273.15
-# Fused offset that takes a raw DN straight to celsius.
-LWIR_OFFSET_C = LWIR_OFFSET_K - KELVIN_ZERO_C  # -124.15
-LWIR_FILL_DN = 0
-
-# Output encoding.
-LST_SCALE = 0.01
-LST_OFFSET = -50.0
-LST_NODATA_DN = 0
-LST_MIN_DN = 1
-LST_MAX_DN = 65535
-
-# QA_PIXEL bits 3 (cloud) and 4 (cloud shadow), as in the source workflow.
-QA_CLOUD_BITS = 0b11000
 
 MONTH_NAMES = [
     "Jan",
@@ -514,7 +505,6 @@ def build_graph(
 
     So load big and reduce small.
     """
-    import numpy as np
     from odc.geo import CRS
     from odc.stac import stac_load
 
@@ -542,19 +532,15 @@ def build_graph(
         msg = f"expected spatial dims {ydim}/{xdim}, got {tuple(data.dims)}"
         raise RuntimeError(msg)
 
-    dn = data["lwir11"]
-    qa = data["qa_pixel"]
-
-    # Two independent reasons a pixel is unusable: the QA bits say cloud or
-    # cloud shadow, or the band itself is fill. DN 0 decodes to -124 C and
-    # would drag the percentile down if it were left in.
-    valid = ((qa & QA_CLOUD_BITS) == 0) & (dn != LWIR_FILL_DN)
-
-    # Cast first, then scale. Multiplying a uint16 array by a Python float
-    # produces float64 and doubles the stack for no gain.
-    lst_c = (
-        dn.astype("float32") * np.float32(LWIR_SCALE) + np.float32(LWIR_OFFSET_C)
-    ).where(valid)
+    # One definition of a usable observation, shared with the sharded path in
+    # shard_lst_p95. Three reasons a pixel is unusable: the band is source
+    # fill, QA_PIXEL bits 1 to 5 flag dilated cloud, cirrus, cloud, shadow or
+    # snow, or the decoded temperature falls outside [-50, 80] C. The last one
+    # is what removes reprojected scene edges, where interpolation against the
+    # DN 0 fill leaves small nonzero values decoding near -124 C that an exact
+    # fill comparison cannot see. Every rejection lands here, before quantile,
+    # because a value that reaches the percentile has already moved the answer.
+    lst_c = masked_celsius_xr(data["lwir11"], data["qa_pixel"])
 
     # Split the read blocks down before the time rechunk. This is a pure
     # slice, no shuffle, so it costs nothing on the wire.
@@ -583,13 +569,14 @@ def build_graph(
 def encode_uint16(celsius):
     """Celsius to DN: dn = (c - offset) / scale, with 0 reserved for nodata.
 
-    Out-of-range values become nodata rather than clipping. A clipped -124 C
-    would arrive as a believable -49.99 C, which is worse than a gap.
+    Thin wrapper over the shared encoder, so this module and shard_lst_p95
+    write the same DN for the same temperature. Out-of-range and non-finite
+    values become nodata rather than clipping: a clipped -124 C would arrive as
+    a believable -49.99 C, which is worse than a gap. The floor is
+    `LST_MIN_TRUSTED_DN`, not DN 1, because DN 1 is reachable only from the
+    encoding floor itself and marks a failed retrieval.
     """
-    dn = ((celsius - LST_OFFSET) / LST_SCALE).round()
-    in_range = (dn >= LST_MIN_DN) & (dn <= LST_MAX_DN)
-    # NaN fails both comparisons, so it falls through to nodata here.
-    return dn.where(in_range, LST_NODATA_DN).fillna(LST_NODATA_DN).astype("uint16")
+    return encode_celsius_xr(celsius)
 
 
 def graph_stats(*objs) -> dict:
@@ -796,8 +783,8 @@ def parse_args(argv=None):
         default=4.0,
         help="per worker; workers * this is the cluster total",
     )
-    p.add_argument("--start", default="2020-01-01")
-    p.add_argument("--end", default="2025-01-01")
+    p.add_argument("--start", default=DEFAULT_START)
+    p.add_argument("--end", default=DEFAULT_END)
     p.add_argument("--cloud-cover-lt", type=int, default=100)
     p.add_argument(
         "--platforms",
@@ -1039,7 +1026,7 @@ def main(argv=None) -> int:  # noqa: C901
             query = catalog.search(
                 collections=[COLLECTION],
                 bbox=bbox,
-                datetime=f"{args.start}/{args.end}",
+                datetime=datetime_range(args.start, args.end),
                 query=stac_query,
             )
             items = list(query.items())

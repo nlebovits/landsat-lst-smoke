@@ -6,11 +6,12 @@ import time
 from pathlib import Path
 import dask
 
-sys.path.insert(0, "/home/nissim/Documents/dev/radiant-earth/landsat-lst-smoke")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from profile_lst_p95 import build_graph
+from stac_window import DEFAULT_END, DEFAULT_START, items_cache_path
 
-items = pickle.loads(Path("/tmp/qt_items.pkl").read_bytes())
 BBOX = (-62.5, -35.0, -60.0, -32.5)
+items = pickle.loads(items_cache_path(BBOX, DEFAULT_START, DEFAULT_END).read_bytes())
 CRS, RES = "EPSG:4326", 1 / 3600  # the actual tile grid
 
 print(f"scenes {len(items)}   grid {CRS} @ 1/3600 deg")

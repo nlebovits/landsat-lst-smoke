@@ -10,9 +10,14 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from stac_window import DEFAULT_END, DEFAULT_START, datetime_range, items_cache_path
+
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-CACHE = Path("/tmp/qt_items.pkl")
 BBOX = (-62.5, -35.0, -60.0, -32.5)
+# The cache is named after the query, window included, so the 2020-2024
+# item list left over from an earlier run cannot answer a 2021-2025 one.
+CACHE = items_cache_path(BBOX, DEFAULT_START, DEFAULT_END)
 
 
 def t(label):
@@ -40,7 +45,7 @@ else:
             cat.search(
                 collections=["landsat-c2-l2"],
                 bbox=BBOX,
-                datetime="2020-01-01/2025-01-01",
+                datetime=datetime_range(DEFAULT_START, DEFAULT_END),
                 query={
                     "eo:cloud_cover": {"lt": 100},
                     "platform": {"in": ["landsat-8", "landsat-9"]},

@@ -13,6 +13,11 @@ trace.json
 fulltile/part*/part-000.npz
 fulltile/tile/*.npy
 
+# The two 512 KB rasters compare_qa_masks.py writes. Regenerable from the
+# scene list and the window recorded in qa-parity/qa_parity.json, which is
+# committed along with the difference image.
+qa-parity/*.npy
+
 # Vale packages fetched by `vale sync`; .vale.ini pins each release.
 styles/Google/
 styles/Microsoft/

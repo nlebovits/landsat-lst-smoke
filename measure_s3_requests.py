@@ -43,6 +43,8 @@ import sys
 import time
 from pathlib import Path
 
+from stac_window import DEFAULT_END, DEFAULT_START
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
@@ -169,8 +171,8 @@ def main() -> int:
         help="must match shard_lst_p95 --read-threads",
     )
     ap.add_argument("--source", default="earth-search")
-    ap.add_argument("--start", default="2020-01-01")
-    ap.add_argument("--end", default="2025-01-01")
+    ap.add_argument("--start", default=DEFAULT_START)
+    ap.add_argument("--end", default=DEFAULT_END)
     ap.add_argument("--cloud-cover-lt", type=int, default=100)
     ap.add_argument("--platforms", default="landsat-8,landsat-9")
     ap.add_argument(
