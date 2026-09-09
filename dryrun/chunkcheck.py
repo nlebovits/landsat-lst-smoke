@@ -18,9 +18,11 @@ for scenes in (711, 1765, 3910):
             dims=("time", "y", "x"),
         )
         xc = x.chunk({"y": c, "x": c})
-        after_chunk = xc.chunks[1][0]
+        # xarray types .chunks as tuple | None. A chunked DataArray always
+        # has it, and .chunk() on the line above guarantees that here.
+        after_chunk = xc.chunks[1][0]  # ty: ignore[not-subscriptable]
         q = xc.quantile(0.95, dim="time")
-        after_q = q.chunks[0][0]
+        after_q = q.chunks[0][0]  # ty: ignore[not-subscriptable]
         mb = after_q * after_q * scenes * 4 / 1e6
         flag = "" if after_q == c else "  <-- OVERRIDDEN"
         print(f"{scenes:>8}{c:>11}{after_chunk:>16}{after_q:>16}{mb:>10.0f}{flag}")

@@ -2,10 +2,10 @@
 # Install: prek install (requires: uv tool install prek)
 #
 # Adapted from nlebovits/landsat-lst. That repository is a package with
-# src/, tests/ and a pyproject.toml. This one is a set of standalone
-# PEP 723 benchmark scripts and the evidence they produced, so the hooks
-# that need a project environment or a test suite are absent. Each
-# omission carries its reason below.
+# src/ and a pyproject.toml; this one is a set of standalone PEP 723
+# benchmark scripts and the evidence they produced. pyproject.toml here
+# exists so the gates have somewhere to resolve against, not to make the
+# repository importable.
 
 fail_fast = true
 
@@ -121,8 +121,7 @@ hooks = [
 [[repos]]
 repo = "local"
 hooks = [
-  # Spell checking. `uvx` rather than `uv run`, because this repository has
-  # no pyproject.toml to resolve against.
+  # Spell checking.
   {
     id = "codespell",
     name = "spell check",
@@ -130,24 +129,38 @@ hooks = [
     language = "system",
     types_or = ["python", "markdown"],
   },
+
+  # Type checking. `--extra-search-path .` puts the repository root on the
+  # module path, which measure_s3_requests.py needs: it imports shard_lst_p95
+  # after a sys.path insert. ty.toml carries the rest of the settings.
+  {
+    id = "ty",
+    name = "ty type check",
+    entry = "uv run ty check --extra-search-path .",
+    language = "system",
+    types = ["python"],
+    pass_filenames = false,
+  },
+
+  # Unit tests on pre-push. They run in about 4 seconds, and they assert the
+  # figures FINDINGS.md publishes.
+  {
+    id = "pytest",
+    name = "unit tests",
+    entry = "uv run pytest",
+    language = "system",
+    pass_filenames = false,
+    stages = ["pre-push"],
+  },
 ]
 
 # =============================================================================
-# Omitted, with reasons
+# Not here, and why
 # =============================================================================
 #
-# ty            The scripts carry PEP 723 inline dependencies rather than a
-#               shared environment, so `ty` resolves none of odc-stac, dask,
-#               xarray or frisky. 44 of its 83 diagnostics here are
-#               unresolved-import against those packages. Restoring it needs
-#               a pyproject.toml that installs every script's dependencies.
-#
-# xenon         The four benchmark scripts each end in a long argparse-and-
-#               report `main`, ranked D, E and F on cyclomatic complexity.
-#               These scripts record one session's measurements rather than
-#               serve as a library, so the refactor that would satisfy
-#               --max-absolute=C buys nothing.
-#
-# pytest-unit   No test suite exists. The correctness checks in this
-#               repository are the coverage and output-equivalence assertions
-#               inside shard_lst_p95.py, which run as part of a real job.
+# xenon   ruff's C901 replaces it. xenon grades a whole module and offers no
+#         per-function escape, so on this repository it either fails on the
+#         argparse-and-report `main` functions or has to be set so loose that
+#         it gates nothing. C901 gates each function at 12 and names the three
+#         entry points it exempts, each with a `# noqa: C901` and a reason.
+#         See ruff.toml.

@@ -1,0 +1,20 @@
+# ty settings. The repository has no package, so `src.include` names the files
+# to check rather than a source root.
+#
+# The search path for `measure_s3_requests.py`, which imports shard_lst_p95
+# after a sys.path insert, comes from `--extra-search-path .` on the command
+# line. The equivalent `[environment] extra-paths` key has no effect for this
+# layout, so both prek.toml and .github/workflows/ci.yml pass the flag.
+
+[src]
+# vulture_whitelist.py is deliberately unresolvable: a vulture whitelist names
+# symbols that exist nowhere, which is the format. Everything else is checked.
+include = [
+  "cost_report.py",
+  "measure_s3_requests.py",
+  "profile_lst_p95.py",
+  "shard_lst_p95.py",
+  "sweep_throughput.py",
+  "dryrun",
+  "tests",
+]
