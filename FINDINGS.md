@@ -177,6 +177,26 @@ uv tool install rashid
 rashid check ./tile/catalog --all
 ```
 
+Every tile becomes one item of one catalog. Point each tile's merge at the
+same `--catalog-dir`, and each run adds its item, then rebuilds the
+collection, the thumbnail, and the item mirror from every item on disk:
+
+```bash
+uv run shard_lst_p95.py --merge part0 --out-dir ./tile-a \
+  --catalog-dir ./catalog
+uv run shard_lst_p95.py --merge part1 --out-dir ./tile-b \
+  --catalog-dir ./catalog
+```
+
+A tile is named for its north and west edges, fraction included, so the
+5-degree grid reads `S30W065` and a half-degree tile reads `S32.5W062.5`. Two
+tiles can then never take one directory.
+
+Whatever the catalog needs from `part-meta.json` is checked before the merge
+starts. A run that cannot produce a catalog says so in a second instead of
+after the arrays are assembled, and `merge.json` reaches disk before the
+catalog writer runs, so an hour of merging is recorded either way.
+
 The shard plan is deterministic and anchors to whole degrees, so a shard covers
 the same pixels whichever request produced it. Machines need no coordination
 beyond the slice index. Rehearse the same fleet on a laptop first, where
@@ -290,6 +310,11 @@ maximum, mean, standard deviation, and valid percent in the header, not in an
 raster returns none of it. `cog_catalog.py` writes all of this, and
 `tests/test_cog_catalog.py` refuses a tree that `rashid`, the Portolan
 validator, reports an error on.
+
+The writer reopens every COG it produces and checks the block size, the
+overviews, the statistics, and the decoding rule against what it asked for. A
+scale the driver dropped is the one failure that leaves a file which reads as
+valid and decodes to nonsense, so it is checked rather than assumed.
 
 ## Architecture: shard, do not tune
 

@@ -19,8 +19,10 @@ fulltile/tile/*.npy
 qa-parity/*.npy
 
 # The COGs and STAC catalog that `--merge` writes. Regenerable from the part
-# files, and a full-tile lst_p95.tif runs to hundreds of MB.
-*/catalog/
+# files, and a full-tile lst_p95.tif runs to hundreds of MB. `**/` because a
+# pattern holding a slash anchors here, and `*` stops at one: `*/catalog/`
+# would miss the catalog under a nested --out-dir.
+**/catalog/
 
 # Vale packages fetched by `vale sync`; .vale.ini pins each release.
 styles/Google/

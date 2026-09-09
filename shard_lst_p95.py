@@ -56,6 +56,7 @@ from cog_catalog import (
     DEFAULT_LICENSE,
     MONTH_NAMES,
     catalog_provenance,
+    check_catalog_inputs,
     write_catalog,
 )
 from lst_qa import (
@@ -841,6 +842,13 @@ def parse_args(argv=None):
         help="skip the COGs and the STAC catalog that --merge writes, leaving "
         "only the .npy arrays",
     )
+    p.add_argument(
+        "--catalog-dir",
+        type=Path,
+        default=None,
+        help="where the catalog lives; defaults to <out-dir>/catalog. Point "
+        "every tile's merge at one path to collect them in one catalog",
+    )
     p.add_argument("--collection-id", default=DEFAULT_COLLECTION_ID)
     p.add_argument(
         "--host-name",
@@ -921,7 +929,7 @@ def mask_rule(args, counts) -> dict | None:
     }
 
 
-def merge_parts(dirs, out_dir: Path, args=None) -> int:
+def merge_parts(dirs, out_dir: Path, args) -> int:
     """Assemble one tile from the parts written by --shard-slice runs.
 
     The merge applies no mask. Every part was masked by the machine that wrote
@@ -932,6 +940,10 @@ def merge_parts(dirs, out_dir: Path, args=None) -> int:
     The `.npy` arrays stay: the measurement scripts read them, and they are the
     cheapest way to reopen a merge. The COGs and the catalog beside them are
     what a client consumes.
+
+    Whatever the catalog needs from `part-meta.json` is checked before the
+    merge starts, so a run that cannot produce one says so in a second rather
+    than after the arrays are assembled.
     """
     import numpy as np
 
@@ -954,6 +966,11 @@ def merge_parts(dirs, out_dir: Path, args=None) -> int:
         )
 
     meta = next(iter(metas.values()))
+    if not args.no_catalog:
+        try:
+            check_catalog_inputs(meta)
+        except ValueError as exc:
+            raise SystemExit(f"cannot write a catalog for this tile: {exc}") from exc
     h, w = meta["raster"]
     lst = np.zeros((h, w), dtype="uint16")
     qa = np.zeros((12, h, w), dtype="uint8")
@@ -1001,25 +1018,34 @@ def merge_parts(dirs, out_dir: Path, args=None) -> int:
         # merged tile does not have to open a part to find it.
         "mask_rule": meta.get("mask_rule"),
     }
-    if args is None or not args.no_catalog:
+    # The record lands before the catalog, so a merge that took an hour is on
+    # disk whatever the catalog writer then does.
+    merge_json = out_dir / "merge.json"
+    merge_json.write_text(json.dumps(record, indent=2, default=str))
+    if not args.no_catalog:
         record["catalog"] = str(_write_catalog(out_dir, lst, qa, meta, args))
-    (out_dir / "merge.json").write_text(json.dumps(record, indent=2, default=str))
+        merge_json.write_text(json.dumps(record, indent=2, default=str))
     print(f"artifacts     {out_dir.resolve()}")
     return 0 if covered == 1.0 else 2
 
 
 def _write_catalog(out_dir: Path, lst, qa, meta: dict, args) -> Path:
-    """Write the COGs and the STAC catalog for one merged tile."""
-    collection_id = getattr(args, "collection_id", DEFAULT_COLLECTION_ID)
+    """Write the COGs and the STAC catalog for one merged tile.
+
+    The catalog defaults to a directory beside the arrays, which is what a
+    single tile wants. Several tiles pointed at one `--catalog-dir` land in
+    one collection, an item each.
+    """
+    collection_id = args.collection_id
     root = write_catalog(
-        out_dir / "catalog",
+        args.catalog_dir or out_dir / "catalog",
         lst,
         qa,
         meta,
         collection_id=collection_id,
-        host_name=getattr(args, "host_name", DEFAULT_HOST_NAME),
-        host_url=getattr(args, "host_url", DEFAULT_HOST_URL),
-        license_id=getattr(args, "license", DEFAULT_LICENSE),
+        host_name=args.host_name,
+        host_url=args.host_url,
+        license_id=args.license,
     )
     provenance = catalog_provenance(meta, collection_id=collection_id)
     print(f"catalog       {root.resolve()}")
