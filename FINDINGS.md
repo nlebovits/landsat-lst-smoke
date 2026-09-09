@@ -714,74 +714,136 @@ observations against 173 elsewhere, where a 95th percentile carries no
 information. `qa_count` is the band that lets a consumer drop them, which is
 why it is written without a nodata value.
 
-### Cost, audited
+### Cost: measured, derived, and unknown
 
-An earlier version of this section claimed about **$10** for the full-tile run,
-with 55 minutes of overhead against 4.8 minutes of compute. **Both figures were
-wrong.** They came from assuming each instance ran roughly an hour. AWS says
-otherwise:
+This section has been wrong twice. First it claimed ~$10.70 by assuming each
+instance ran an hour when it ran 642 seconds. The correction then introduced an
+*unmeasured* S3 requests-per-read multiplier, quoted a total as if it were
+known, and used that guess to reverse an optimisation recommendation. Both
+mistakes are the same mistake: presenting an estimate as a measurement.
 
-| instance | launch (UTC) | terminate (UTC) | lifetime |
-|---|---|---|---|
-| `i-01140eb2b3090f95a` | 06:07:33 | 06:18:15 | **642 s** |
-| `i-0190abda85788d281` | 06:07:33 | 06:18:15 | 642 s |
-| `i-062dc4088e6d06202` | 06:07:33 | 06:18:15 | 642 s |
-| `i-072d85a880e92be10` | 06:07:33 | 06:18:15 | 642 s |
+Figures below are labelled. Run `./cost_report.py` to regenerate them.
 
-`c6i.16xlarge`, `ami-04678417fc39d7171`, us-west-2b, Linux on-demand, shared
-tenancy. **0.7133 instance-hours**, and EC2 bills Linux per second.
+#### MEASURED
 
-| item | basis | cost |
+| | |
+|---|---|
+| instances | 4 x `c6i.16xlarge`, `ami-04678417fc39d7171`, us-west-2b |
+| launch / terminate (UTC) | 06:07:33 / 06:18:15 |
+| lifetime | **642 s each, 2,568 instance-seconds** |
+| compute, four slices | 273.5 + 289.7 + 284.6 + 247.0 = **1,094.8 s** |
+| STAC search, per machine | **38.1 s** over 3,910 items |
+| shard-scene reads, full tile | **605,617** |
+| non-compute residual, per machine | **368 s** (boot, install, search, part write, spans) |
+
+#### DERIVED
+
+EC2 only, from the pinned us-west-2 Linux on-demand list rate. Linux bills per
+second past a 60-second minimum, so `cost = instance_seconds / 3600 x rate`.
+
+| line | formula | cost |
 |---|---|---|
-| EC2 | 0.7133 ih x $2.72/hr | **$1.94** |
-| EBS | 4 x 150 GB gp3 x 0.178 h x ($0.08/730) | $0.012 |
-| Public IPv4 | 4 x 0.178 h x $0.005 | $0.004 |
-| S3 GET, requester pays | 605,617 reads x 2 bands x R req x $0.0004/1000 | **$0.97 - $3.88** |
+| EC2, full-tile fleet | 2,568 s / 3600 x $2.72 | **$1.94** |
+| EBS | 4 x 150 GB x 642 s / 2,628,000 x $0.08 | $0.012 |
+| Public IPv4 | 0.7133 ih x $0.005 | $0.004 |
 | S3 to EC2 transfer, same region | | $0.00 |
-| **total** | | **$2.92 - $5.83** |
 
-Measured: instance lifetimes, and the 605,617 shard-scene reads from the shard
-plan. Estimated: the $2.72/hr list rate, which the Pricing API would not confirm
-for this SSO role (`AccessDenied`), though spot at $0.89-$1.03 is consistent
-with it; and R, the requests GDAL issues per windowed read, bracketed at 2 to 8
-rather than guessed. Cost Explorer is also `AccessDenied`, so no billed figure
-was available to check against.
+The $2.72/hr rate is a pinned list price. The Pricing API returns `AccessDenied`
+for this SSO role, so it is unverified in-session; spot at $0.89-$1.03 is
+consistent with it. Cost Explorer is also `AccessDenied`, so no billed figure
+exists to check against. **This is not a bill.**
 
-**Overhead is 2.2x, not 13x.** 10.7 minutes of lifetime against 4.8 minutes of
-compute leaves 5.9 minutes for boot, dependency install, the STAC search, the
-part write and the span query. The earlier claim that `savez_compressed` alone
-took 15-20 minutes is impossible inside a 642-second lifetime.
+#### UNKNOWN
 
-**Quarter tile**, one instance, 562 s: $0.43 EC2 plus $0.24-$0.96 S3 =
-**$0.67 - $1.39**.
+**S3 requester-pays request charges.** GDAL issues an open plus one or more
+ranged reads per window, and that count has never been measured here. It is not
+2, not 4, not 8. Charges scale with request count rather than bytes, so at
+605,617 reads x 2 bands the total could plausibly be anywhere from well under a
+dollar to several dollars, which is the same order as EC2.
 
-### Global, 520 land tiles
+Until `measure_s3_requests.py` has run, **the full-tile cost is a lower bound of
+about $1.96, not a total.**
 
-| | on-demand | spot (~$0.95/hr) |
-|---|---|---|
-| EC2 | $1,010 | $353 |
-| S3 GET | $505 - $2,020 | same |
-| **total** | **$1,515 - $3,030** | **$858 - $2,373** |
+### Steady-state global EC2, excluding validation overhead
 
-Materially worse than the ~$610 quoted before, because **S3 request charges were
-omitted entirely and are comparable to or larger than compute**. On spot they
-dominate.
+The four-machine run is a validation shape, not a production one: it paid boot,
+install and the 38.1 s STAC search four times over to buy wall clock. Projecting
+2,568 instance-seconds per tile across 520 tiles would overstate it.
 
-That changes what to optimise. Request count is now a cost term, not only a
-latency term, so **larger `--load-chunk` values pay twice**: fewer, larger reads
-cut both wall clock and the GET bill. This is the opposite of the earlier
-conclusion here, and it follows from the line item that was missing.
+Steady state is one tile per instance, run back to back, so boot and install
+amortise away:
 
-Remaining overhead is still worth removing, but it is minutes rather than tens
-of minutes: every machine repeats the same STAC search over 3,910 items, boot
-plus dependency install is ~160 s, and the part write is single-threaded
-`savez_compressed` over ~1.1 GB.
+```
+per tile = compute 1094.8 s + search 38.1 s + tail
+tail = part write + span query, bracketed 60-240 s
+     = 1,193 to 1,373 s  =  0.331 to 0.381 instance-hours
+```
+
+| 520 land tiles, **EC2 only** | |
+|---|---|
+| on-demand @ $2.72/hr | **$469 - $539** |
+| spot @ ~$0.95/hr | **$164 - $188** |
+
+S3 request charges are **excluded because they are unknown**, not because they
+are zero. The earlier "$1,515 - $3,030" figure carried a fabricated multiplier
+and should not be used.
+
+### Retracted: the chunk-size recommendation
+
+An earlier version concluded that "larger `--load-chunk` pays twice" and that
+request count is now a cost driver. **That was derived from the guessed
+multiplier and is withdrawn.** Larger read blocks are still known to cut *bytes*
+and wall clock, which was measured back at department scale. Whether they cut
+*cost* depends on the request count, which is unmeasured.
+
+No chunk-size or architecture change should be made on cost grounds until
+`measure_s3_requests.py` reports a real number.
+
+### The bounded test that would settle it
+
+`measure_s3_requests.py` sets `CPL_CURL_VERBOSE=YES` and counts the `> GET`
+lines GDAL's curl layer emits, which is the exact wire count including
+header reads on open. No proxy, no bucket-owner logging, no inference.
+
+```bash
+uv run measure_s3_requests.py --shards 3
+```
+
+Three shards spread across the plan, seconds of compute, a few thousand GETs.
+It writes `requests_per_band_read` as min, mean and max, which feeds
+`cost_report.py --requests-per-read`. Run it in-region on one instance; the
+count is what matters, not the wall clock. Worth repeating at two `--load-chunk`
+values, since that is the parameter the retracted recommendation was about.
 
 ## How to price a run, so this does not recur
 
-The $10 error came from inferring instance lifetime from how long the work felt,
-while polling loops returned instantly and made wall clock run far ahead of that
-sense. The fix is to never infer it. AWS records it exactly:
+`cost_report.py` produces the report deterministically. It reads lifetimes from
+the EC2 API, labels every figure MEASURED, DERIVED or UNKNOWN, prints the
+formula behind each derived line, and **refuses to price S3 without a measured
+requests-per-read**, reporting a lower bound instead of a total.
+
+```bash
+./cost_report.py --tag purpose=lst-benchmark --region us-west-2 \
+    --profile radiant-earth --ebs-gb 150 \
+    --shard-scene-reads 605617 [--requests-per-read <measured>]
+```
+
+Two rules it enforces, both learned the hard way here:
+
+- **Runtime comes from `LaunchTime` and `StateTransitionReason`, never from
+  elapsed feel.** Polling loops return instantly, so wall clock runs far ahead
+  of any sense of it. That is what produced the $10.70, and the same distortion
+  made progress look stalled three times during the run.
+- **An estimate is never reported as a billed cost.** Rates here are pinned list
+  prices. The Pricing API and Cost Explorer both return `AccessDenied` for this
+  SSO role, so nothing in this repo has ever been checked against a bill.
+
+One known gap: terminated instances stop reporting `BlockDeviceMappings`, so EBS
+reads as zero unless `--ebs-gb` is passed.
+
+
+
+AWS records the lifetime exactly:
 
 ```bash
 aws ec2 describe-instances --region us-west-2 \
@@ -809,3 +871,16 @@ Separate measured from estimated in the write-up. Here the lifetimes and read
 counts were measured; the hourly rate and requests-per-read were estimated, and
 the Pricing API and Cost Explorer were both `AccessDenied` for this SSO role, so
 neither could confirm the total.
+
+## Open, and blocking a cost claim
+
+**The S3 requester-pays request count is unmeasured.** Everything else about
+this pipeline has a number behind it. This does not, and it is the one line that
+could change a decision, because at 605,617 shard-scene reads it is the same
+order of magnitude as EC2.
+
+Until `measure_s3_requests.py` runs:
+
+- the full-tile cost is a **lower bound of ~$1.96**, not a total
+- the 520-tile global figure is **EC2 only**, $469-$539 on-demand
+- no chunk-size or architecture change is justified on cost grounds
