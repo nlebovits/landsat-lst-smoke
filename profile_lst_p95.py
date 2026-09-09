@@ -451,7 +451,8 @@ def fetch_boundary(
 
     gdf = gpd.read_file(dest).to_crs("EPSG:4326")
     bbox = tuple(float(v) for v in gdf.total_bounds)
-    return bbox, dest
+    # tuple(...) over a 4-element sequence widens to tuple[float, ...].
+    return (bbox[0], bbox[1], bbox[2], bbox[3]), dest
 
 
 # Measured on this host: a frisky worker with GDAL, numpy, and xarray loaded
@@ -491,7 +492,9 @@ def build_graph(
     bbox,
     chunk: int,
     crs: str,
-    resolution: int,
+    # A geographic grid sets this to 1.0 / pixels_per_degree, so it is not
+    # an integer. The annotation said int until ty caught the callers.
+    resolution: float,
     time_chunk: int,
     load_chunk: int | None = None,
 ):
@@ -878,7 +881,9 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def main(argv=None) -> int:
+# The CLI entry point. Nine timed stages in sequence, each with its own
+# fallback. The sequence is the measurement, so it stays in one function.
+def main(argv=None) -> int:  # noqa: C901
     global _USE_TRACEMALLOC, _TRACE_ID
 
     args = parse_args(argv)
