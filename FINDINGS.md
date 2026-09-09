@@ -709,9 +709,16 @@ CONFIRMED by `measure_shard_memory.py --mode memory` at 512 px:
 |---|---|---|---|---|---|---|
 | peak RSS, GiB | 0.49 | 0.78 | 1.07 | 1.39 | 1.75 | 2.32 |
 
-That is a slope of **12.7 bytes per pixel-scene** with a 0.18 GiB intercept, so
+That is a slope of **12.73 bytes per pixel-scene** with a 0.18 GiB intercept, so
 the accounting figure of 13 sits just above the measurement and never
-under-predicts. Erring high is the safe direction: over-reserving costs worker
+under-predicts.
+
+The same sweep at a 360 px shard measures **12.89**, a ratio of 1.013 against
+the 512 px figure. Bytes per pixel-scene do not depend on the edge, which is
+what makes the working set fall with its square and what lets a 360 px shard
+fit an instance a 512 px shard does not. Asserting that against the formula
+would have been circular, so `tests/test_shard_plan.py` compares the two
+measured slopes. Erring high is the safe direction: over-reserving costs worker
 slots an operator can add back, and under-reserving cost a fleet instance its
 workers.
 
@@ -1268,17 +1275,23 @@ a zero count.
   wrote its results to a serial console that AWS discards on termination, the
   second stopped on a missing `pyarrow`, and the third lost its workers to the
   memory model below.
-- **frisky aborts at worker teardown.** After `part written` and the artifact
-  line, worker threads hit `panic in a function that cannot unwind` and abort.
-  The results are already on disk, so the run is not lost, but the process exit
-  code no longer reports what happened. A fleet driver that reads the exit
-  status would treat a finished tile as a failure. The same panic appears in
+- **frisky aborts worker processes at teardown, and the effect on the exit
+  code is unknown.** At `cluster.close()` the workers hit `panic in a function
+  that cannot unwind` and abort. The parent ran through them and finished its
+  work, printing `part written` and `artifacts` at console lines 441 and 442
+  after the last panic at 439, so `summary.json` was written and nothing was
+  lost.
+  Whether the parent then exits non-zero was not observed. The instance was
+  terminated about two minutes after that line, and AWS lags the serial console
+  by minutes, so the markers that would have said were discarded rather than
+  missing. A fleet driver should key on `summary.json` rather than on exit
+  status until someone watches one run to completion. The same panic appears in
   `Sharp edges in the cluster library`, there in the client during `gather`.
-- **The memory model is fitted to a noisy sample.** `measure_shard_memory.py`
-  polls RSS every 20 ms, which misses peaks: 300 scenes read 0.98 GiB on one
-  sweep and 1.40 on the next. 18 bytes per pixel-scene is the upper envelope of
-  six points at one shard size, not a derivation, and it over-predicts the
-  light end by up to 47%.
+- **The memory model is measured at two shard sizes and one grid.** Twelve
+  points at 360 and 512 px agree on 12.7 to 12.9 bytes per pixel-scene, and the
+  model never under-predicts any of them. Both sweeps use synthetic rasters at
+  EPSG:4326, so nothing reprojects; a UTM source warping into the output grid
+  could hold arrays this does not count.
 - **The staging phase is the widest term in the cost.** The live check fetched
   12 objects. A mean tile needs 3,445 scenes and
   270 GB, and the 90 to 270 s bracket assumes 3.0 to 1.0 GB/s of combined

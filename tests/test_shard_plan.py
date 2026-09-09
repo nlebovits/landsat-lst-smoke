@@ -160,12 +160,20 @@ class TestShardBytes:
     """
 
     #: MEASURED by `measure_shard_memory.py --mode memory` at 512 px.
-    #: The committed sweep, read rather than copied, so the test and the
-    #: artifact cannot drift. Regenerate both together with
-    #: `measure_shard_memory.py --mode memory --out artifacts/shard_memory.json`.
-    SWEEP = [
-        (row["scenes"], row["peak_rss_gib"])
-        for row in json.loads((ARTIFACTS / "shard_memory.json").read_text())["rows"]
+    #: The committed sweeps, read rather than copied, so the tests and the
+    #: artifacts cannot drift. Two shard sizes, because the model claims the
+    #: working set scales with the square of the edge and one size cannot show
+    #: that. Regenerate with
+    #: `measure_shard_memory.py --mode memory --shard N --out artifacts/shard_memory_N.json`.
+    SWEEPS = {
+        int(path.stem.rsplit("_", 1)[1]): json.loads(path.read_text())["rows"]
+        for path in sorted(ARTIFACTS.glob("shard_memory_*.json"))
+    }
+    SWEEP = [(r["scenes"], r["peak_rss_gib"]) for r in SWEEPS[512]]
+    POINTS = [
+        (px, r["scenes"], r["peak_rss_gib"])
+        for px, rows in SWEEPS.items()
+        for r in rows
     ]
 
     @pytest.mark.parametrize(("scenes", "measured"), SWEEP)
@@ -206,6 +214,31 @@ class TestShardBytes:
         big = shard_bytes(1024, 1765) - SHARD_FIXED_GIB
         small = shard_bytes(512, 1765) - SHARD_FIXED_GIB
         assert big == pytest.approx(4 * small)
+
+    def test_the_measured_slope_is_the_same_at_both_shard_sizes(self):
+        """The px-squared claim, against measurement rather than against itself.
+
+        Comparing `shard_bytes` to `shard_bytes` proves only that the formula
+        multiplies. If bytes per pixel-scene differed by edge, the whole reason
+        a 360 px shard needs less memory than a 512 px one would be wrong, and
+        that is what picks the instance.
+        """
+        slopes = {}
+        for px, rows in self.SWEEPS.items():
+            v = sorted((r["scenes"], r["peak_rss_gib"]) for r in rows)
+            steps = [
+                (v[i + 1][1] - v[i][1]) * 1024**3 / ((v[i + 1][0] - v[i][0]) * px * px)
+                for i in range(len(v) - 1)
+            ]
+            slopes[px] = sum(steps) / len(steps)
+        assert len(slopes) >= 2, "need sweeps at two shard sizes"
+        assert max(slopes.values()) / min(slopes.values()) < 1.10, slopes
+
+    @pytest.mark.parametrize(("shard_px", "scenes", "measured"), POINTS)
+    def test_it_never_under_predicts_at_either_shard_size(
+        self, shard_px, scenes, measured
+    ):
+        assert shard_bytes(shard_px, scenes) >= measured
 
     def test_a_quarter_tile_shard_no_longer_fits_a_small_worker(self):
         """1,765 scenes at 512 px is 6.3 GB, not the 1.85 GB long quoted.
