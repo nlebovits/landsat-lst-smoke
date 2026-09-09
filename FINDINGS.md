@@ -175,8 +175,23 @@ Both inventories describe the same archive. Over 2021 to 2025 inside +/-60
 degrees, with `eo:cloud_cover < 100` and Landsat 8 and 9, the bulk file yields
 **1,460,446** scenes, of which **1,457,559** reach a land tile and go into the
 artifact. `tests/test_inventory_parity.py` enumerates the two sets over three
-bounded regions, one of them across the antimeridian, and finds no item on
-either side that the other lacks.
+bounded regions, one of them across the antimeridian, and every item Earth
+Search returns is present in the inventory.
+
+The reverse does not hold, and the reason is worth stating. The bulk file's
+corner columns describe the **product bounding rectangle**. Earth Search
+publishes the **imaged parallelogram**, which the rectangle contains and
+exceeds by about 46% of its area. `derive_projection` wants the rectangle and
+reconstructs `proj:shape` from it exactly. Tile assignment gets a superset:
+measured over 670 non-crossing scenes in three regions, the rectangle produces
+**7.7% more tile-scene pairs** than the published footprints do, and the worst
+single scene gained two tiles.
+
+Those extra scenes are read and contribute nodata over the tile, so they cost
+S3 requests and change no output pixel. No column in the bulk file gives the
+imaged footprint, so matching Earth Search exactly would mean modelling the
+scene rotation rather than reading it. A superset errs on the safe side:
+nothing is missed, because the containment runs one way.
 
 The bulk file has no STAC assets and no `proj:*` fields. Each one is an
 exact function of columns it does carry, and each rule is checked against Earth
@@ -948,6 +963,11 @@ a zero count.
   the Null Island placeholder and the antimeridian slivers. The mask in
   `nlebovits/landsat-lst` does not, so a pixel inside either is composited
   rather than masked.
+- **The 7.7% extra tile-scene pairs have not been priced.** The rectangle
+  overhang is measured on 670 scenes in three regions, and the extra reads it
+  implies scale with tile-boundary geometry rather than with scene count. No
+  run has paid for them, so the S3 line in `Cost` describes the scene list a
+  catalogue search returns rather than the larger one in the artifact.
 - **The scene-centre offset is measured on Landsat 8 only.** 4.24 ms is
   systematic across 401 scenes of Landsat 8 2021, which is the block that
   carries microsecond timestamps. Landsat 9 publishes none, so the same

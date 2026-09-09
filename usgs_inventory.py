@@ -613,13 +613,26 @@ def stac_bbox(lons, lats, crossing):
 
 
 def assign_tiles(table, tile_ids):
-    """Pair every scene with every land tile its footprint intersects.
+    """Pair every scene with every land tile its product extent intersects.
 
-    Earth Search answers a `bbox` search by intersecting the item geometry, so
-    this does the same: an R-tree candidate step on footprint envelopes, then
-    an exact polygon test on the candidates. A pure bbox test would
-    over-include the corners of the rotated Landsat quadrilateral, and those
-    extra scenes would reach `stac_load` and change nothing except cost.
+    The corner columns describe the **product bounding rectangle**, not the
+    imaged parallelogram. `derive_projection` needs exactly that, and the shape
+    it reconstructs matches Earth Search to the pixel. For assignment it means
+    something different, and the difference is measurable.
+
+    Earth Search answers a `bbox` search by intersecting the item's published
+    geometry, which is the rotated scene footprint. The rectangle contains that
+    footprint and is about 1.46 times its area, so this assigns a superset:
+    **7.7% more tile-scene pairs** than a geometry search returns, measured
+    over 670 non-crossing scenes in three regions. The extra scenes are read
+    and contribute nodata over the tile, so they cost requests and change no
+    output pixel. Nothing is ever missed, because the containment runs one way.
+
+    The bulk file carries no column for the imaged footprint, so closing the
+    gap would mean modelling the scene rotation rather than reading it. A
+    superset is the safe side of that trade, and `FINDINGS.md` records the
+    cost. `tests/test_inventory_parity.py` checks the direction that matters:
+    every item Earth Search returns is present here.
 
     A footprint whose longitudes span more than 180 degrees crosses the
     antimeridian. Those are shifted into `[0, 360)` and tested against tiles

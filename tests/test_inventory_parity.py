@@ -375,19 +375,24 @@ class TestSetParity:
         )
 
     @pytest.mark.parametrize("region", sorted(SET_PARITY_REGIONS))
-    def test_the_extra_items_are_explained(self, region, catalogue_sets):
-        """The bulk file is the archive; Earth Search indexes a copy of it.
+    def test_the_extra_items_are_the_rectangle_overhang(self, region, catalogue_sets):
+        """Every surplus scene has to be the product rectangle overreaching.
 
-        Any surplus has to be scenes outside the sampled bbox rather than
-        scenes the catalogue rejects, so the check is on the footprint.
+        The corner columns describe the product bounding rectangle. Earth
+        Search intersects the imaged parallelogram, which the rectangle
+        contains and exceeds by about 46% of its area. So a bbox search returns
+        fewer items than a rectangle test does, and the surplus is real rather
+        than a bug.
 
-        A footprint that wraps the antimeridian is shifted into `[0, 360)` and
-        compared against a region shifted the same way, which is what
-        `assign_tiles` does. Skipping those, as this test used to, excused the
-        one case the plain regions cannot reach.
+        What would be a bug is a surplus with any other cause: a scene the
+        catalogue rejects, or one whose id this module builds wrongly. So each
+        extra is fetched by id and its published geometry tested against the
+        region. An extra whose own footprint does intersect the region is a
+        scene Earth Search should have returned and did not, and that fails.
         """
-        from shapely.geometry import Polygon, box
+        from shapely.geometry import Polygon, box, shape
 
+        from stac_reference import fetch_items_by_id
         from usgs_inventory import footprint_arrays
 
         bounds = SET_PARITY_REGIONS[region]
@@ -397,12 +402,8 @@ class TestSetParity:
 
         west, south, east, north = bounds
         plain = box(*bounds)
-        shifted = box(
-            west + (360.0 if west < 0 else 0.0),
-            south,
-            east + (360.0 if west < 0 else 0.0),
-            north,
-        )
+        shift = 360.0 if west < 0 else 0.0
+        shifted = box(west + shift, south, east + shift, north)
 
         extra = []
         for i, disp in enumerate(display):
@@ -418,9 +419,29 @@ class TestSetParity:
             ring = list(zip(ring_lons, lats[:, i], strict=True))
             if Polygon([*ring, ring[0]]).intersects(target):
                 extra.append(item_id)
-        assert not extra, (
-            f"{len(extra)} scenes intersect {region} in the bulk file but "
-            f"Earth Search did not return them: {extra[:20]}"
+
+        if not extra:
+            return
+
+        found = fetch_items_by_id(extra)
+        absent = sorted(set(extra) - set(found))
+        assert not absent, (
+            f"{len(absent)} scenes intersect {region} in the bulk file and are "
+            f"not in the catalogue at all: {absent[:20]}"
+        )
+
+        # Both frames, because a footprint near the seam may be published in
+        # either and the region carries a shifted twin only when it wraps.
+        overlapping = [
+            item_id
+            for item_id in extra
+            if shape(found[item_id]["geometry"]).intersects(plain)
+            or shape(found[item_id]["geometry"]).intersects(shifted)
+        ]
+        assert not overlapping, (
+            f"{len(overlapping)} scenes in {region} have a published footprint "
+            f"that intersects the region, so a bbox search should have "
+            f"returned them: {overlapping[:20]}"
         )
 
     def test_the_antimeridian_regions_actually_hold_wrapping_scenes(self):
