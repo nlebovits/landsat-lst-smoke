@@ -27,7 +27,10 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-pytestmark = [pytest.mark.s3, pytest.mark.timeout(1800)]
+# Both marks, because this file needs both. The `paired` fixture queries Earth
+# Search before anything is loaded, so `s3` alone understated what running it
+# requires and `-m network` would not have selected it.
+pytestmark = [pytest.mark.s3, pytest.mark.network, pytest.mark.timeout(1800)]
 
 ARTIFACT = ROOT / "artifacts" / "tile_scene_inventory.parquet"
 

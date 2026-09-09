@@ -1,21 +1,32 @@
 """The runtime read: pruning, manifest checks, and the item it builds.
 
-These tests need no network. They build a small inventory in a temporary
-directory with the real writer, then read it back through the real runtime.
-The tests that use the full artifact skip when it has not been built.
+These tests need no network. Two inventories appear. `synthetic_inventory` is
+built row by row, so it can hold cases the archive does not, such as a product
+with no thermal band. `slice_artifact` is real rows cut from a full build and
+committed, so the reader is exercised against the column types and the values
+the writer actually produces. Both come from `tests/conftest.py`.
+
+The tests that need the full 167 MB build are the ones about scale, and only
+those skip when it is absent.
 """
 
 from __future__ import annotations
 
-import json
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from conftest import (  # noqa: E402
+    MANIFEST,
+    SLICE_TILES,
+    WINDOW,
+    make_row,
+    needs_full_artifact,
+    write_inventory,
+)
 from land_tiles import tile_bounds  # noqa: E402
 from tile_inventory import (  # noqa: E402
     ASSET_TEMPLATES,
@@ -31,45 +42,11 @@ from tile_inventory import (  # noqa: E402
 from usgs_inventory import INVENTORY_SCHEMA_VERSION  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-ARTIFACT = ROOT / "artifacts" / "tile_scene_inventory.parquet"
-
-needs_artifact = pytest.mark.skipif(
-    not ARTIFACT.exists(), reason="run usgs_inventory.py to build artifacts/"
-)
-
-MANIFEST = {
-    "schema_version": INVENTORY_SCHEMA_VERSION,
-    "generated_utc": "2026-09-09T00:00:00+00:00",
-    "generator_commit": "abc123",
-    "source": {
-        "url": "https://example.invalid/LANDSAT_OT_C2_L2.parquet.gz",
-        "last_modified": "Tue, 08 Sep 2026 10:05:47 GMT",
-        "sha256": "0" * 64,
-    },
-    "start": "2021-01-01",
-    "end": "2025-12-31T23:59:59Z",
-    "platforms": "landsat-8,landsat-9",
-    "cloud_cover_lt": 100,
-    "natural_earth_version": "ne_10m_land",
-    "buffer_meters": 25000,
-    "latitude_limit": 60,
-    "land_geometry_sha256": "f" * 64,
-    "tile_count": 3,
-}
-
-#: The parameters a run asks for, matching MANIFEST above.
-WINDOW = {
-    "start": "2021-01-01",
-    "end": "2025-12-31T23:59:59Z",
-    "platforms": "landsat-8,landsat-9",
-    "cloud_cover_lt": 100,
-    "schema_version": INVENTORY_SCHEMA_VERSION,
-}
 
 
 def _check(**overrides):
     """`check_manifest` with the matching parameters, and any one changed."""
-    window = {**WINDOW, **overrides}
+    window = {**WINDOW, "schema_version": INVENTORY_SCHEMA_VERSION, **overrides}
     return check_manifest(
         MANIFEST,
         start=str(window["start"]),
@@ -80,68 +57,15 @@ def _check(**overrides):
     )
 
 
-def _row(tile_id, n, *, thermal=True, crossing=False):
-    stamp = datetime(2023, 6, n % 28 + 1, 12, 0, tzinfo=UTC)
-    base = (
-        "s3://usgs-landsat/collection02/level-2/standard/oli-tirs/2023/"
-        "227/081/LC08_L2SP_227081_20230601_20230610_02_T1/"
-        "LC08_L2SP_227081_20230601_20230610_02_T1"
-    )
-    west, south, east, north = tile_bounds(tile_id)
-    return {
-        "tile_id": tile_id,
-        "item_id": f"LC08_L2SP_2270{n:02d}_20230601_02_T1",
-        "display_id": f"LC08_L2SP_2270{n:02d}_20230601_20230610_02_T1",
-        "scene_id": f"LC82270{n:02d}2023152LGN00",
-        "datetime": stamp,
-        "platform": "landsat-8",
-        "collection_category": "T1",
-        "data_type": "OLI_TIRS_L2SP" if thermal else "OLI_TIRS_L2SR",
-        "wrs_path": 227,
-        "wrs_row": 81,
-        "cloud_cover": 12.5,
-        "bbox_west": 179.0 if crossing else west,
-        "bbox_south": south,
-        "bbox_east": -179.0 if crossing else east,
-        "bbox_north": north,
-        "crosses_antimeridian": crossing,
-        "proj_epsg": 32620,
-        "proj_shape_y": 7891,
-        "proj_shape_x": 7831,
-        "proj_origin_x": 608385.0,
-        "proj_origin_y": -3300285.0,
-        "thermal_href": f"{base}_ST_B10.TIF" if thermal else None,
-        "qa_href": f"{base}_QA_PIXEL.TIF",
-        **{
-            f"corner_{axis}{i}": (west + i if axis == "lon" else south + i)
-            for i in range(4)
-            for axis in ("lon", "lat")
-        },
-    }
-
-
 @pytest.fixture
 def small(tmp_path):
-    """Three tiles, written the way usgs_inventory writes them."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
+    """Three tiles of synthetic rows, written the way usgs_inventory writes."""
     rows = (
-        [_row("S30W065", i) for i in range(5)]
-        + [_row("S30W060", i) for i in range(3)]
-        + [_row("S35W065", i) for i in range(4)]
+        [make_row("S30W065", i) for i in range(5)]
+        + [make_row("S30W060", i) for i in range(3)]
+        + [make_row("S35W065", i) for i in range(4)]
     )
-    table = pa.Table.from_pylist(rows)
-    meta = {b"manifest": json.dumps(MANIFEST).encode()}
-    schema = table.schema.with_metadata(meta)
-    path = tmp_path / "inv.parquet"
-    with pq.ParquetWriter(path, schema, compression="zstd") as writer:
-        for name in ("S30W060", "S30W065", "S35W065"):
-            chunk = pa.Table.from_pylist(
-                [r for r in rows if r["tile_id"] == name], schema=schema
-            )
-            writer.write_table(chunk, row_group_size=chunk.num_rows)
-    return path
+    return write_inventory(tmp_path / "inv.parquet", rows)
 
 
 # --------------------------------------------------------------------------
@@ -180,12 +104,19 @@ class TestPruning:
     def test_tile_ids_reads_statistics_only(self, small):
         assert tile_ids(small) == ["S30W060", "S30W065", "S35W065"]
 
-    @needs_artifact
+    @needs_full_artifact
     def test_single_tile_read_touches_a_fraction_of_the_file(self):
-        """The point of the layout: one tile is not a scan of the file."""
+        """The point of the layout: one tile is not a scan of the file.
+
+        This one needs the full build. A fraction is only meaningful against
+        895 row groups; the committed slice has four, so a tile is a quarter of
+        it by construction and the ratio would say nothing.
+        """
         import pyarrow.parquet as pq
 
-        pf = pq.ParquetFile(ARTIFACT)
+        from conftest import FULL_ARTIFACT
+
+        pf = pq.ParquetFile(FULL_ARTIFACT)
         groups = row_groups_for_tile(pf, "S30W065")
         assert len(groups) == 1
         touched = sum(pf.metadata.row_group(g).total_byte_size for g in groups)
@@ -246,7 +177,7 @@ class TestManifest:
     def test_provenance_names_the_source_and_the_land(self):
         p = provenance(MANIFEST)
         assert p["source_sha256"] == "0" * 64
-        assert p["land_geometry_sha256"] == "f" * 64
+        assert p["land_geometry_sha256"] == "1" * 64
         assert p["buffer_meters"] == 25000
         assert p["latitude_limit"] == 60
         assert p["inventory_generator_commit"] == "abc123"
@@ -259,7 +190,7 @@ class TestManifest:
 
 class TestBuildItem:
     def test_carries_the_projection_triple(self):
-        item = build_item(_row("S30W065", 1))
+        item = build_item(make_row("S30W065", 1))
         props = item["properties"]
         assert props["proj:epsg"] == 32620
         assert props["proj:shape"] == [7891, 7831]
@@ -267,19 +198,19 @@ class TestBuildItem:
 
     def test_declares_the_projection_extension(self):
         """pystac reports proj:* only when the item declares the extension."""
-        item = build_item(_row("S30W065", 1))
+        item = build_item(make_row("S30W065", 1))
         assert any("projection" in u for u in item["stac_extensions"])
         assert any("raster" in u for u in item["stac_extensions"])
 
     def test_both_bands_carry_their_nodata(self):
         """0 for the thermal band, 1 for QA_PIXEL. The mask depends on it."""
-        item = build_item(_row("S30W065", 1))
+        item = build_item(make_row("S30W065", 1))
         assert item["assets"]["lwir11"]["raster:bands"][0]["nodata"] == 0
         assert item["assets"]["qa_pixel"]["raster:bands"][0]["nodata"] == 1
 
     def test_l2sr_has_no_thermal_asset(self):
         """Earth Search omits lwir11 for L2SR. So does this."""
-        item = build_item(_row("S30W065", 1, thermal=False))
+        item = build_item(make_row("S30W065", 1, thermal=False))
         assert "lwir11" not in item["assets"]
         assert "qa_pixel" in item["assets"]
 
@@ -289,22 +220,22 @@ class TestBuildItem:
 
     def test_scene_id_is_present_for_grouping(self):
         """stac_load groups on landsat:scene_id."""
-        item = build_item(_row("S30W065", 1))
+        item = build_item(make_row("S30W065", 1))
         assert item["properties"]["landsat:scene_id"].startswith("LC8")
 
     def test_datetime_is_utc_iso(self):
-        item = build_item(_row("S30W065", 1))
+        item = build_item(make_row("S30W065", 1))
         assert item["properties"]["datetime"].endswith("Z")
 
     def test_geometry_ring_is_closed(self):
-        item = build_item(_row("S30W065", 1))
+        item = build_item(make_row("S30W065", 1))
         ring = item["geometry"]["coordinates"][0]
         assert ring[0] == ring[-1]
         assert len(ring) == 5
 
     def test_pystac_accepts_it(self):
         pystac = pytest.importorskip("pystac")
-        item = pystac.Item.from_dict(build_item(_row("S30W065", 1)))
+        item = pystac.Item.from_dict(build_item(make_row("S30W065", 1)))
         assert item.id.startswith("LC08")
         assert item.datetime is not None
 
@@ -336,10 +267,15 @@ class TestAntimeridianBbox:
 # --------------------------------------------------------------------------
 
 
-@needs_artifact
 class TestBuiltArtifact:
-    def test_manifest_records_the_window_and_the_land(self):
-        m = read_manifest(ARTIFACT)
+    """Against the committed slice, so these run on a clean checkout.
+
+    They used to need the 167 MB build and skipped without it, which meant CI
+    never checked any of them.
+    """
+
+    def test_manifest_records_the_window_and_the_land(self, slice_artifact):
+        m = read_manifest(slice_artifact)
         assert m["start"] == "2021-01-01"
         assert m["end"] == "2025-12-31T23:59:59Z"
         assert m["platforms"] == "landsat-8,landsat-9"
@@ -349,26 +285,48 @@ class TestBuiltArtifact:
         assert len(m["land_geometry_sha256"]) == 64
         assert len(m["source"]["sha256"]) == 64
 
-    def test_snap_stayed_well_inside_the_limit(self):
+    def test_snap_stayed_well_inside_the_limit(self, slice_artifact):
         from usgs_inventory import MAX_SNAP_METERS
 
-        assert read_manifest(ARTIFACT)["max_snap_meters"] < MAX_SNAP_METERS
+        assert read_manifest(slice_artifact)["max_snap_meters"] < MAX_SNAP_METERS
 
-    def test_every_row_group_holds_one_tile(self):
+    def test_every_row_group_holds_one_tile(self, slice_artifact):
         import pyarrow.parquet as pq
 
-        pf = pq.ParquetFile(ARTIFACT)
+        pf = pq.ParquetFile(slice_artifact)
         col = pf.schema_arrow.names.index("tile_id")
         for i in range(pf.metadata.num_row_groups):
             stats = pf.metadata.row_group(i).column(col).statistics
             assert stats.min == stats.max
 
-    def test_rows_are_sorted_by_tile_then_time(self):
-        items, _ = items_for_tile(ARTIFACT, "S30W065")
+    def test_rows_are_sorted_by_tile_then_time(self, slice_artifact):
+        items, _ = items_for_tile(slice_artifact, "S30W065")
         stamps = [i["properties"]["datetime"] for i in items]
         assert stamps == sorted(stamps)
 
-    def test_a_real_tile_builds_loadable_items(self):
+    def test_the_slice_holds_every_tile_it_claims(self, slice_artifact):
+        assert tile_ids(slice_artifact) == sorted(SLICE_TILES)
+
+    def test_integer_columns_keep_the_writer_s_widths(self, slice_artifact):
+        """Real rows, so the types are the writer's rather than inferred.
+
+        `pa.Table.from_pylist` widens these to int64, which is why a synthetic
+        fixture cannot stand in for this check.
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        schema = pq.ParquetFile(slice_artifact).schema_arrow
+        for name in (
+            "wrs_path",
+            "wrs_row",
+            "proj_epsg",
+            "proj_shape_y",
+            "proj_shape_x",
+        ):
+            assert schema.field(name).type == pa.int32(), name
+
+    def test_a_real_tile_builds_loadable_items(self, slice_artifact):
         """The contract is the geobox odc-stac derives, not the raw property.
 
         `pystac` migrates `proj:epsg` to `proj:code` on read, exactly as it
@@ -379,9 +337,9 @@ class TestBuiltArtifact:
         from odc.stac._mdtools import extract_collection_metadata
 
         items, boxes = items_for_tile(
-            ARTIFACT, "S30W065", bounds=tile_bounds("S30W065")
+            slice_artifact, "S30W065", bounds=tile_bounds("S30W065")
         )
-        assert len(items) == len(boxes) > 100
+        assert len(items) == len(boxes) > 0
         for raw in items[:20]:
             assert raw["properties"]["proj:epsg"] > 32600
             item = pystac.Item.from_dict(raw)
@@ -391,3 +349,24 @@ class TestBuiltArtifact:
             assert geobox.crs.epsg == raw["properties"]["proj:epsg"]
             assert tuple(geobox.shape) == tuple(raw["properties"]["proj:shape"])
             assert geobox.transform.c == raw["properties"]["proj:transform"][2]
+
+    def test_an_antimeridian_tile_reads_back(self, slice_artifact):
+        """`S15E175` is in the slice because the seam is where bboxes wrap."""
+        items, boxes = items_for_tile(
+            slice_artifact, "S15E175", bounds=tile_bounds("S15E175")
+        )
+        assert len(items) == len(boxes) > 0
+        for west, _, east, _ in boxes:
+            assert west <= east, "a tile-local bbox must not wrap"
+
+
+@needs_full_artifact
+class TestFullArtifactScale:
+    """Claims that only the whole build can support."""
+
+    def test_every_land_tile_is_present(self):
+        from conftest import FULL_ARTIFACT
+
+        m = read_manifest(FULL_ARTIFACT)
+        assert m["tile_count"] == m["tiles_with_scenes"]
+        assert len(tile_ids(FULL_ARTIFACT)) == m["tile_count"]

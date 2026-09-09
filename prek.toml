@@ -63,16 +63,25 @@ rev = "v2.14"
 hooks = [
   {
     id = "vulture",
+    # Keep this list and the vulture step in .github/workflows/ci.yml the
+    # same. CI says it runs the same gates as these hooks, and a module in
+    # one list but not the other gets no dead-code check on the path that
+    # matters.
     args = [
       "compare_qa_masks.py",
       "cost_report.py",
       "fleet_plan.py",
-          "land_tiles.py",
+      "land_tiles.py",
+      "measure_land_defects.py",
       "measure_s3_requests.py",
+      "measure_scene_centre.py",
       "profile_lst_p95.py",
       "shard_lst_p95.py",
-          "stac_window.py",
-              "sweep_throughput.py",
+      "stac_reference.py",
+      "stac_window.py",
+      "sweep_throughput.py",
+      "tile_inventory.py",
+      "usgs_inventory.py",
       "dryrun",
       "vulture_whitelist.py",
       "--min-confidence",
@@ -136,11 +145,13 @@ hooks = [
 
   # Type checking. `--extra-search-path .` puts the repository root on the
   # module path, which measure_s3_requests.py needs: it imports shard_lst_p95
-  # after a sys.path insert. ty.toml carries the rest of the settings.
+  # after a sys.path insert. `tests` goes on it for the same reason, because
+  # pytest puts the test directory on sys.path and the test modules import
+  # their shared fixtures from conftest by name. ty.toml carries the rest.
   {
     id = "ty",
     name = "ty type check",
-    entry = "uv run ty check --extra-search-path .",
+    entry = "uv run ty check --extra-search-path . --extra-search-path tests",
     language = "system",
     types = ["python"],
     pass_filenames = false,

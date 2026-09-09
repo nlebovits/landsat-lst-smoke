@@ -14,7 +14,7 @@ catalogue work happens here, once, before the fleet starts.
 
 The source is the USGS Landsat Bulk Metadata Service file for OLI/TIRS
 Collection 2 Level 2. It carries every scene in the archive, updated daily, in
-one 413 MB download. Paging the same inventory out of Earth Search takes 100
+one 433 MB download. Paging the same inventory out of Earth Search takes 100
 items per request, 1.6 s per request, and about 42 GB of JSON.
 
 What the bulk file does not carry is the STAC asset objects and the `proj:*`
@@ -88,10 +88,30 @@ GRID_PHASE_METERS = 15.0
 MAX_SNAP_METERS = 7.5
 
 #: Distance from a month boundary inside which a computed centre time cannot
-#: decide the month on its own. The bulk file truncates the acquisition start
-#: and stop to whole seconds; the largest measured gap to the published centre
-#: was 1.117 s over 360 items, so 2 s carries a margin.
-MONTH_BOUNDARY_GUARD_SECONDS = 2.0
+#: decide the month on its own.
+#:
+#: The centre here is the midpoint of the acquisition start and stop. Earth
+#: Search publishes the scene centre from the product metadata. Two separate
+#: things separate them, and `measure_scene_centre.py` measures each on its own
+#: because timestamp precision in `LANDSAT_OT_C2_L2` is mixed:
+#:
+#:     L8 2021        231,144 scenes    0% whole-second
+#:     L8 2022        234,181 scenes   53% whole-second
+#:     L8 2023-2025 and all L9         100% whole-second
+#:
+#: On the rows that carry microseconds the midpoint is exact, so what is left
+#: is the definitional difference alone: a systematic **4.24 ms**, measured
+#: over 401 scenes, with the median equal to the worst case to four decimal
+#: places. On the whole-second rows, truncating start and stop each by under a
+#: second moves their midpoint by under a second. Measured over 199 such
+#: scenes the worst was **0.89 s**, against the 1 s the truncation allows.
+#:
+#: So the bound is a second and change, derived rather than assumed. 30 s is
+#: 34 times the worst case measured and still cheap: over the 2021 to 2025
+#: window, 4 scenes fall within 2 s of a month boundary, 7 within 5 s, and 52
+#: within 30 s. Each one is fetched from Earth Search exactly, on the laptop
+#: that builds the artifact.
+MONTH_BOUNDARY_GUARD_SECONDS = 30.0
 
 #: Landsat platform number to the STAC `platform` string.
 PLATFORM_BY_SATELLITE = {8: "landsat-8", 9: "landsat-9"}
@@ -247,6 +267,7 @@ def scan_bulk(
     platforms: str = DEFAULT_PLATFORMS,
     cloud_cover_lt: int = DEFAULT_CLOUD_COVER_LT,
     lat_limit: int = LATITUDE_LIMIT,
+    con=None,
 ):
     """Project and filter the bulk table, returning an Arrow table.
 
@@ -257,6 +278,17 @@ def scan_bulk(
     `Date Acquired` is a `YYYY/MM/DD` string. Comparing it to an ISO literal is
     wrong inside a year, because `/` sorts above `-`: `'2023/03/31' <
     '2023-04-01'` is false. It is parsed to a DATE before any comparison.
+
+    The date filter is deliberately one day wider than the window at each end.
+    `Date Acquired` is a date, while a STAC search filters on the scene centre
+    instant, and a scene acquired across midnight has one on either side of the
+    boundary. The extra day makes this a superset of the window;
+    `filter_to_window` then cuts it to the exact instants using the centre
+    time. Filtering on the date alone would include and exclude different
+    scenes than Earth Search at both ends of the window.
+
+    Args:
+        con: An open DuckDB connection to reuse. One is created if absent.
     """
     import duckdb
 
@@ -273,31 +305,71 @@ def scan_bulk(
     SELECT {cols}
     FROM read_parquet(?)
     WHERE strptime("Date Acquired", '%Y/%m/%d')
-              BETWEEN DATE '{start[:10]}' AND DATE '{end[:10]}'
+              BETWEEN DATE '{start[:10]}' - INTERVAL 1 DAY
+                  AND DATE '{end[:10]}' + INTERVAL 1 DAY
       AND "Satellite" IN ({", ".join(str(s) for s in sats)})
       AND "Scene Cloud Cover L1" < {cloud_cover_lt}
       AND {min_lat} <= {lat_limit}
       AND {max_lat} >= {-lat_limit}
     """
-    con = duckdb.connect()
+    owned = con is None
+    con = duckdb.connect() if owned else con
     try:
         return con.execute(sql, [str(parquet_path)]).to_arrow_table()
     finally:
-        con.close()
+        if owned:
+            con.close()
 
 
-def count_bulk_rows(parquet_path: Path | str) -> int:
-    """Rows in the source file, for the manifest's before-and-after figures."""
+def window_bounds(start: str = DEFAULT_START, end: str = DEFAULT_END):
+    """The window's two instants, as `datetime64[us]`.
+
+    A bare date means midnight at the start of that day, which is what a STAC
+    `datetime` range means by the same string.
+    """
+    import numpy as np
+
+    def parse(text: str):
+        return np.datetime64(text.replace("Z", "").rstrip(), "us")
+
+    return parse(start), parse(end)
+
+
+def filter_to_window(centre, start: str = DEFAULT_START, end: str = DEFAULT_END):
+    """The rows whose scene centre falls inside the closed window.
+
+    `scan_bulk` returns a superset, filtered on the acquisition date. This is
+    the cut that matches a STAC search, which is closed at both ends and
+    compares the centre instant.
+
+    Returns:
+        A boolean mask over `centre`.
+    """
+    lo, hi = window_bounds(start, end)
+    return (centre >= lo) & (centre <= hi)
+
+
+def count_bulk_rows(parquet_path: Path | str, con=None) -> int:
+    """Rows in the source file, for the manifest's before-and-after figures.
+
+    Args:
+        parquet_path: The decompressed bulk Parquet.
+        con: An open DuckDB connection to reuse. The count runs beside the
+            scan on the same 641 MB file, so opening a second connection for
+            it reads the footer twice for nothing.
+    """
     import duckdb
 
-    con = duckdb.connect()
+    owned = con is None
+    con = duckdb.connect() if owned else con
     try:
         row = con.execute(
             "SELECT count(*) FROM read_parquet(?)", [str(parquet_path)]
         ).fetchone()
         return int(row[0]) if row else 0
     finally:
-        con.close()
+        if owned:
+            con.close()
 
 
 # --------------------------------------------------------------------------
@@ -348,10 +420,10 @@ def derive_projection(table):
     decimal places in the corner columns carry.
 
     Raises:
-        ValueError: if any row is not UTM, or if any corner has to move more
-            than `MAX_SNAP_METERS` to reach the lattice. Both mean the corner
-            columns no longer identify the grid, and a wrong geobox silently
-            shifts every pixel it loads.
+        ValueError: if any row is not UTM, if any corner is null, or if any
+            corner has to move more than `MAX_SNAP_METERS` to reach the
+            lattice. All three mean the corner columns no longer identify the
+            grid, and a wrong geobox silently shifts every pixel it loads.
     """
     import numpy as np
     from pyproj import Transformer
@@ -361,11 +433,10 @@ def derive_projection(table):
     )
     bad = set(np.unique(projection)) - {"UTM"}
     if bad:
-        msg = f"non-UTM products inside the latitude band: {sorted(bad)}"
+        msg = f"non-UTM products among the scenes assigned to tiles: {sorted(bad)}"
         raise ValueError(msg)
 
-    zone = table.column("UTM Zone").to_numpy(zero_copy_only=False).astype("int32")
-    epsg = 32600 + zone
+    raw_zone = table.column("UTM Zone").to_numpy(zero_copy_only=False)
 
     corners = [
         (
@@ -374,6 +445,27 @@ def derive_projection(table):
         )
         for v in CORNER_RING
     ]
+
+    # A null corner arrives as NaN. It has to be caught here, before the snap:
+    # NaN propagates through `_snap`, and every comparison against NaN is
+    # False, so the `MAX_SNAP_METERS` check below would pass a row whose
+    # geobox is meaningless. `np.rint(nan).astype("int32")` is -2147483648,
+    # which is a shape the loader would accept and read as garbage.
+    finite = np.isfinite(raw_zone)
+    for lon, lat in corners:
+        finite &= np.isfinite(lon) & np.isfinite(lat)
+    if not finite.all():
+        display = table.column("Display ID").to_pylist()
+        offenders = [display[i] for i in np.flatnonzero(~finite)[:5]]
+        msg = (
+            f"{int((~finite).sum())} scenes have a null or non-finite UTM zone "
+            f"or corner coordinate: {offenders}. Those columns are what "
+            f"reconstruct proj:epsg, proj:shape and proj:transform; do not "
+            f"ship this inventory."
+        )
+        raise ValueError(msg)
+
+    epsg = 32600 + raw_zone.astype("int32")
 
     n = table.num_rows
     xs = np.empty((4, n), dtype="float64")
@@ -414,16 +506,16 @@ def derive_projection(table):
 def _resolve_month_boundaries(centre, item_ids):
     """Pin the acquisition month for the few scenes that straddle one.
 
-    Earth Search publishes the scene centre time to the microsecond. The bulk
-    file carries the acquisition start and stop truncated to whole seconds, so
-    a centre computed from them sits within about a second of the published
-    one. Measured over 360 items, the largest gap was 1.117 s.
+    The centre here is the midpoint of the bulk file's acquisition start and
+    stop. Earth Search publishes the scene centre from the product metadata.
+    They are close but not the same quantity, and `MONTH_BOUNDARY_GUARD_SECONDS`
+    records the measured residual and the margin over it.
 
-    The runtime reads only the month, so that second matters for one scene in
-    a hundred thousand: the ones acquired across midnight on the first of a
-    month. `MONTH_BOUNDARY_GUARD_SECONDS` is the band where the computed month
-    could be wrong. Scenes inside it get their exact time from Earth Search,
-    which is a few items over a whole five-year build.
+    The runtime reads only the month, so that fraction of a second matters for
+    one scene in a hundred thousand: the ones acquired across midnight on the
+    first of a month. Scenes inside the guard band get their exact time from
+    Earth Search. Over the 2021 to 2025 window that is 52 items, fetched once
+    on the machine that builds the artifact.
 
     Returns:
         The centre times, with the ambiguous ones replaced, and the list of
@@ -538,7 +630,7 @@ def assign_tiles(table, tile_ids):
         Two arrays: the row index of the scene, and the index into `tile_ids`.
     """
     import numpy as np
-    from shapely import STRtree, box, intersects, polygons
+    from shapely import STRtree, box, polygons
 
     lons, lats, crossing = footprint_arrays(table)
 
@@ -565,12 +657,14 @@ def assign_tiles(table, tile_ids):
         coords = np.stack([scene_lons, lats[:, rows]], axis=-1).transpose(1, 0, 2)
         closed = np.concatenate([coords, coords[:, :1, :]], axis=1)
         footprints = polygons(closed)
+        # `predicate="intersects"` runs the exact polygon test inside the tree.
+        # The pairs it returns are real intersections, not envelope overlaps,
+        # so there is nothing left to re-test here.
         left, right = tree.query(footprints, predicate="intersects")
         if len(left) == 0:
             return
-        keep = intersects(footprints[left], np.asarray(tile_geoms)[right])
-        scene_idx.append(rows[left[keep]])
-        tile_idx.append(right[keep])
+        scene_idx.append(rows[left])
+        tile_idx.append(right)
 
     plain_rows = np.flatnonzero(~crossing)
     _pair(plain_rows, lons[:, plain_rows], plain)
@@ -592,15 +686,31 @@ def assign_tiles(table, tile_ids):
 
 
 def _git_sha() -> str:
+    """The commit that produced this artifact, marked if the tree was dirty.
+
+    A bare commit id from a modified working tree names code that never ran.
+    The committed manifest used to carry `11b275f`, the merge base, at which
+    this module did not exist. A `-dirty` suffix is what makes that visible
+    rather than plausible.
+    """
+    here = Path(__file__).resolve().parent
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             check=True,
-            cwd=Path(__file__).resolve().parent,
+            cwd=here,
         )
-        return out.stdout.strip()
+        sha = out.stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=here,
+        )
+        return f"{sha}-dirty" if status.stdout.strip() else sha
     except (OSError, subprocess.CalledProcessError):
         return ""
 
@@ -624,19 +734,62 @@ def build_inventory(  # noqa: C901 - one linear pipeline, read top to bottom
     import pyarrow as pa
     import pyarrow.parquet as pq
 
+    import duckdb
+
     t0 = time.perf_counter()
     tile_ids, land_provenance = read_land_tiles(land_tiles_path)
     lat_limit = int(land_provenance.get("latitude_limit", LATITUDE_LIMIT))
 
-    scanned = scan_bulk(
-        parquet_path,
-        start=start,
-        end=end,
-        platforms=platforms,
-        cloud_cover_lt=cloud_cover_lt,
-        lat_limit=lat_limit,
+    con = duckdb.connect()
+    try:
+        scanned = scan_bulk(
+            parquet_path,
+            start=start,
+            end=end,
+            platforms=platforms,
+            cloud_cover_lt=cloud_cover_lt,
+            lat_limit=lat_limit,
+            con=con,
+        )
+        t_scan = time.perf_counter() - t0
+        source_rows = count_bulk_rows(parquet_path, con)
+    finally:
+        con.close()
+    scanned_rows = scanned.num_rows
+
+    # The scan is a superset: its date filter runs a day wide at each end. Pin
+    # the month for the scenes that straddle one, then cut to the window on the
+    # centre instant, which is what a STAC search compares. The two steps are
+    # in this order because both ends of the window are themselves month
+    # boundaries, so the scenes at the edge are resolved exactly before they
+    # decide whether they are in the window at all.
+    t_start = np.asarray(
+        scanned.column("Start Time").to_numpy(zero_copy_only=False),
+        dtype="datetime64[us]",
     )
-    t_scan = time.perf_counter() - t0
+    t_stop = np.asarray(
+        scanned.column("Stop Time").to_numpy(zero_copy_only=False),
+        dtype="datetime64[us]",
+    )
+    centre = t_start + (t_stop - t_start) // 2
+    all_item_ids = [stac_item_id(d) for d in scanned.column("Display ID").to_pylist()]
+    centre, resolved = _resolve_month_boundaries(centre, all_item_ids)
+
+    in_window = filter_to_window(centre, start, end)
+    scanned = scanned.filter(pa.array(in_window))
+    centre = centre[in_window]
+    in_window_rows = scanned.num_rows
+
+    # Assign before deriving. The projection rules are exact only for the UTM
+    # products the fleet actually loads, and a scene that reaches no land tile
+    # never reaches `stac_load`. Deriving first made one polar-stereographic
+    # scene at the edge of the latitude band abort a build it has no part in.
+    scene_idx, tile_idx = assign_tiles(scanned, tile_ids)
+    kept = np.unique(scene_idx)
+    remap = np.full(scanned.num_rows, -1, dtype="int64")
+    remap[kept] = np.arange(len(kept))
+    scene_idx = remap[scene_idx]
+    scanned = scanned.take(pa.array(kept))
 
     epsg, height, width, ulx, uly, drift = derive_projection(scanned)
 
@@ -653,22 +806,7 @@ def build_inventory(  # noqa: C901 - one linear pipeline, read top to bottom
     thermal_href = [h[0] for h in hrefs]
     qa_href = [h[1] for h in hrefs]
 
-    # Earth Search publishes the scene centre time. The bulk file carries the
-    # acquisition start and stop, truncated to whole seconds, and the centre
-    # falls between them. Only the month is read at runtime, so the few scenes
-    # acquired across a month boundary get an exact lookup.
-    t_start = np.asarray(
-        scanned.column("Start Time").to_numpy(zero_copy_only=False),
-        dtype="datetime64[us]",
-    )
-    t_stop = np.asarray(
-        scanned.column("Stop Time").to_numpy(zero_copy_only=False),
-        dtype="datetime64[us]",
-    )
-    centre = t_start + (t_stop - t_start) // 2
-    centre, resolved = _resolve_month_boundaries(centre, item_ids)
-
-    scene_idx, tile_idx = assign_tiles(scanned, tile_ids)
+    centre = centre[kept]
 
     platform = np.array(
         [PLATFORM_BY_SATELLITE[int(s)] for s in scanned.column("Satellite").to_numpy()]
@@ -745,8 +883,14 @@ def build_inventory(  # noqa: C901 - one linear pipeline, read top to bottom
         "land_geometry_sha256": land_provenance.get("land_geometry_sha256", ""),
         "tile_count": len(tile_ids),
         "tiles_with_scenes": int(len(set(tile_name_arr.tolist()))),
-        "source_rows": count_bulk_rows(parquet_path),
-        "scenes_after_filter": scanned.num_rows,
+        "source_rows": source_rows,
+        # Three counts, because they answer three questions. The scan is a
+        # superset by one day at each end; the window cut is what a STAC
+        # search would return for the whole band; the last is what survives
+        # tile assignment and is what the artifact holds.
+        "scenes_scanned": scanned_rows,
+        "scenes_in_window": in_window_rows,
+        "scenes_on_tiles": scanned.num_rows,
         "tile_scene_rows": table.num_rows,
         "max_snap_meters": round(drift, 4),
         "month_boundary_lookups": len(resolved),
@@ -758,12 +902,20 @@ def build_inventory(  # noqa: C901 - one linear pipeline, read top to bottom
     # single-tile read touches one group instead of the whole file.
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    meta = {b"manifest": json.dumps(manifest, indent=2).encode()}
-    schema = table.schema.with_metadata(meta)
 
     boundaries = np.flatnonzero(tile_name_arr[1:] != tile_name_arr[:-1]) + 1
     starts = np.concatenate([[0], boundaries])
     stops = np.concatenate([boundaries, [len(tile_name_arr)]])
+
+    # `row_groups` is known before the write, so it belongs in the manifest the
+    # file carries. The embedded copy and the sidecar are then the same object.
+    # Whatever can only be measured after the write goes in the sidecar's own
+    # `build` block, which is named as such rather than silently making the two
+    # manifests disagree.
+    manifest["row_groups"] = len(starts)
+    meta = {b"manifest": json.dumps(manifest, indent=2).encode()}
+    schema = table.schema.with_metadata(meta)
+
     with pq.ParquetWriter(
         out_path,
         schema,
@@ -776,13 +928,17 @@ def build_inventory(  # noqa: C901 - one linear pipeline, read top to bottom
             chunk = table.slice(int(lo), int(hi - lo)).replace_schema_metadata(meta)
             writer.write_table(chunk, row_group_size=int(hi - lo))
 
-    manifest["row_groups"] = len(starts)
-    manifest["artifact_bytes"] = out_path.stat().st_size
-    manifest["build_seconds"] = round(time.perf_counter() - t0, 1)
+    sidecar = manifest | {
+        "build": {
+            "artifact_bytes": out_path.stat().st_size,
+            "build_seconds": round(time.perf_counter() - t0, 1),
+            "note": "measured after the write, so not embedded in the artifact",
+        }
+    }
     (out_path.parent / "inventory_manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n"
+        json.dumps(sidecar, indent=2) + "\n"
     )
-    return manifest
+    return sidecar
 
 
 def main(argv=None) -> int:
@@ -825,7 +981,11 @@ def main(argv=None) -> int:
     )
     print(f"window        {manifest['start']} .. {manifest['end']}")
     print(f"source rows   {manifest['source_rows']:,}")
-    print(f"scenes        {manifest['scenes_after_filter']:,} after filtering")
+    print(
+        f"scenes        {manifest['scenes_scanned']:,} scanned, "
+        f"{manifest['scenes_in_window']:,} in window, "
+        f"{manifest['scenes_on_tiles']:,} on a land tile"
+    )
     print(
         f"tiles         {manifest['tile_count']} land, "
         f"{manifest['tiles_with_scenes']} with scenes"
@@ -834,8 +994,9 @@ def main(argv=None) -> int:
     print(f"row groups    {manifest['row_groups']}")
     print(f"month lookups {manifest['month_boundary_lookups']} exact from STAC")
     print(f"snap drift    {manifest['max_snap_meters']} m (limit {MAX_SNAP_METERS} m)")
-    print(f"artifact      {args.out} ({manifest['artifact_bytes'] / 1e6:.0f} MB)")
-    print(f"build         {manifest['build_seconds']} s")
+    build = manifest["build"]
+    print(f"artifact      {args.out} ({build['artifact_bytes'] / 1e6:.0f} MB)")
+    print(f"build         {build['build_seconds']} s")
     return 0
 
 

@@ -58,6 +58,16 @@ TILE_SIZE_DEGREES = 5
 #: Schema version of `land_tiles.parquet`. Bump on any column change.
 LAND_TILES_SCHEMA_VERSION = 1
 
+#: Version of the geometry method itself: the placeholder filter, the
+#: antimeridian buffer, and anything else that changes the polygons for a fixed
+#: buffer distance. It is part of the cache filename. Without it a cache built
+#: by an earlier method survives a change to that method, and the run silently
+#: reads geometry the current code would never produce. Bump on any change to
+#: `load_land_polygons` or the functions it calls. Version 1 is the method that
+#: produced the 895-tile list. Caches written before this constant existed
+#: carry no `_v` in their name, so they cannot be mistaken for it.
+LAND_METHOD_VERSION = 1
+
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "landsat-lst-smoke" / "land"
 
 
@@ -70,20 +80,30 @@ def buffered_land_path(
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     *,
     buffer_meters: int = COASTAL_BUFFER_METERS,
+    drop_placeholder: bool = True,
+    fix_antimeridian: bool = True,
 ) -> Path:
     """Where the buffered land geometry is cached.
 
-    The buffer distance is in the name, so a run at a different buffer cannot
-    read a file built for another one.
+    Every input that changes the polygons is in the name: the buffer distance,
+    the method version, and the two corrections. A run at a different buffer,
+    a later method, or one correction disabled cannot read a file built for
+    another combination.
     """
     suffix = f"_buf{buffer_meters // 1000}km" if buffer_meters else ""
-    return Path(cache_dir) / f"ne_10m_land{suffix}.gpkg"
+    defects = ""
+    if not drop_placeholder:
+        defects += "_keepplaceholder"
+    if not fix_antimeridian:
+        defects += "_wrapping"
+    return Path(cache_dir) / f"ne_10m_land{suffix}_v{LAND_METHOD_VERSION}{defects}.gpkg"
 
 
 #: Natural Earth documents `scalerank` over 0 to 9. `ne_10m_land` also ships
 #: one record at `scalerank` 100: a square about 1 km on a side centred on
 #: longitude 0, latitude 0. It is a placeholder, not land. Buffered by 25 km it
-#: becomes a disc in the Gulf of Guinea and selects four open-ocean grid cells.
+#: becomes a disc of radius about 0.23 degrees in the Gulf of Guinea. Three of
+#: the cells it reaches are open ocean. `measure_land_defects.py` names them.
 MAX_NATURAL_EARTH_SCALERANK = 9
 
 
@@ -121,9 +141,13 @@ def _buffer_without_wrapping(parts, buffer_meters: int):
     `MERCATOR_X_MAX`. Reprojecting those to EPSG:4326 wraps them: x of
     20,062,508 comes back as longitude -179.78 rather than 180.22. The ring
     then holds vertices at both edges of the world and reads as a polygon
-    spanning every longitude. Three such parts in Natural Earth 10m, in the
-    Aleutians and around Fiji, produce slivers 0.07 degrees tall that circle
-    the planet, and they select open ocean as land.
+    spanning every longitude.
+
+    Nineteen parts of `ne_10m_land` touch the seam. Three groups of them sit
+    inside the latitude band and turn into slivers that circle the planet: the
+    Aleutians near 52 degrees north, an island near 9 degrees south, and Fiji
+    between 16 and 19 degrees south. Between them they select 68 open-ocean
+    cells, measured by `measure_land_defects.py`.
 
     Mercator x is linear in longitude, so the seam moves with a translation
     and the buffer distance never changes. Parts near the seam are shifted a
@@ -172,6 +196,8 @@ def load_land_polygons(
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     *,
     buffer_meters: int = COASTAL_BUFFER_METERS,
+    drop_placeholder: bool = True,
+    fix_antimeridian: bool = True,
 ):
     """Natural Earth 10m land, buffered by 25 km, in EPSG:4326.
 
@@ -186,22 +212,42 @@ def load_land_polygons(
     antimeridian from folding a coastal buffer into a sliver that circles the
     planet.
 
+    Both corrections can be switched off. That is what makes the tile counts in
+    `FINDINGS.md` reproducible rather than asserted: `measure_land_defects.py`
+    builds the list with each defect present and reports what it selects.
+    Production always runs with both on.
+
+    Args:
+        cache_dir: Where the buffered geometry is cached.
+        buffer_meters: Coastal buffer, applied in EPSG:3857.
+        drop_placeholder: Remove Natural Earth's Null Island record.
+        fix_antimeridian: Buffer seam-touching parts without wrapping.
+
     Returns:
         A GeoDataFrame of buffered land polygons in EPSG:4326.
     """
     import geopandas as gpd
 
-    cache_path = buffered_land_path(cache_dir, buffer_meters=buffer_meters)
+    cache_path = buffered_land_path(
+        cache_dir,
+        buffer_meters=buffer_meters,
+        drop_placeholder=drop_placeholder,
+        fix_antimeridian=fix_antimeridian,
+    )
     if cache_path.exists():
         return gpd.read_file(cache_path)
 
     land = gpd.read_file(NATURAL_EARTH_URL)
     land = land.to_crs("EPSG:4326")
-    land = drop_placeholder_features(land)
+    if drop_placeholder:
+        land = drop_placeholder_features(land)
 
     if buffer_meters > 0:
         parts = land.explode(index_parts=False).geometry.to_crs("EPSG:3857")
-        buffered = _buffer_without_wrapping(parts, buffer_meters)
+        if fix_antimeridian:
+            buffered = _buffer_without_wrapping(parts, buffer_meters)
+        else:
+            buffered = parts.buffer(buffer_meters)
         land = gpd.GeoDataFrame(geometry=buffered.to_crs("EPSG:4326"))
         land["geometry"] = land.geometry.make_valid()
         land = land[~land.geometry.is_empty]
@@ -216,15 +262,22 @@ def land_geometry_checksum(
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     *,
     buffer_meters: int = COASTAL_BUFFER_METERS,
+    drop_placeholder: bool = True,
+    fix_antimeridian: bool = True,
 ) -> str:
     """SHA-256 of the cached buffered geometry, so a run can name what it used.
 
     Reads the file rather than the polygons. Two runs that quote the same
     digest read the same bytes, which is the claim a manifest needs to make.
     """
-    path = buffered_land_path(cache_dir, buffer_meters=buffer_meters)
+    kwargs = {
+        "buffer_meters": buffer_meters,
+        "drop_placeholder": drop_placeholder,
+        "fix_antimeridian": fix_antimeridian,
+    }
+    path = buffered_land_path(cache_dir, **kwargs)
     if not path.exists():
-        load_land_polygons(cache_dir, buffer_meters=buffer_meters)
+        load_land_polygons(cache_dir, **kwargs)
     digest = hashlib.sha256()
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
@@ -288,6 +341,8 @@ def select_land_tiles(
     buffer_meters: int = COASTAL_BUFFER_METERS,
     lat_limit: int = LATITUDE_LIMIT,
     size: int = TILE_SIZE_DEGREES,
+    drop_placeholder: bool = True,
+    fix_antimeridian: bool = True,
 ) -> list[dict]:
     """Grid cells whose intersection with the buffered land is non-empty.
 
@@ -302,20 +357,22 @@ def select_land_tiles(
     from shapely import STRtree
     from shapely.geometry import box
 
-    land = load_land_polygons(cache_dir, buffer_meters=buffer_meters)
-    geoms = land.geometry.values
-    tree = STRtree(geoms)
+    land = load_land_polygons(
+        cache_dir,
+        buffer_meters=buffer_meters,
+        drop_placeholder=drop_placeholder,
+        fix_antimeridian=fix_antimeridian,
+    )
+    tree = STRtree(land.geometry.values)
 
     selected = []
     for name, bounds in iter_grid(lat_limit, size):
         cell = box(*bounds)
-        # The tree answers on envelopes, so every hit still needs the exact
-        # test. `intersects` is what "non-empty intersection" means; a shared
-        # edge alone is a non-empty intersection and the tile is kept.
-        hits = tree.query(cell, predicate="intersects")
-        if len(hits) == 0:
-            continue
-        if not any(geoms[i].intersects(cell) for i in hits):
+        # `predicate="intersects"` runs the exact test inside the tree, so a
+        # hit is already a real intersection rather than an envelope overlap.
+        # `intersects` is what "non-empty intersection" means: a shared edge
+        # alone is a non-empty intersection and the tile is kept.
+        if len(tree.query(cell, predicate="intersects")) == 0:
             continue
         selected.append(
             {
@@ -342,6 +399,7 @@ def land_tiles_provenance(
     """Everything a reader needs to know how this tile list was produced."""
     return {
         "schema_version": str(LAND_TILES_SCHEMA_VERSION),
+        "method_version": str(LAND_METHOD_VERSION),
         "natural_earth_url": NATURAL_EARTH_URL,
         "natural_earth_version": NATURAL_EARTH_VERSION,
         "buffer_meters": str(buffer_meters),
@@ -435,7 +493,7 @@ def main(argv=None) -> int:
     print(f"grid cells    {grid} inside +/-{args.lat_limit} degrees")
     print(f"land tiles    {len(tiles)}  ({100 * len(tiles) / grid:.1f}% of the grid)")
     print(f"land geometry ne_10m_land, {args.buffer_meters} m Mercator buffer")
-    print(f"              sha256 {checksum[:16]}")
+    print(f"              method v{LAND_METHOD_VERSION}, sha256 {checksum[:16]}")
     print(f"written       {args.out}")
     return 0
 

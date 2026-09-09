@@ -282,17 +282,40 @@ class TestBuiltList:
         assert prov["latitude_limit"] == "60"
         assert len(prov["land_geometry_sha256"]) == 64
 
-    def test_count_is_recorded_not_asserted(self, built):
+    def test_the_count_is_the_measured_895(self, built):
+        """Pinned, because the whole cost argument rests on it.
+
+        Recording the count in the file and checking the file against itself
+        cannot fail. This is the assertion that catches a change to the land
+        method, and `measure_land_defects.py` is where the number comes from.
+        """
         names, prov = built
         assert int(prov["tile_count"]) == len(names)
+        assert len(names) == 895
 
     def test_the_known_ocean_artifacts_are_absent(self, built):
-        """Null Island and the antimeridian slivers selected open ocean."""
+        """The exact cells each defect selected, from measure_land_defects.py.
+
+        An earlier version of this test named `S05E000` and `S05W005` among the
+        Null Island cells. Neither is reachable: the buffered placeholder spans
+        0.2291 degrees around the origin, and those cells start five degrees
+        south of it. Both assertions passed for the wrong reason, and the cell
+        the placeholder does add, `N05E000`, went unchecked.
+        """
         names, _ = built
-        for ocean in ("N00E000", "N00W005", "S05E000", "S05W005"):
-            assert ocean not in names, f"{ocean} is the Null Island disc"
+        for ocean in ("N00E000", "N00W005", "N05E000"):
+            assert ocean not in names, f"{ocean} is open ocean under the disc"
         for ocean in ("N55W030", "N55W045", "S05E085", "S05W090"):
             assert ocean not in names, f"{ocean} came from a wrapped buffer"
+
+    def test_land_under_the_disc_survives_the_placeholder_fix(self, built):
+        """`N05W005` is inside the disc and is also the coast of Côte d'Ivoire.
+
+        Dropping the placeholder must not drop it. A fix that keyed on position
+        rather than on `scalerank` would.
+        """
+        names, _ = built
+        assert "N05W005" in names
 
     def test_real_antimeridian_land_is_present(self, built):
         """The Aleutians and Fiji straddle the seam and are land."""

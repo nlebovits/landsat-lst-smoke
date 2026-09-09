@@ -99,26 +99,36 @@ def build_plan(
     )
     check_land_parameters(manifest, land_provenance)
 
-    # A tile in the list with no row group is a tile the fleet cannot run.
-    # Report it here rather than let one machine fail alone at read time.
+    # A land tile with no row group has no scene the fleet could load. That is
+    # a fact about the window, not a mismatch: narrow the window or raise the
+    # cloud bar and some coastal tile runs out of scenes. So it comes out of
+    # the launch list and is named in the plan, rather than stopping the other
+    # 894 machines. The land and manifest checks above are what catch a real
+    # mismatch, and they have already run.
     pf = pq.ParquetFile(inventory_uri)
+    meta = pf.metadata
     rows_by_tile = {}
-    missing = []
+    empty = []
     for name in tiles:
         groups = row_groups_for_tile(pf, name)
         if not groups:
-            missing.append(name)
+            empty.append(name)
             continue
-        rows_by_tile[name] = sum(pf.metadata.row_group(g).num_rows for g in groups)
-    if missing:
+        rows_by_tile[name] = sum(meta.row_group(g).num_rows for g in groups)
+
+    runnable = [name for name in tiles if name in rows_by_tile]
+    if not runnable:
         msg = (
-            f"{len(missing)} land tiles have no scenes in the inventory: "
-            f"{missing[:10]}. Rebuild the inventory against this tile list."
+            f"none of the {len(tiles)} land tiles has a scene in this "
+            f"inventory. The window {start} to {end} selects nothing, or the "
+            f"artifact was built for a different tile list."
         )
         raise InventoryError(msg)
 
     return {
-        "tile_count": len(tiles),
+        "tile_count": len(runnable),
+        "land_tile_count": len(tiles),
+        "tiles_without_scenes": empty,
         "inventory": provenance(manifest),
         "land_tiles_uri": str(land_tiles_uri),
         "inventory_uri": str(inventory_uri),
@@ -128,7 +138,7 @@ def build_plan(
                 "bbox": list(tile_bounds(name)),
                 "scenes": rows_by_tile[name],
             }
-            for name in tiles
+            for name in runnable
         ],
     }
 
@@ -167,6 +177,15 @@ def main(argv=None) -> int:
     scenes.sort()
     inv = plan["inventory"]
     print(f"tiles         {plan['tile_count']} to launch, one machine each")
+    empty = plan["tiles_without_scenes"]
+    if empty:
+        print(
+            f"              {len(empty)} of {plan['land_tile_count']} land "
+            f"tiles hold no scene in this window and are not launched:"
+        )
+        print(
+            f"              {', '.join(empty[:10])}{' ...' if len(empty) > 10 else ''}"
+        )
     print(
         f"scenes/tile   min {scenes[0]:,}  p50 {scenes[len(scenes) // 2]:,}  "
         f"max {scenes[-1]:,}"

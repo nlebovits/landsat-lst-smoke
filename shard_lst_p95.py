@@ -67,7 +67,16 @@ DEFAULT_INVENTORY_URI = Path("artifacts/tile_scene_inventory.parquet")
 #: region belong to the bucket the hrefs point at. It no longer selects a
 #: catalogue: the items come from the inventory, and every href it writes is
 #: `s3://usgs-landsat`.
+#:
+#: `planetary-computer` is listed and then refused. Keeping it in `choices`
+#: means the run stops with a sentence that says why, rather than with
+#: argparse's "invalid choice", which would read as a typo. Removing it
+#: silently would be worse still: the flag used to select a catalogue, so a
+#: command line that carries it is asking for something this path cannot do.
 READ_SOURCES = ("earth-search", "planetary-computer")
+
+#: The only source the sharded path can read. See `configure_read_env`.
+SUPPORTED_READ_SOURCE = "earth-search"
 
 MONTHS = [
     "Jan",
@@ -91,7 +100,7 @@ GIB = 1024.0**3
 # --------------------------------------------------------------------------
 
 
-def configure_read_env(source: str = "earth-search") -> None:
+def configure_read_env(source: str = SUPPORTED_READ_SOURCE) -> None:
     """Set the GDAL and AWS variables that every S3 read path depends on.
 
     The number of HTTP requests GDAL issues is a function of these settings.
@@ -99,17 +108,34 @@ def configure_read_env(source: str = "earth-search") -> None:
     and `GDAL_HTTP_MERGE_CONSECUTIVE_RANGES` collapses adjacent block reads into
     one request. A request count measured without them describes a different
     pipeline, so anything that reads scenes must call this first.
+
+    Raises:
+        SystemExit: for any source but `earth-search`. The inventory writes
+            `s3://usgs-landsat` hrefs and that bucket is requester-pays, so a
+            different source would skip `AWS_REQUEST_PAYER` and every read
+            would fail on a bucket the run is entitled to read. This used to
+            pass silently.
     """
+    if source != SUPPORTED_READ_SOURCE:
+        msg = (
+            f"--source {source} cannot read this inventory. Every href it "
+            f"holds is s3://usgs-landsat, which is requester-pays, and only "
+            f"--source {SUPPORTED_READ_SOURCE} sets AWS_REQUEST_PAYER for it. "
+            f"The flag selected a catalogue before the inventory replaced the "
+            f"per-tile search. It now selects a read environment only. The "
+            f"reference catalogue module is where a Planetary Computer query "
+            f"belongs."
+        )
+        raise SystemExit(msg)
     os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
     os.environ.setdefault("GDAL_HTTP_MULTIRANGE", "YES")
     os.environ.setdefault("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
     os.environ.setdefault("GDAL_NUM_THREADS", "1")
     os.environ.setdefault("VSI_CACHE", "TRUE")
-    if source == "earth-search":
-        os.environ.setdefault("AWS_REQUEST_PAYER", "requester")
-        os.environ.setdefault(
-            "AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-west-2")
-        )
+    os.environ.setdefault("AWS_REQUEST_PAYER", "requester")
+    os.environ.setdefault(
+        "AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-west-2")
+    )
 
 
 # --------------------------------------------------------------------------

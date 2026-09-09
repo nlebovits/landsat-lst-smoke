@@ -56,6 +56,18 @@ uv run fleet_plan.py --out artifacts/fleet_plan.json
 `usgs_inventory.py` reuses an unchanged USGS download. Pass `--refresh` to
 discard the cache and fetch the file the service is serving now.
 
+The figures this document quotes about the land rule and the acquisition time
+come from measurement scripts, which no build runs:
+
+```bash
+# what each defect in the shared land method selects
+uv run measure_land_defects.py --out artifacts/land_defects.json
+
+# how far the computed scene centre sits from the published one
+uv run measure_scene_centre.py --all-years \
+    --out artifacts/scene_centre_offset.json
+```
+
 Then stage both Parquet files where the fleet can read them, and run one
 machine per tile:
 
@@ -154,8 +166,8 @@ Collection 2 Level 2, `LANDSAT_OT_C2_L2.parquet.gz`, updated daily.
 
 | | Earth Search, per tile | bulk Parquet, once |
 |---|---|---|
-| transfer | 100 items per request, 22.4 KB each | 413 MB, one download |
-| for the whole band | about 42 GB of JSON | 413 MB |
+| transfer | 100 items per request, 22.4 KB each | 433 MB, one download |
+| for the whole band | about 42 GB of JSON | 433 MB |
 | wall clock | 38.1 s x 895 machines | 58 s, on a laptop |
 | runtime dependency | 895, one per machine | none |
 
@@ -178,7 +190,7 @@ antimeridian, and all five years:
 | `qa_pixel` href | from `Display ID` | exact |
 | `landsat:scene_id` | `Landsat Scene Identifier` | exact |
 | `eo:cloud_cover` | `Scene Cloud Cover L1` | exact |
-| `datetime` | centre of the acquisition | within 1.117 s |
+| `datetime` | centre of the acquisition | within 0.89 s |
 
 Two of those rules are worth stating plainly, because both are easy to get
 wrong in a way that produces a plausible answer.
@@ -196,13 +208,33 @@ scenes the largest snap moved a corner **0.68 m**, against a 15 m half-pixel.
 `MAX_SNAP_METERS` stops the build at 7.5 m, so the reconstruction is checked on
 every row rather than argued for.
 
-The one tolerance is the acquisition time. The bulk file truncates the
-acquisition start and stop to whole seconds, so a centre computed from them
-falls within 1.117 s of the published centre, measured over 360 items. The
-runtime reads only the month. Twenty scenes in the window are acquired across a
-month boundary, and three of those fall within 2 s of it; `usgs_inventory`
-fetches those three from Earth Search and writes the exact time. That is the
-only catalogue request the whole build makes.
+The one tolerance is the acquisition time, and stating it correctly took
+measurement. The centre here is the midpoint of the bulk file's acquisition
+start and stop. Earth Search publishes the scene centre from the product
+metadata. A definitional gap separates the two, and rounding in the source
+widens it; `measure_scene_centre.py` reports each apart from the other.
+
+Timestamp precision in the bulk file is mixed, which is what makes that
+possible. Landsat 8 2021 carries microseconds on both timestamps, Landsat 8
+2022 is 53% whole-second, and everything later is whole-second. On the
+untruncated rows the midpoint is exact, so the residual against Earth Search is
+the definitional difference by itself: a systematic **4.24 ms** over 401
+scenes, with the median equal to the worst case to four decimal places. On the
+truncated rows, truncating both timestamps moves their midpoint by strictly
+under a second, and the worst of 199 was **0.89 s**.
+
+So the bound is a second and change, derived rather than assumed. An earlier
+version of this document asserted 1.117 s and attributed all of it to
+truncation, which no truncation argument allows, and it described the whole
+file as whole-second when a sixth of the window is not.
+
+The runtime reads only the month, so the tolerance matters only at a month
+boundary. `MONTH_BOUNDARY_GUARD_SECONDS` is 30 s, 34 times the worst case
+measured. Over the window, 4 scenes fall within 2 s of a month boundary, 7
+within 5 s, and 52 within 30 s. `usgs_inventory` fetches every scene inside the
+band from Earth Search and writes its exact time. Those are the only catalogue
+requests the whole build makes, and widening the band from 2 s to 30 s bought
+the margin for 48 more of them on one laptop.
 
 ### What a single-tile read costs
 
@@ -714,10 +746,12 @@ in `nlebovits/landsat-lst` as well as the tile list here.
 **Natural Earth includes a placeholder at Null Island.** `ne_10m_land` holds one
 record with `scalerank` 100, a square about 1 km on a side centred on longitude
 0, latitude 0. Natural Earth documents `scalerank` over 0 to 9, and no land
-exists there. Buffered by 25 km it becomes a disc in the Gulf of Guinea, and it
-selected four open-ocean grid cells: `N00E000`, `N00W005`, `S05E000`, and
-`S05W005`. `drop_placeholder_features` removes it by `scalerank`, which is a
-property of the record rather than of its position.
+exists there. Buffered by 25 km it becomes a disc in the Gulf of Guinea
+spanning 0.2291 degrees in each direction. The disc touches four grid cells and
+three of them are open ocean: `N00E000`, `N00W005`, and `N05E000`. The fourth,
+`N05W005`, holds the coast of Côte d'Ivoire and stays in the list on its own
+merits. `drop_placeholder_features` removes the record by `scalerank`, which is
+a property of the record rather than of its position.
 
 **Buffering across the antimeridian wraps the longitude.** The buffer runs in
 EPSG:3857, where x is linear in longitude and the world ends at 20,037,508 m. A
@@ -726,27 +760,48 @@ that edge, and reprojecting them to EPSG:4326 wraps 180.22 degrees back to
 -179.78. The ring then holds vertices at both edges of the world and reads as a
 polygon spanning every longitude.
 
-Parts of `ne_10m_land` in the Aleutians and around Fiji do this. Each becomes a
-sliver 0.07 to 0.45 degrees tall that circles the planet, and between them they
-selected 45 open-ocean cells in the North Atlantic and the Indian Ocean. `make_valid`, which the shared method already applies, does not repair
-it; the wrap is present before `make_valid` runs.
+Nineteen parts of `ne_10m_land` touch the seam. The ones inside the latitude
+band turn into slivers that circle the planet. Their sources are the Aleutians
+near 52 degrees north, an island near 9 degrees south, and Fiji between 16 and
+19 degrees south. Between them they selected 68 open-ocean cells, banded at the
+latitudes those sources occupy:
+
+| source latitude | ocean cells |
+|---|---|
+| 50 to 55 north | 13 |
+| 10 to 5 south | 26 |
+| 20 to 15 south | 29 |
+
+`make_valid`, which the shared method already applies, does not repair any of
+it. The wrap is present before `make_valid` runs.
 
 `_buffer_without_wrapping` shifts the seam-touching parts a half world east,
 buffers them there, and cuts the result at the seam. Mercator x is linear in
 longitude, so the translation is exact and the buffer distance never changes.
 
-The effect on the tile count:
+The effect on the tile count, from `measure_land_defects.py`, which builds the
+list four ways from one Natural Earth release and one buffer:
 
 | land rule | tiles inside +/-60 |
 |---|---|
 | the frozen 700-tile set, Natural Earth 110m, no buffer | 700 |
 | Natural Earth 10m, 25 km buffer, both defects present | 966 |
 | after removing the antimeridian slivers | 898 |
-| after also removing the Null Island placeholder | **895** |
+| after removing the Null Island placeholder instead | 963 |
+| after removing both, which is production | **895** |
 
-The 49 ocean cells cost more than their share. Every one of the 895 remaining
-tiles has Landsat coverage; before the corrections, 49 of 966 had none, which
-is what a tile of open ocean looks like from the catalogue.
+The slivers account for 68 cells and the placeholder for 3. Each cell belongs
+to one defect or to the other, so 71 come out altogether.
+
+Landsat coverage checks that in one direction only. A cell no scene ever
+reaches lies outside the archive, so counting empty cells catches a land rule
+that has gone wrong. The reverse inference fails, because Landsat images open
+water: 49 of the 71 removed cells contain no scene, and the remaining 22
+contain scenes while still being ocean. `N05E000` is the clearest case. It
+covers the Bight of Benin, five degrees of water west of the Niger delta, and
+1,979 scenes cross it. Coverage confirms the corrections rather than deciding
+them. The decisive figure is the other one: of the 895 tiles that remain, every
+one holds scenes.
 
 The pixel mask still has both defects. A 25 km disc of ocean at Null Island
 and two globe-circling slivers of ocean are marked as land, so any pixel inside
