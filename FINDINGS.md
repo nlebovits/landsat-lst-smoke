@@ -491,6 +491,30 @@ Frisky on the completed run, against the array attempt on the same problem:
 | memory peak | 57 GiB / 104 | **26.5 GiB / 96 (28%)** |
 | completed | never | **324 / 324** |
 
+### Confirmed on 64 vCPU
+
+The same quarter tile on a `c6i.16xlarge`, 64 slots x 4 read threads:
+
+```
+324/324   264.8 s   0.82 s/shard   client RSS 5.1 GiB
+LST p95   min -17.0 C  mean 44.6 C  max 75.9 C  (100.0% valid)
+frisky    memory 95.93 GiB / 102.40 GiB (94%)  spilled 0 B  network recv 0 B
+```
+
+**1113.9 s to 264.8 s, a 4.2x speedup on 4x the cores**, and the output matches
+the 16-core run exactly on min, mean, max and valid fraction. Throughput rose
+from 167 to 358 MB/s and CPU sat at 92% user, 2% idle.
+
+Memory ran at 94% of the configured limit, so `--memory-limit-gib 1.6` across 64
+workers is the practical floor at 512 px shards and ~711 scenes. Above 64 cores
+the shard edge should shrink: at 384 px a shard needs 0.39 GiB rather than 0.69,
+which is what keeps the concurrent working set inside RAM.
+
+One diagnostic to read correctly: 64 `frisky_worker_sigterm_dump` entries appear
+at the end of a clean run. That is one per worker at `cluster.close()`, not a
+memory kill. `pressure_fraction` near 1.0 in those dumps is a snapshot at
+shutdown.
+
 ### There is no inefficiency left on this instance
 
 ```
@@ -509,8 +533,8 @@ cost per tile stays flat while wall time falls:
 | instance | vCPU | full tile wall | cost |
 |---|---|---|---|
 | `r6i.4xlarge` | 16 | ~74 min | ~$1.25 |
-| `r6i.8xlarge` | 32 | ~37 min | ~$1.26 |
-| `r6i.16xlarge` | 64 | ~19 min | ~$1.27 |
+| **`c6i.16xlarge`** | **64** | **~18 min** (measured 4x 264.8 s) | **~$0.80** |
+| 4 x `c6i.16xlarge` | 256 | **~4.4 min** | ~$0.80 |
 
 A full tile is 1,296 shards, exactly 4x the quarter, because per-shard cost is
 bounded by revisit rate rather than tile size. Roughly 520 land tiles between

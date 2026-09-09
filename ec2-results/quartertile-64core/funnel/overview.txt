@@ -1,0 +1,54 @@
+Overview  tile/spans.json
+
+  perf    wall-clock 356.5s   workers 64   tasks 324   spans 34616
+  memory 95.93 GiB / 102.40 GiB (94% peak)   spilled 0 B   unspilled 0 B   network recv 0 B
+
+Components
+           │0s                 100                200                 300     357s│     Total
+           ├──────────────────────────────────────────────────────────────────────┤
+   compute │▁▃▆████████████████████████████████████████████████████████████▇▆▅▄▂▂▁│ 20759.7 s
+ scheduler │▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│    17.6 s
+     other │▁▁▁▁▁▁▁▁▁▂▂▃▄▆▆▆▅▄▄▂▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▃▃▄▄▅▅▄▅▄▄▃▃▃▂▂▃▃▄▄▄▄▄▃▃▂▁▁▁▁▁▁▁▁▁▁│ 27791.4 s
+           └──────────────────────────────────────────────────────────────────────┘
+→ zoom / full view: observe timeline tile/spans.json --view component
+
+Costliest span types — over time
+                              │0s                 100                200                 300     355s│     Total
+                              ├──────────────────────────────────────────────────────────────────────┤
+worker.exec.call              │▁▃▆▇███████████████████████████████████████████████████████████▇▇▆▄▃▂▁│ 20711.2 s
+worker.paused                 │        ▁▁▂▃▄▆▆▆▅▄▄▂▁        ▁▁▁▁▂▂▃▃▄▄▅▅▄▅▄▄▃▂▂▂▂▃▃▃▄▄▄▄▃▃▂▁▁        │  4463.1 s
+worker.exec.deserialize       │▁▁▁▁      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁        │    48.5 s
+worker.send_data_to_scheduler │                 ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│    36.3 s
+worker.exec.gil               │▁▁▁▁      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁        │   10.1 ms
+worker.receive_task           │▁▁▁▁▁▁    ▁▁ ▁▁ ▁▁  ▁ ▁▁▁▁▁▁▁▁▁▁ ▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁        │    5.5 ms
+worker.handle_event           │          ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│    5.2 ms
+worker.store_data             │          ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│    1.9 ms
+                              └──────────────────────────────────────────────────────────────────────┘
+Memory                        │▁▂▂▂▂▃▃▃▄▅▅▆▇▇▇▇▆▆▅▄▄▄▄▄▄▅▄▄▄▄▃▃▄▄▄▅▅▆▆▆▆▆▆▆▅▅▄▅▄▅▅▅▆▆▆▆▆▆▅▄▄▄▄▄▄▄▄▃▃▃│     89% peak
+
+                     Costliest span types                      
+Name                                Total    Per-wkr    Max wkr
+worker.exec.call                 20711.2s     323.6s     347.9s
+worker.paused                     4463.1s      69.7s      93.0s
+worker.exec.deserialize             48.5s       0.8s       1.3s
+worker.send_data_to_scheduler       36.3s       0.6s       0.8s
+worker.exec.gil                      0.0s       0.0s       0.0s
+worker.receive_task                  0.0s       0.0s       0.0s
+worker.handle_event                  0.0s       0.0s       0.0s
+worker.store_data                    0.0s       0.0s       0.0s
+Per-wkr = mean over the workers that ran it; Max wkr = the busiest single worker. Max wkr ≫ Per-wkr means a few workers carry the work (imbalance).
+→ one op over time: observe timeline tile/spans.json --view detailed --prefix worker.exec.call   raw: observe spans tile/spans.json --name worker.exec.call
+
+                                    Workers unlike their peers                                    
+Worker                                                 Excess    Top deviations (vs median worker)
+unix:///tmp/frisky-sock-u2zmrkpl/worker-2372-0.sock        1s    worker.exec.deserialize +1s (6σ) 
+unix:///tmp/frisky-sock-u2zmrkpl/worker-2402-0.sock        0s    worker.exec.deserialize +0s (5σ) 
+unix:///tmp/frisky-sock-u2zmrkpl/worker-2420-0.sock        0s    worker.exec.gil +0s (50σ)        
+unix:///tmp/frisky-sock-u2zmrkpl/worker-2400-0.sock        0s    worker.exec.gil +0s (33σ)        
+unix:///tmp/frisky-sock-u2zmrkpl/worker-2395-0.sock        0s    worker.exec.gil +0s (15σ)        
+                                                                 worker.store_data +0s (8σ)       
+unix:///tmp/frisky-sock-u2zmrkpl/worker-2387-0.sock        0s    worker.exec.gil +0s (9σ)         
+unix:///tmp/frisky-sock-u2zmrkpl/worker-2416-0.sock        0s    worker.exec.gil +0s (8σ)         
+unix:///tmp/frisky-sock-u2zmrkpl/worker-2422-0.sock        0s    worker.exec.gil +0s (7σ)         
+Each worker's top-3 most unusual span types vs the median worker; Excess = total extra seconds across them.
+→ rank all: observe stragglers tile/spans.json   one worker: observe timeline tile/spans.json --worker unix:///tmp/frisky-sock-u2zmrkpl/worker-2372-0.sock
