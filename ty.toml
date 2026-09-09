@@ -14,6 +14,7 @@ include = [
   "measure_s3_requests.py",
   "profile_lst_p95.py",
   "shard_lst_p95.py",
+  "stac_window.py",
   "sweep_throughput.py",
   "dryrun",
   "tests",

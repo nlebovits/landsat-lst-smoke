@@ -48,6 +48,8 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
+from stac_window import DEFAULT_END, DEFAULT_START, datetime_range
+
 # --------------------------------------------------------------------------
 # Constants from the source data and the encoding contract.
 # --------------------------------------------------------------------------
@@ -796,8 +798,8 @@ def parse_args(argv=None):
         default=4.0,
         help="per worker; workers * this is the cluster total",
     )
-    p.add_argument("--start", default="2020-01-01")
-    p.add_argument("--end", default="2025-01-01")
+    p.add_argument("--start", default=DEFAULT_START)
+    p.add_argument("--end", default=DEFAULT_END)
     p.add_argument("--cloud-cover-lt", type=int, default=100)
     p.add_argument(
         "--platforms",
@@ -1039,7 +1041,7 @@ def main(argv=None) -> int:  # noqa: C901
             query = catalog.search(
                 collections=[COLLECTION],
                 bbox=bbox,
-                datetime=f"{args.start}/{args.end}",
+                datetime=datetime_range(args.start, args.end),
                 query=stac_query,
             )
             items = list(query.items())

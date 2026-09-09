@@ -38,6 +38,8 @@ import sys
 import time
 from pathlib import Path
 
+from stac_window import DEFAULT_END, DEFAULT_START, datetime_range
+
 STAC_EARTH_SEARCH = "https://earth-search.aws.element84.com/v1"
 STAC_PLANETARY_COMPUTER = "https://planetarycomputer.microsoft.com/api/stac/v1"
 SOURCES = {
@@ -287,7 +289,7 @@ def search_items(args, bbox):
         cat.search(
             collections=[COLLECTION],
             bbox=bbox,
-            datetime=f"{args.start}/{args.end}",
+            datetime=datetime_range(args.start, args.end),
             query=query,
         ).items()
     )
@@ -307,8 +309,8 @@ def parse_args(argv=None):
     p.add_argument("--pixels-per-degree", type=int, default=3600)
     p.add_argument("--crs", default="EPSG:4326")
     p.add_argument("--shard", type=int, default=512, help="shard edge in pixels")
-    p.add_argument("--start", default="2020-01-01")
-    p.add_argument("--end", default="2025-01-01")
+    p.add_argument("--start", default=DEFAULT_START)
+    p.add_argument("--end", default=DEFAULT_END)
     p.add_argument("--cloud-cover-lt", type=int, default=100)
     p.add_argument("--platforms", default="landsat-8,landsat-9")
     p.add_argument("--source", choices=sorted(SOURCES), default="earth-search")

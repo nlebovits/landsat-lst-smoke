@@ -10,9 +10,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from profile_lst_p95 import build_graph
+from stac_window import DEFAULT_END, DEFAULT_START, items_cache_path
 
-items = pickle.loads(Path("/tmp/qt_items.pkl").read_bytes())
 BBOX = (-62.5, -35.0, -60.0, -32.5)  # quarter of S30W065
+items = pickle.loads(items_cache_path(BBOX, DEFAULT_START, DEFAULT_END).read_bytes())
 CRS, RES = "EPSG:4326", 1 / 3600  # the actual grid
 LOAD, RED, TC = 2048, 1024, 50
 

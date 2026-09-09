@@ -66,13 +66,20 @@ uv run shard_lst_p95.py --merge part0 part1 part2 part3 --out-dir tile
 | Boundary | `pergamino_dept.gpkg`, Pergamino department, Buenos Aires |
 | bbox, EPSG:4326 | `(-60.942796, -34.17645991, -60.138771, -33.54020044)` |
 | Department grid | EPSG:3857 at 30 m, 2985 x 2845 px, 8.48 Mpx per scene |
-| Window | 2020-01-01 to 2025-01-01 |
+| Window, as measured | 2020-01-01 to 2025-01-01 |
+| Window, current default | 2021-01-01 to 2025-12-31T23:59:59Z |
 | Cloud filter | `eo:cloud_cover < 100` |
 | Scenes | **711** via Earth Search, **673** via Planetary Computer |
 | Volume | 8.7 MB per scene, about 6.1 GB per department run |
 
 Earth Search returns 38 more scenes than Planetary Computer for the same query.
 The difference has no known cause. Treat the two counts as incomparable.
+
+Every measurement in this document ran against the first window. The scripts now
+default to the second one, which is the five-year composite the asset spec asks
+for. So every scene count, timing, request count, and cost below describes
+2020-2024, not 2021-2025, and none has been rerun. `Corrections` explains the
+change. Label any figure measured against the new window where it appears.
 
 The sibling `landsat-lst` repository defines the production grid. A tile spans
 5 degrees on EPSG:4326 at 3600 px per degree, under a name such as `N40W075` or
@@ -623,6 +630,16 @@ mistake: it presented an estimate as a measurement.
 
 **The full tile cost $10.70.** Wrong. That assumed each instance ran an hour.
 Each ran 642 s, so the fleet cost $1.94 of EC2 time.
+
+**The window is 2020-01-01 to 2025-01-01.** Wrong twice over. The asset spec
+asks for a five-year composite covering 2021 through 2025. That window included
+all of 2020, which is outside it, and excluded all of 2025, which is inside it.
+A STAC `datetime` range is closed at both ends, so the end also needed a time of
+day: a bare `2025-12-31` drops every scene acquired that day. The default is now
+`2021-01-01/2025-12-31T23:59:59Z`, held in `stac_window.py` and read by every
+entry point. Cached STAC item lists are named after the query that produced
+them, window included, so a 2020-2024 cache cannot answer a 2021-2025 request.
+No measurement in this document has been rerun against the new window.
 
 **S3 GET charges add about $0.09 per tile, which puts a global composite near
 $650.** Wrong, and withdrawn, along with the "$1,515 - $3,030" global figure the
