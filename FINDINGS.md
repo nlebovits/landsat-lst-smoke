@@ -547,11 +547,13 @@ process shares no cache with the one next to it.
 154.9 opens x 4.77 GETs = 739 requests per object
 ```
 
-The bytes were never the problem. A full tile holds 3,910 scenes x 2 bands at
-about 55 MB, or **215 GB of distinct data**, and the overlapping shard windows
-already move about 233 GB. In-region S3 to EC2 transfer is $0.00. S3 bills the
-shape of an access pattern, not its volume, and this shape is the worst
-available: many small random reads of files read 155 times each.
+The bytes were never the problem either. MEASURED on one shard of three real
+scenes: the windowed reads pull 0.342 MB per object, so 155 shards pull 53.0 MB,
+against 33.6 MB for the whole object. **Staging moves 0.63x the bytes**, because
+the overlapping windows fetch the same blocks again for every shard that touches
+them. In-region S3 to EC2 transfer is $0.00 in either case. S3 bills the shape
+of an access pattern, not its volume, and this shape is the worst available:
+many small random reads of files read 155 times each.
 
 `staging.py` fetches each object once, with one `get_object` per object, and
 writes it to local disk. The item hrefs then point at that copy. The 155 reads
@@ -561,8 +563,35 @@ still happen. They stop being billable.
 |---|---|---|
 | objects fetched | 605,617 x 2 reads | 3,910 x 2 = **7,820** |
 | GETs | 5,777,586 | **7,820** |
-| bytes moved | ~233 GB | ~215 GB |
+| bytes moved | 1.00x | **0.63x** |
 | S3 cost | $2.31 | **$0.0031** |
+
+### The staged path, checked against the bucket
+
+Before any fleet ran, one shard of `S30W065` ran twice over the same three real
+scenes: once from `s3://usgs-landsat`, once from staged local files, and then a
+third time through a `frisky` cluster to exercise the submit path. MEASURED:
+
+| | reading from S3 | staged |
+|---|---|---|
+| GETs | **30** for 6 band reads | **6** for 6 objects |
+| per band read | **5.00** | 1.00 |
+| responses | 30 x `206`, 30 `x-amz-request-charged: requester` | |
+| 4xx, 5xx, retries | 0, 0, 0 | 0, 0, 0 |
+| bytes | 2.05 MB windowed | 201.41 MB whole |
+| `lst_p95`, `qa_count` | **byte-identical between the two** | |
+
+5.00 requests per band read sits at the top of the 4.60 to 5.00 range
+`measure_s3_requests.py` found, so the 4.77 mean holds. One shard at 5.00 is
+775x rather than 739x; the ratio in this document keeps the measured mean.
+
+The check also found a defect the unit tests could not. The disk guard reserved
+52 MB for a thermal band, and `ST_B10` runs to 93.6 MB, so it under-reserved by
+43% on the largest scenes. The constants are now measured, at the top of the
+range rather than the mean.
+
+The `NotGeoreferencedWarning` that `odc-stac` raises during the load appears on
+both paths, which places it in the reader rather than in staging.
 
 Each of the three details below has a test, because a broken one produces a
 correct composite and a larger bill.

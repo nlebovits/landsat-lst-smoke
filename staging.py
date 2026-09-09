@@ -38,15 +38,20 @@ BANDS = ("lwir11", "qa_pixel")
 #: without a HEAD per object. HEAD is billable, and the guard needs an answer
 #: before anything is fetched.
 #:
-#: `FINDINGS.md` measures about 233 GB of reads over 3,910 scenes, or 60 MB per
-#: scene for both bands together. The thermal band carries almost all of it:
-#: `ST_B10` is a full-scene uint16 raster, and `QA_PIXEL` is the same shape but
-#: compresses far harder because it holds bit flags.
-ESTIMATED_BYTES = {"lwir11": 52_000_000, "qa_pixel": 8_000_000}
+#: MEASURED by `HEAD` over 30 scenes of each platform, drawn at random from the
+#: inventory. `ST_B10` runs 11.2 to 93.6 MB with a mean of 76.0 and a p95 of
+#: 93.1. `QA_PIXEL` runs 0.3 to 9.7 MB with a mean of 2.5, because it holds bit
+#: flags and compresses far harder. Together a scene averages 78.5 MB and tops
+#: out near 100.
+#:
+#: These sit at the top of the measured range, not at the mean. The two errors
+#: are not symmetric: over-reserving costs a refusal the operator can override,
+#: and under-reserving costs a run that dies with a full disk after it has
+#: already paid for its instance and its requests.
+ESTIMATED_BYTES = {"lwir11": 95_000_000, "qa_pixel": 10_000_000}
 
-#: Applied to the estimate above. A scene larger than the mean must not fill
-#: the disk halfway through a slice.
-DISK_SAFETY_FACTOR = 1.25
+#: Applied to the estimate above, which is already near the measured maximum.
+DISK_SAFETY_FACTOR = 1.15
 
 #: Staging aborts if free space falls below this while fetching. The estimate
 #: is a mean, so the guard that runs up front can pass on a slice whose scenes
