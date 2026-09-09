@@ -18,6 +18,10 @@ fulltile/tile/*.npy
 # committed along with the difference image.
 qa-parity/*.npy
 
+# The COGs and STAC catalog that `--merge` writes. Regenerable from the part
+# files, and a full-tile lst_p95.tif runs to hundreds of MB.
+*/catalog/
+
 # Vale packages fetched by `vale sync`; .vale.ini pins each release.
 styles/Google/
 styles/Microsoft/

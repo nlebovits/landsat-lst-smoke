@@ -166,6 +166,17 @@ Do not pair it with `--shard 360`: the small shard is chosen for memory once
 staging has removed the request cost, and unstaged it multiplies that cost
 instead. See `Shard size is a memory decision once staging is on`.
 
+The merge writes `lst_p95_dn.npy` and `qa_count.npy` for the analysis scripts,
+and `tile/catalog/` for everyone else: two COGs on a STAC item, inside a
+Portolan collection with its thumbnail, its item mirror, and its two Markdown
+documents. Pass `--no-catalog` to skip the rasters and keep only the arrays.
+Check the result with the Portolan validator:
+
+```bash
+uv tool install rashid
+rashid check ./tile/catalog --all
+```
+
 The shard plan is deterministic and anchors to whole degrees, so a shard covers
 the same pixels whichever request produced it. Machines need no coordination
 beyond the slice index. Rehearse the same fleet on a laptop first, where
@@ -255,6 +266,30 @@ whatever the retrieval did with the observations it counted.
 
 A consumer that needs the three apart has the tile's `summary.json`, which
 counts each of them, and the mask's own inputs, which are named in it.
+
+The merge writes this encoding into two Cloud Optimized GeoTIFFs, so a reader
+gets the rule from the file rather than from this table. `lst_p95.tif` records
+the scale and the offset in its band metadata, which QGIS, `gdalinfo`, and
+rioxarray all read:
+
+```python
+import rioxarray
+
+da = rioxarray.open_rasterio("lst_p95.tif", masked=True)
+
+# The file states its own decoding rule.
+scale, offset = da.rio.scales[0], da.rio.offsets[0]  # 0.01, -50.0
+celsius = da * scale + offset
+```
+
+Both files belong to a Portolan catalog written beside the merged arrays. The
+internal tiles are 512 by 512 pixels. Internal overviews let a client draw the
+tile without reading full-resolution pixels. Each band records its minimum,
+maximum, mean, standard deviation, and valid percent in the header, not in an
+`.aux.xml` sidecar. A sidecar is a second file, and a range request over the
+raster returns none of it. `cog_catalog.py` writes all of this, and
+`tests/test_cog_catalog.py` refuses a tree that `rashid`, the Portolan
+validator, reports an error on.
 
 ## Architecture: shard, do not tune
 
@@ -2268,6 +2303,7 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `shard_lst_p95.py` | the sharded pipeline, the slicer, and the merge |
 | `profile_lst_p95.py` | the array-graph profiling harness |
 | `lst_qa.py` | the QA, fill, range, and nodata rules both P95 paths call |
+| `cog_catalog.py` | writes the COGs and the Portolan catalog the merge emits |
 | `stac_window.py` | the composite window, and the cache identity it fixes |
 | `land_tiles.py` | the buffered land geometry and the generated tile list |
 | `masks.py` | the pixel rules: water, and the ASTER emissivity gap |

@@ -5,6 +5,7 @@
 #   "planetary-computer", "xarray", "numpy", "geopandas",
 #   "psutil", "rich", "boto3", "pyarrow>=16",
 #   "rasterio", "shapely", "pyogrio",
+#   "stac-geoparquet", "matplotlib",
 # ]
 # ///
 """Sharded p95 LST composite. One shard, one task, no shuffle.
@@ -48,6 +49,15 @@ import aster_ged
 import masks
 import staging
 from aster_ged import DEFAULT_NUMOBS_URI
+from cog_catalog import (
+    DEFAULT_COLLECTION_ID,
+    DEFAULT_HOST_NAME,
+    DEFAULT_HOST_URL,
+    DEFAULT_LICENSE,
+    MONTH_NAMES,
+    catalog_provenance,
+    write_catalog,
+)
 from lst_qa import (
     LST_NODATA_DN,
     LST_OFFSET,
@@ -95,20 +105,9 @@ READ_SOURCES = ("earth-search", "planetary-computer")
 #: The only source the sharded path can read. See `configure_read_env`.
 SUPPORTED_READ_SOURCE = "earth-search"
 
-MONTHS = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-]
+#: Band order of the qa_count asset, and the report's column order. Defined
+#: once in cog_catalog, because the COG band descriptions have to match.
+MONTHS = MONTH_NAMES
 GIB = 1024.0**3
 
 
@@ -837,6 +836,28 @@ def parse_args(argv=None):
         "the default drops them",
     )
     p.add_argument(
+        "--no-catalog",
+        action="store_true",
+        help="skip the COGs and the STAC catalog that --merge writes, leaving "
+        "only the .npy arrays",
+    )
+    p.add_argument("--collection-id", default=DEFAULT_COLLECTION_ID)
+    p.add_argument(
+        "--host-name",
+        default=DEFAULT_HOST_NAME,
+        help="the organization maintaining the published catalog",
+    )
+    p.add_argument(
+        "--host-url",
+        default=DEFAULT_HOST_URL,
+        help="a page where the catalog maintainer can be reached",
+    )
+    p.add_argument(
+        "--license",
+        default=DEFAULT_LICENSE,
+        help="SPDX identifier recorded in collection.json",
+    )
+    p.add_argument(
         "--force",
         action="store_true",
         help="run even if slots x read-threads oversubscribes the cores, or "
@@ -900,13 +921,17 @@ def mask_rule(args, counts) -> dict | None:
     }
 
 
-def merge_parts(dirs, out_dir: Path) -> int:
+def merge_parts(dirs, out_dir: Path, args=None) -> int:
     """Assemble one tile from the parts written by --shard-slice runs.
 
     The merge applies no mask. Every part was masked by the machine that wrote
     it, over that machine's own slice, so the pixels arrive already screened.
     What the merge does check is that they were screened the same way: it reads
     every part's meta rather than the first, and stops when two disagree.
+
+    The `.npy` arrays stay: the measurement scripts read them, and they are the
+    cheapest way to reopen a merge. The COGs and the catalog beside them are
+    what a client consumes.
     """
     import numpy as np
 
@@ -965,24 +990,45 @@ def merge_parts(dirs, out_dir: Path) -> int:
         )
     np.save(out_dir / "lst_p95_dn.npy", lst)
     np.save(out_dir / "qa_count.npy", qa)
-    (out_dir / "merge.json").write_text(
-        json.dumps(
-            {
-                "shards": n,
-                "parts": len(parts),
-                "coverage": covered,
-                "raster": [h, w],
-                "meta": meta,
-                # The rule every part agreed on, hoisted so a reader of the
-                # merged tile does not have to open a part to find it.
-                "mask_rule": meta.get("mask_rule"),
-            },
-            indent=2,
-            default=str,
-        )
-    )
+
+    record: dict = {
+        "shards": n,
+        "parts": len(parts),
+        "coverage": covered,
+        "raster": [h, w],
+        "meta": meta,
+        # The rule every part agreed on, hoisted so a reader of the
+        # merged tile does not have to open a part to find it.
+        "mask_rule": meta.get("mask_rule"),
+    }
+    if args is None or not args.no_catalog:
+        record["catalog"] = str(_write_catalog(out_dir, lst, qa, meta, args))
+    (out_dir / "merge.json").write_text(json.dumps(record, indent=2, default=str))
     print(f"artifacts     {out_dir.resolve()}")
     return 0 if covered == 1.0 else 2
+
+
+def _write_catalog(out_dir: Path, lst, qa, meta: dict, args) -> Path:
+    """Write the COGs and the STAC catalog for one merged tile."""
+    collection_id = getattr(args, "collection_id", DEFAULT_COLLECTION_ID)
+    root = write_catalog(
+        out_dir / "catalog",
+        lst,
+        qa,
+        meta,
+        collection_id=collection_id,
+        host_name=getattr(args, "host_name", DEFAULT_HOST_NAME),
+        host_url=getattr(args, "host_url", DEFAULT_HOST_URL),
+        license_id=getattr(args, "license", DEFAULT_LICENSE),
+    )
+    provenance = catalog_provenance(meta, collection_id=collection_id)
+    print(f"catalog       {root.resolve()}")
+    print(
+        f"encoding      lst_p95 uint16 scale {provenance['lst_scale']} "
+        f"offset {provenance['lst_offset']} nodata {provenance['lst_nodata']}; "
+        f"qa_count uint8 12 bands, no nodata"
+    )
+    return root
 
 
 # The CLI entry point: plan, filter, submit, gather, write, and the merge and
@@ -990,7 +1036,7 @@ def merge_parts(dirs, out_dir: Path) -> int:
 def main(argv=None) -> int:  # noqa: C901
     args = parse_args(argv)
     if args.merge:
-        return merge_parts(args.merge, args.out_dir)
+        return merge_parts(args.merge, args.out_dir, args)
     bbox, tile_id = resolve_area(args)
     res = 1.0 / args.pixels_per_degree
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -1518,6 +1564,10 @@ def main(argv=None) -> int:  # noqa: C901
                     # same tile differently produce one raster that no single
                     # rule describes.
                     "mask_rule": mask_rule(args, mask_counts),
+                    # The merge turns these into the item's datetime interval,
+                    # so a catalog states the window its pixels came from.
+                    "start": args.start,
+                    "end": args.end,
                 },
                 indent=2,
             )

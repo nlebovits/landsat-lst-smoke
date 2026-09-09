@@ -34,6 +34,10 @@ dev = [
   "rioxarray",
   # Staging fetches each scene object once, with one get_object per object.
   "boto3",
+  # The COG and catalog writer, cog_catalog.py. rasterio, listed above, writes
+  # the GeoTIFF and drives GDAL's COG driver; stac-geoparquet writes the item
+  # mirror.
+  "stac-geoparquet",
   # The precompute stage: land_tiles.py and usgs_inventory.py. DuckDB and
   # pyarrow do the column projection, filtering and Parquet writing; the bulk
   # metadata table never becomes a pandas frame.
@@ -59,6 +63,10 @@ dev = [
   # suite is latency-bound rather than CPU-bound and parallelises well. See
   # `addopts` below for why the worker count is fixed rather than `auto`.
   "pytest-xdist>=3.6",
+  # The Portolan conformance validator. tests/test_cog_catalog.py runs it
+  # against a catalog built in tmp_path, so CI fails on a non-conformant COG.
+  # 0.1.8 is the first release carrying the v0.2.0 rules the writer targets.
+  "rashid>=0.1.8",
 ]
 
 [tool.uv]

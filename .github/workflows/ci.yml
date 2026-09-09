@@ -42,7 +42,8 @@ jobs:
       - name: Dead code
         run: |
           uvx vulture@2.14 \
-            aster_ged.py compare_qa_masks.py cost_report.py fleet_plan.py \
+            aster_ged.py cog_catalog.py compare_qa_masks.py cost_report.py \
+            fleet_plan.py \
             land_tiles.py masks.py measure_ged_registration.py \
             measure_land_defects.py measure_s3_requests.py \
             measure_scene_centre.py measure_shard_memory.py \
