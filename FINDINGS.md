@@ -593,6 +593,14 @@ range rather than the mean.
 The `NotGeoreferencedWarning` that `odc-stac` raises during the load appears on
 both paths, which places it in the reader rather than in staging.
 
+Two `botocore` defaults also had to go, and a six-object run cannot show either.
+`retries` defaults to `legacy`, which retries a 500 or a 503 up to five times
+inside `get_object`, so a throttled run would report fewer GETs than it paid
+for and the counted S3 line would understate the bill. `max_pool_connections`
+defaults to 10 against a fetch pool of up to 64, so 54 threads would queue on a
+connection rather than pull an object. Retrying now belongs to `staging.py`,
+where `MAX_ATTEMPTS` bounds it and `staging.json` records it.
+
 Each of the three details below has a test, because a broken one produces a
 correct composite and a larger bill.
 
@@ -609,12 +617,17 @@ prices itself. `cost_report.py --s3-get-requests` reads that total from
 `staging.json` and skips the `reads x bands x requests-per-read` derivation
 entirely. No total then rests on the softest figure in this document.
 
-The cost moves to disk. Staging writes about 97 GB per machine at a quarter
-tile, on top of the 358 MB/s the compute phase already reads, and the workers
-hold 96 of 128 GB so page cache absorbs none of it. Either use `c6id.16xlarge`
-and its NVMe at $3.2256/hr against $2.72/hr, or keep `c6i.16xlarge` and
-provision the gp3 root volume to 1,000 MB/s for about $0.05/hr. The second is
-cheaper.
+The cost moves to disk, and the measured object sizes make it larger than the
+first estimate. A quarter-tile slice of 1,765 scenes writes **139 GB** at the
+measured 78.5 MB mean, and the guard reserves **213 GB** because it budgets
+near the maximum. That write competes with the 358 MB/s the compute phase
+already reads, and the workers hold 96 of 128 GB so page cache absorbs none of
+it.
+
+A 150 GB root volume is refused, which rules out the volume the full-tile run
+used. Either use `c6id.16xlarge` and its 2 x 1900 GB NVMe at $3.2256/hr against
+$2.72/hr, or keep `c6i.16xlarge` and give it a gp3 volume of at least 250 GB
+provisioned to 1,000 MB/s, which adds about $0.07/hr. The second is cheaper.
 
 ### Scenes with no thermal band
 

@@ -11,9 +11,11 @@ worker process, with no shared cache. `measure_s3_requests.py` counts 4.77
 ranged GETs per open. The product is 739 requests per object, and across 895
 tiles it comes to about $1,822 against $807 to $928 of on-demand compute.
 
-The bytes were never the problem. A full tile holds about 215 GB of distinct
-source data and the overlapping shard windows already move about 233 GB, so
-staging moves less data than the reads it replaces, not more.
+The bytes were never the problem either. MEASURED on one shard of three real
+scenes: the windowed reads pull 0.342 MB per object, so the 155 shards pull
+53.0 MB against 33.6 MB for the whole object. Staging moves 0.63x the bytes,
+because the overlapping windows fetch the same blocks again for every shard
+that touches them.
 
 This module fetches every object the slice needs with one GET, writes it to
 local disk, and rewrites the item hrefs to point there. The 155 reads still
@@ -172,15 +174,34 @@ def disk_guard(manifest, stage_dir: Path) -> int:
 
 
 def _default_client():
-    """One boto3 S3 client.
+    """One boto3 S3 client, configured so this module can count and saturate.
 
-    Called once per worker thread. botocore clients are safe to share, but a
-    client per thread avoids contention on the connection pool and costs
-    nothing to build.
+    Two defaults have to go, and neither shows up in a small test.
+
+    `retries` defaults to `legacy`, which retries a 500 or a 503 up to five
+    times inside `get_object`. Every one of those is a billable request that
+    `_fetch_one` never sees, so a throttled run would report fewer GETs than it
+    paid for. Counting is the reason `staging.json` exists, so retrying belongs
+    here where `MAX_ATTEMPTS` bounds it and the report carries it.
+
+    `total_max_attempts`, not `max_attempts`: botocore reads the latter as
+    retries after the first try, so `max_attempts: 1` still sends two.
+
+    `max_pool_connections` defaults to 10. The fetch pool runs up to 64
+    threads, so 54 of them would queue behind a connection instead of pulling
+    an object, and a fleet-sized slice would take six times longer than the
+    network needs.
     """
     import boto3
+    from botocore.config import Config
 
-    return boto3.client("s3")
+    return boto3.client(
+        "s3",
+        config=Config(
+            retries={"total_max_attempts": 1, "mode": "standard"},
+            max_pool_connections=_default_threads(),
+        ),
+    )
 
 
 def _fetch_one(client, bucket: str, key: str, dest: Path) -> tuple[int, int]:

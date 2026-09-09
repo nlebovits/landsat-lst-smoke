@@ -258,6 +258,31 @@ class TestStageScenes:
         assert report["objects"] == 0
 
 
+class TestTheDefaultClient:
+    """Two botocore defaults would break the two claims this module makes.
+
+    Neither is visible in a small run. A clean fetch of six objects reports the
+    right count and saturates a pool of ten, so only a fleet-sized slice under
+    throttling would show either one.
+    """
+
+    def test_botocore_does_not_retry_behind_the_counter(self):
+        # `legacy` retries a 503 up to five times inside get_object. Those are
+        # billable GETs that `_fetch_one` cannot see, so a throttled run would
+        # under-report the S3 line that `cost_report.py --s3-get-requests`
+        # prices. Retrying belongs to this module, where MAX_ATTEMPTS bounds it.
+        client = staging._default_client()
+        # total_max_attempts, not max_attempts: botocore reads the latter as
+        # retries after the first try, so a 1 there still sends two requests.
+        assert client.meta.config.retries["total_max_attempts"] == 1
+
+    def test_the_connection_pool_matches_the_fetch_pool(self):
+        # Default 10, against up to 64 fetch threads. The surplus threads queue
+        # on a connection rather than on the network.
+        client = staging._default_client()
+        assert client.meta.config.max_pool_connections >= staging._default_threads()
+
+
 class TestDiskGuard:
     def test_it_refuses_a_slice_that_does_not_fit(
         self, real_items, tmp_path, monkeypatch
