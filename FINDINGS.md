@@ -38,9 +38,31 @@ instance count, moves the larger half.
 
 ## What to run
 
+Build the artifacts once, on a laptop, before any instance starts:
+
+```bash
+# the authoritative tile list, from the pixel mask's own land geometry
+uv run land_tiles.py --out artifacts/land_tiles.parquet
+
+# the scene inventory, from the USGS bulk metadata Parquet
+uv run usgs_inventory.py \
+    --land-tiles artifacts/land_tiles.parquet \
+    --out artifacts/tile_scene_inventory.parquet
+
+# what the fleet will launch, and the checks that gate it
+uv run fleet_plan.py --out artifacts/fleet_plan.json
+```
+
+`usgs_inventory.py` reuses an unchanged USGS download. Pass `--refresh` to
+discard the cache and fetch the file the service is serving now.
+
+Then stage both Parquet files where the fleet can read them, and run one
+machine per tile:
+
 ```bash
 # one machine per slice
-uv run shard_lst_p95.py --bbox=-65,-35,-60,-30 \
+uv run shard_lst_p95.py --tile S30W065 \
+    --inventory-uri artifacts/tile_scene_inventory.parquet \
     --pixels-per-degree 3600 \
     --shard-slice 0:324 --out-dir ./part0
 uv run shard_lst_p95.py ... --shard-slice 324:648  --out-dir ./part1
@@ -118,6 +140,91 @@ that masking removed every observation for that month, which differs from a
 masked pixel. Keeping the two apart is the point of the band.
 
 ## Architecture: shard, do not tune
+
+### The catalogue is read once for the whole fleet
+
+Every tile VM used to open Earth Search and page the same catalogue. The answer
+never differed, and the cost was 38.1 s of instance time plus one dependency on
+a public service per machine. At 895 tiles that is 895 chances for a run to
+fail after it has already paid for its instance.
+
+The catalogue work now happens once, on a laptop, and the fleet reads the
+result. The source is the USGS Landsat Bulk Metadata Service file for OLI/TIRS
+Collection 2 Level 2, `LANDSAT_OT_C2_L2.parquet.gz`, updated daily.
+
+| | Earth Search, per tile | bulk Parquet, once |
+|---|---|---|
+| transfer | 100 items per request, 22.4 KB each | 413 MB, one download |
+| for the whole band | about 42 GB of JSON | 413 MB |
+| wall clock | 38.1 s x 895 machines | 58 s, on a laptop |
+| runtime dependency | 895, one per machine | none |
+
+Both inventories describe the same archive. Over 2021 to 2025 inside +/-60
+degrees, with `eo:cloud_cover < 100` and Landsat 8 and 9, the bulk file yields
+**1,460,446** scenes. `tests/test_inventory_parity.py` enumerates the two sets
+over a bounded region and finds no item on either side that the other lacks.
+
+The bulk file has no STAC assets and no `proj:*` fields. Each one is an
+exact function of columns it does carry, and each rule is checked against Earth
+Search across both platforms, both hemispheres, eight or more UTM zones, the
+antimeridian, and all five years:
+
+| field | rule | agreement |
+|---|---|---|
+| `proj:epsg` | `32600 + UTM Zone` | exact |
+| `proj:shape` | corner envelope over 30 m, plus one | exact |
+| `proj:transform` | corner envelope, half a pixel out, snapped | exact |
+| `lwir11` href | from `Display ID`, null for `L2SR` | exact |
+| `qa_pixel` href | from `Display ID` | exact |
+| `landsat:scene_id` | `Landsat Scene Identifier` | exact |
+| `eo:cloud_cover` | `Scene Cloud Cover L1` | exact |
+| `datetime` | centre of the acquisition | within 1.117 s |
+
+Two of those rules are worth stating plainly, because both are easy to get
+wrong in a way that produces a plausible answer.
+
+USGS writes **every** scene in a northern UTM zone. A southern scene uses a
+negative northing rather than the 10,000,000 m false northing, so choosing
+`327xx` by latitude sign is wrong. Measured on a stratified sample, it was
+wrong for 112 of 400 scenes.
+
+The transform is **exact, not close**. The corner columns hold five decimal
+places, about 1 m, so a reprojected corner lands about a metre from the true
+origin. Landsat Level 2 products sit on a 30 m lattice offset by half a pixel,
+so snapping to that lattice recovers the origin exactly. Across all 1,460,446
+scenes the largest snap moved a corner **0.68 m**, against a 15 m half-pixel.
+`MAX_SNAP_METERS` stops the build at 7.5 m, so the reconstruction is checked on
+every row rather than argued for.
+
+The one tolerance is the acquisition time. The bulk file truncates the
+acquisition start and stop to whole seconds, so a centre computed from them
+falls within 1.117 s of the published centre, measured over 360 items. The
+runtime reads only the month. Twenty scenes in the window are acquired across a
+month boundary, and three of those fall within 2 s of it; `usgs_inventory`
+fetches those three from Earth Search and writes the exact time. That is the
+only catalogue request the whole build makes.
+
+### What a single-tile read costs
+
+The artifact is 167 MB, 3,083,129 tile-scene rows, sorted by tile and then by
+acquisition time, Zstandard-compressed, with one row group per tile and
+`tile_id` statistics on every group. A VM specifies its tile. The reader
+compares that name against the statistics and reads one group.
+
+| tile | scenes | row groups | uncompressed read | median |
+|---|---|---|---|---|
+| `S30W065` | 4,776 | 1 of 895 | 2.80 MB of 1,781 MB (0.157%) | 123 ms |
+| `N40W075` | 2,935 | 1 of 895 | 1.72 MB of 1,781 MB (0.097%) | 87 ms |
+| `N05E010` | 4,187 | 1 of 895 | 2.46 MB of 1,781 MB (0.138%) | 114 ms |
+
+Against the 38.1 s Earth Search baseline that is about 310x, but the wall clock
+is not the point. `tests/test_no_stac_at_runtime.py` blocks every socket in the
+process and runs the read to completion, which is the property worth having.
+
+There is no fallback. A missing, unreadable, or mismatched artifact raises
+before the cluster starts, and the driver refuses to launch. A silent fallback
+would turn one wrong argument into 895 machines quietly doing the slow thing,
+and every other test here would still pass.
 
 ### The array graph fails at tile scale
 
@@ -364,24 +471,41 @@ and would confirm the figure rather than move it. `--max-scenes` samples evenly
 across each shard's items instead of taking the first N, because how many blocks
 a scene touches depends on where its footprint falls on the shard.
 
-### Steady state across 520 tiles
+### Steady state across 895 tiles
 
-The four-machine run validates rather than produces. It paid boot, install, and
-the 38.1 s search four times over to buy wall clock, so projecting 2,568
-instance-seconds per tile would overstate the total. Steady state runs one tile
-per instance, back to back:
+The tile count is **895**, generated rather than assumed. `land_tiles.py`
+intersects the 5-degree grid inside +/-60 degrees with Natural Earth 10m land
+buffered by 25 km, which is the geometry the pixel mask uses. Earlier versions
+of this document priced 520 tiles. That figure has no derivation anywhere in
+either repository, and `Corrections` withdraws it.
+
+The four-machine run validates rather than produces. It paid boot and install
+four times over to buy wall clock, so projecting 2,568 instance-seconds per
+tile would overstate the total. Steady state runs one tile per instance, back
+to back. The 38.1 s catalogue search is gone: a VM now reads its tile out of a
+precomputed inventory in 123 ms.
 
 ```
-per tile = compute 1094.8 s + search 38.1 s + tail
+per tile = compute 1094.8 s + inventory read 0.12 s + tail
 tail = part write + span query, bracketed 60-240 s
-     = 1,193 to 1,373 s  =  0.331 to 0.381 instance-hours
+     = 1,155 to 1,335 s  =  0.321 to 0.371 instance-hours
 ```
 
-| 520 land tiles | shard 512 | shard 1024 |
+| 895 land tiles | shard 512 | shard 1024 |
 |---|---|---|
-| EC2, on-demand @ $2.72/hr | $469 - $539 | $469 - $539 |
-| EC2, spot @ ~$0.95/hr | $164 - $188 | $164 - $188 |
-| S3 GET requests | **$1,202** | **$453** |
+| EC2, on-demand @ $2.72/hr | $781 - $903 | $781 - $903 |
+| EC2, spot @ ~$0.95/hr | $273 - $315 | $273 - $315 |
+| S3 GET requests | **$2,067** | **$779** |
+
+Read the EC2 rows as DERIVED. Measurement supplies the per-tile compute and the
+tile count. The tail is a bracket. The S3 rows multiply the measured per-tile
+request cost, $2.31 at a 512 px shard and $0.87 at 1024 px, by the same tile
+count.
+
+Removing the per-tile search saves 38.1 s x 895 tiles, or 9.5 instance-hours.
+That is $26 on-demand and $9 spot, against an S3 line of $2,067. The search was
+never the money. It was 895 dependencies on a public service, one per machine,
+each able to fail a run that had already paid for its instance.
 
 S3 charges do not amortise, because they scale with reads rather than with
 instance time. At the shard size the full tile ran on they cost more than twice
@@ -581,6 +705,61 @@ P95 797, max 798, which puts the worst 512 px shard at 0.78 GiB and 24.9 GiB
 across 32 slots. Do not compare that run's output with a 2020-2024 run as
 though only the mask had changed.
 
+### The land mask selected open ocean, twice
+
+Generating the tile list from the pixel mask's own geometry exposed two defects
+in that geometry. Both are in the shared method, so both reach the pixel mask
+in `nlebovits/landsat-lst` as well as the tile list here.
+
+**Natural Earth includes a placeholder at Null Island.** `ne_10m_land` holds one
+record with `scalerank` 100, a square about 1 km on a side centred on longitude
+0, latitude 0. Natural Earth documents `scalerank` over 0 to 9, and no land
+exists there. Buffered by 25 km it becomes a disc in the Gulf of Guinea, and it
+selected four open-ocean grid cells: `N00E000`, `N00W005`, `S05E000`, and
+`S05W005`. `drop_placeholder_features` removes it by `scalerank`, which is a
+property of the record rather than of its position.
+
+**Buffering across the antimeridian wraps the longitude.** The buffer runs in
+EPSG:3857, where x is linear in longitude and the world ends at 20,037,508 m. A
+25 km buffer around a coastline touching the antimeridian pushes vertices past
+that edge, and reprojecting them to EPSG:4326 wraps 180.22 degrees back to
+-179.78. The ring then holds vertices at both edges of the world and reads as a
+polygon spanning every longitude.
+
+Parts of `ne_10m_land` in the Aleutians and around Fiji do this. Each becomes a
+sliver 0.07 to 0.45 degrees tall that circles the planet, and between them they
+selected 45 open-ocean cells in the North Atlantic and the Indian Ocean. `make_valid`, which the shared method already applies, does not repair
+it; the wrap is present before `make_valid` runs.
+
+`_buffer_without_wrapping` shifts the seam-touching parts a half world east,
+buffers them there, and cuts the result at the seam. Mercator x is linear in
+longitude, so the translation is exact and the buffer distance never changes.
+
+The effect on the tile count:
+
+| land rule | tiles inside +/-60 |
+|---|---|
+| the frozen 700-tile set, Natural Earth 110m, no buffer | 700 |
+| Natural Earth 10m, 25 km buffer, both defects present | 966 |
+| after removing the antimeridian slivers | 898 |
+| after also removing the Null Island placeholder | **895** |
+
+The 49 ocean cells cost more than their share. Every one of the 895 remaining
+tiles has Landsat coverage; before the corrections, 49 of 966 had none, which
+is what a tile of open ocean looks like from the catalogue.
+
+The pixel mask still has both defects. A 25 km disc of ocean at Null Island
+and two globe-circling slivers of ocean are marked as land, so any pixel inside
+them is composited rather than masked. Fixing that belongs in the repository
+that defines the mask.
+
+**The 25 km buffer is a Mercator buffer.** EPSG:3857 inflates distance by
+`1/cos(lat)`, so 25 km of Mercator is 25 km on the ground at the equator and
+about 12.5 km at 60 degrees. That is the production rule and this tile list
+keeps it, because a tile list built on a different buffer than the pixel mask
+would select tiles the mask then blanks. `land_tiles.parquet` records
+`buffer_is_mercator`, so the artifact states the choice.
+
 ### Rehearsal mode finds them on a laptop
 
 Almost every failure here was findable on a laptop, and this session kept
@@ -702,6 +881,18 @@ a zero count.
 
 ## What is not settled
 
+- **No fleet has run against the precomputed inventory.** Every parity check
+  passes, including a fixed shard loaded from both paths to an identical P95
+  raster, but the largest run through the new path is six scenes.
+- **The 895 tiles have never been priced against a real run.** The per-tile
+  compute is measured and the tile count is measured. Their product is not.
+- **The pixel mask still carries both land defects.** The tile list here drops
+  the Null Island placeholder and the antimeridian slivers. The mask in
+  `nlebovits/landsat-lst` does not, so a pixel inside either is composited
+  rather than masked.
+- **Landsat 7 is out of scope and untested.** The pipeline runs Landsat 8 and
+  9, and the bulk file covers OLI/TIRS only. Adding Landsat 7 needs a second
+  bulk file and a different thermal band.
 - **Nobody has run a tile at the 1024 px shard.** The 2.8x request saving rests
   on three shards of a read measurement, and the 90.6 GiB working set it implies
   has no run behind it, against a measured 26.5 GiB peak at 512 px.
@@ -734,6 +925,22 @@ a zero count.
 
 Every entry is a claim an earlier version stated as fact. Each shares one
 mistake: it presented an estimate as a measurement.
+
+**Steady state across 520 tiles, at $469 to $539 of on-demand EC2 and $1,202
+of S3.** Withdrawn. The 520 has no derivation in this repository or in
+`nlebovits/landsat-lst`, and nothing reproduces it. The tile list is now
+generated: 895 cells inside +/-60 degrees intersect Natural Earth 10m land
+buffered by 25 km, which is the geometry the pixel mask uses. The nearest
+figure with a derivation behind it was the 700-tile frozen set in
+`landsat_lst.tiling`, built from Natural Earth 110m without a buffer. Re-priced
+at 895 tiles, on-demand EC2 is $781 to $903 and S3 is $2,067 at a 512 px shard.
+The per-tile rates are unchanged and still measured; only the multiplier moved.
+
+**Every tile VM pays a 38.1 s catalogue search.** No longer true, and it was
+never the expensive part. Removing it saves 9.5 instance-hours across 895
+tiles, or $26 on-demand. It removes 895 runtime dependencies on a public
+service, which is the reason to do it. The inventory is now built once from the
+USGS bulk metadata Parquet and read in 123 ms per tile.
 
 **The full tile cost $10.70.** Wrong. That assumed each instance ran an hour.
 Each ran 642 s, so the fleet cost $1.94 of EC2 time.
@@ -811,6 +1018,12 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `profile_lst_p95.py` | the array-graph profiling harness |
 | `lst_qa.py` | the QA, fill, range, and nodata rules both P95 paths call |
 | `stac_window.py` | the composite window, and the cache identity it fixes |
+| `land_tiles.py` | the buffered land geometry and the generated tile list |
+| `usgs_inventory.py` | the precompute stage: USGS bulk metadata to one artifact |
+| `tile_inventory.py` | the runtime read of one tile, from one row group |
+| `fleet_plan.py` | the driver, and the checks that run before the fleet does |
+| `stac_reference.py` | Earth Search, kept only as a parity oracle |
+| `artifacts/` | `land_tiles.parquet`, the inventory, and their manifests |
 | `compare_qa_masks.py` | one shard, run under both masks, in one process |
 | `qa-parity/` | that comparison, with both rasters and the difference image |
 | `sweep_throughput.py` | configuration sweep driver |
