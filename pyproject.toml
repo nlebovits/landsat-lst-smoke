@@ -31,6 +31,8 @@ dev = [
   "numpy",
   "geopandas",
   "rioxarray",
+  # Staging fetches each scene object once, with one get_object per object.
+  "boto3",
   # The precompute stage: land_tiles.py and usgs_inventory.py. DuckDB and
   # pyarrow do the column projection, filtering and Parquet writing; the bulk
   # metadata table never becomes a pandas frame.

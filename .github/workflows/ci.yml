@@ -45,7 +45,7 @@ jobs:
             compare_qa_masks.py cost_report.py fleet_plan.py \
             land_tiles.py measure_land_defects.py measure_s3_requests.py \
             measure_scene_centre.py profile_lst_p95.py shard_lst_p95.py \
-            stac_reference.py stac_window.py sweep_throughput.py \
+            stac_reference.py stac_window.py staging.py sweep_throughput.py \
             tile_inventory.py usgs_inventory.py dryrun \
             vulture_whitelist.py --min-confidence 80
 

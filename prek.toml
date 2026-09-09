@@ -79,6 +79,7 @@ hooks = [
       "shard_lst_p95.py",
       "stac_reference.py",
       "stac_window.py",
+      "staging.py",
       "sweep_throughput.py",
       "tile_inventory.py",
       "usgs_inventory.py",

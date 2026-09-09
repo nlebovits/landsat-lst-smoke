@@ -26,6 +26,7 @@ from lst_qa import (  # noqa: E402
     LST_NODATA_DN,
     LST_OFFSET,
     LST_SCALE,
+    LWIR_FILL_DN,
     LWIR_OFFSET_C,
     LWIR_SCALE,
 )
@@ -181,6 +182,56 @@ class TestShardPath:
         out = self._run(monkeypatch, fake_stac_load)
         assert out["qa_count"].shape == (12, NY, NX)
         assert int(out["qa_count"].sum(axis=0).max()) <= N_TIME
+
+    def test_dropping_a_scene_with_no_thermal_band_changes_nothing(
+        self, monkeypatch, stack
+    ):
+        """The claim `staging.drop_scenes_without_thermal` rests on.
+
+        An `OLI_TIRS_L2SR` product carries `qa_pixel` and no `lwir11`, so
+        `odc.stac.stac_load` fills the thermal band with the source fill value.
+        `lst_qa.valid_observation` starts at `not_fill`, which makes the whole
+        layer invalid before the percentile or the monthly counts see it.
+
+        The filter is on by default, so this is what says the default is safe.
+        Byte equality, not closeness: a fill layer that moved the answer at all
+        would mean the mask is not doing what the module claims.
+        """
+        import odc.stac
+        import pystac
+
+        monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
+        base = stack[0]
+
+        n_extra = 3
+        extra = base.isel(time=slice(0, n_extra)).copy(deep=True)
+        extra["lwir11"][:] = LWIR_FILL_DN
+        extra = extra.assign_coords(
+            time=base["time"].values[:n_extra] + np.timedelta64(1, "D")
+        )
+        padded = xr.concat([base, extra], dim="time").sortby("time")
+
+        shard = shard_lst_p95.Shard(0, 0, 0, 0, NY, NX, (-60.0, -34.0, -59.9, -33.9))
+        out = {}
+        for name, dataset in (("kept", padded), ("dropped", base)):
+            monkeypatch.setattr(
+                odc.stac,
+                "stac_load",
+                lambda *_a, _d=dataset, **_k: _d.copy(deep=True),
+            )
+            out[name] = shard_lst_p95.process_shard(
+                shard,
+                [{} for _ in range(dataset.sizes["time"])],
+                "EPSG:4326",
+                1 / 3600,
+                read_threads=1,
+            )
+
+        assert np.array_equal(out["kept"]["lst_p95"], out["dropped"]["lst_p95"])
+        assert np.array_equal(out["kept"]["qa_count"], out["dropped"]["qa_count"])
+        # The layers were there and were counted. Otherwise this passes because
+        # the fixture never added them.
+        assert out["kept"]["n_scenes"] == out["dropped"]["n_scenes"] + n_extra
 
 
 class TestArrayGraphPath:

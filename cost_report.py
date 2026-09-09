@@ -164,6 +164,15 @@ def main() -> int:  # noqa: C901
         help="MEASURED by measure_s3_requests.py. Omit and S3 is UNKNOWN",
     )
     p.add_argument(
+        "--s3-get-requests",
+        type=int,
+        default=None,
+        help="MEASURED total GETs, from the staging.json a staged run writes. "
+        "Staging fetches each object once, so the run counts its own "
+        "requests and nothing has to be derived from a sample. Takes "
+        "precedence over --shard-scene-reads",
+    )
+    p.add_argument(
         "--recorded",
         action="append",
         default=[],
@@ -265,7 +274,16 @@ def main() -> int:  # noqa: C901
 
     print("\n=== S3 (requester pays) ===")
     s3 = None
-    if a.shard_scene_reads is None:
+    if a.s3_get_requests is not None:
+        # A staged run fetches each object once and counts every attempt, so
+        # this is the wire total rather than reads x bands x a sampled rate.
+        # Nothing here is estimated, which is why it comes first.
+        s3 = a.s3_get_requests / 1000 * S3_GET_PER_1000
+        print(f"  MEASURED   GETs counted on the wire : {a.s3_get_requests:,}")
+        print(
+            f"  DERIVED    {a.s3_get_requests:,} / 1000 x ${S3_GET_PER_1000} = ${s3:.4f}"
+        )
+    elif a.shard_scene_reads is None:
         print("  UNKNOWN: --shard-scene-reads not given")
     elif a.requests_per_read is None:
         print(
@@ -313,6 +331,7 @@ def main() -> int:  # noqa: C901
                     ],
                     "total_instance_seconds": total_sec,
                     "shard_scene_reads": a.shard_scene_reads,
+                    "s3_get_requests": a.s3_get_requests,
                 },
                 "derived": {
                     "ec2_usd": ec2,

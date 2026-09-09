@@ -19,6 +19,7 @@ include = [
   "measure_scene_centre.py",
   "profile_lst_p95.py",
   "shard_lst_p95.py",
+  "staging.py",
   "stac_reference.py",
   "stac_window.py",
   "tile_inventory.py",

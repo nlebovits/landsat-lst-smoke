@@ -33,8 +33,12 @@ sits below the trusted minimum and 90.6 C sits above any land skin temperature,
 so both become nodata. The figures stand as what was measured. They are not what
 the pipeline would write today.
 
-S3 requester-pays requests are 54% of that $4.28 and EC2 is 45%. Shard size, not
-instance count, moves the larger half.
+S3 requester-pays requests are 54% of that $4.28 and EC2 is 45%. That run read
+every shard straight from S3, which opens each scene about 155 times at 4.77
+requests an open. Staging fetches each object once instead, which takes the
+per-tile S3 line from **$2.31 to $0.0031** and the 895-tile total from
+**$2,603 - $2,725 to $839 - $1,004**. It costs 60 to 120 s per tile and a disk
+that can take it. See `Cost`.
 
 ## What to run
 
@@ -76,6 +80,7 @@ machine per tile:
 uv run shard_lst_p95.py --tile S30W065 \
     --inventory-uri artifacts/tile_scene_inventory.parquet \
     --pixels-per-degree 3600 \
+    --stage-dir /mnt/nvme/stage \
     --shard-slice 0:324 --out-dir ./part0
 uv run shard_lst_p95.py ... --shard-slice 324:648  --out-dir ./part1
 uv run shard_lst_p95.py ... --shard-slice 648:972  --out-dir ./part2
@@ -84,6 +89,12 @@ uv run shard_lst_p95.py ... --shard-slice 972:1296 --out-dir ./part3
 # then anywhere
 uv run shard_lst_p95.py --merge part0 part1 part2 part3 --out-dir ./tile
 ```
+
+Staging is on by default and `--stage-dir` says where it lands. Point it at the
+instance's fastest volume; the default under the system temp directory is a
+laptop convenience, not a fleet setting. `--no-stage` reads every shard from S3
+instead, which is the path `measure_s3_requests.py` prices and the one that
+costs 739 requests per object.
 
 The shard plan is deterministic and anchors to whole degrees, so a shard covers
 the same pixels whichever request produced it. Machines need no coordination
@@ -521,6 +532,94 @@ and would confirm the figure rather than move it. `--max-scenes` samples evenly
 across each shard's items instead of taking the first N, because how many blocks
 a scene touches depends on where its footprint falls on the shard.
 
+### Staging: fetch each object once
+
+The request count is not a property of the reader. It is a property of the shard
+grid, and it decomposes into two factors that multiply.
+
+A 512 px shard at 3600 px per degree covers about 209 km². A Landsat scene
+covers 185 x 180 km, or 33,300 km². So about 159 shards touch each scene, and
+the plan agrees: 605,617 shard-scene reads over 3,910 scenes is **154.9 opens
+per object**. Each open costs the 4.77 GETs above, because a fresh worker
+process shares no cache with the one next to it.
+
+```
+154.9 opens x 4.77 GETs = 739 requests per object
+```
+
+The bytes were never the problem. A full tile holds 3,910 scenes x 2 bands at
+about 55 MB, or **215 GB of distinct data**, and the overlapping shard windows
+already move about 233 GB. In-region S3 to EC2 transfer is $0.00. S3 bills the
+shape of an access pattern, not its volume, and this shape is the worst
+available: many small random reads of files read 155 times each.
+
+`staging.py` fetches each object once, with one `get_object` per object, and
+writes it to local disk. The item hrefs then point at that copy. The 155 reads
+still happen. They stop being billable.
+
+| per full tile | reading from S3 | staged |
+|---|---|---|
+| objects fetched | 605,617 x 2 reads | 3,910 x 2 = **7,820** |
+| GETs | 5,777,586 | **7,820** |
+| bytes moved | ~233 GB | ~215 GB |
+| S3 cost | $2.31 | **$0.0031** |
+
+Each of the three details below has a test, because a broken one produces a
+correct composite and a larger bill.
+
+- **`get_object`, not `download_file`.** The transfer manager splits anything
+  over 8 MB into several ranged GETs, which would give back three quarters of
+  the saving and change nothing else a test would notice.
+- **No LIST and no HEAD.** Both are billed. Every key comes from the item href,
+  and the disk guard runs off a per-band size estimate rather than a HEAD.
+- **The manifest deduplicates before fetching.** One scene appearing in 155
+  shards has to produce two objects, not 310.
+
+Staging counts its own requests, one per object plus any retry, so a staged run
+prices itself. `cost_report.py --s3-get-requests` reads that total from
+`staging.json` and skips the `reads x bands x requests-per-read` derivation
+entirely. No total then rests on the softest figure in this document.
+
+The cost moves to disk. Staging writes about 97 GB per machine at a quarter
+tile, on top of the 358 MB/s the compute phase already reads, and the workers
+hold 96 of 128 GB so page cache absorbs none of it. Either use `c6id.16xlarge`
+and its NVMe at $3.2256/hr against $2.72/hr, or keep `c6i.16xlarge` and
+provision the gp3 root volume to 1,000 MB/s for about $0.05/hr. The second is
+cheaper.
+
+### Scenes with no thermal band
+
+An `OLI_TIRS_L2SR` product carries `QA_PIXEL` and no `ST_B10`, so
+`tile_inventory.build_item` writes it with no `lwir11` asset, which is what
+Earth Search returns for it. Those scenes reach `process_shard`, load as fill,
+and contribute nothing: `lst_qa.valid_observation` begins at `not_fill`, so the
+whole layer is invalid before the percentile or the monthly counts see it.
+
+Dropping them is output-neutral, and `test_pipeline_paths.py` asserts the
+stronger claim rather than the plausible one: `lst_p95` and `qa_count` come back
+byte-identical with the fill layers present and absent. The filter is on by
+default because of that test, and `--keep-scenes-without-thermal` turns it off.
+
+MEASURED over the full artifact, `177,254` of `3,083,129` tile-scene rows carry
+no thermal band, or **5.75%**. By distinct scene it is `96,220` of `1,457,559`,
+or **6.60%**.
+
+```sql
+SELECT count(*) FILTER (thermal_href IS NULL), count(*)
+FROM 'artifacts/tile_scene_inventory.parquet'
+```
+
+What that is worth depends on which path runs. Unstaged, each dropped row saves
+739 requests, and the global line falls by **$105**. Staged, it saves one GET
+per row and the global line falls by 7 cents. The reason to keep the filter is
+the memory: each such scene adds one layer to the time axis of every shard it
+touches, and that axis is what pins the run at 94% of the worker memory limit.
+
+The filter is defined in `staging.py`, not in `usgs_inventory.py`.
+`test_inventory_parity.py` asserts the artifact matches Earth Search item for
+item, and Earth Search returns these products. Filtering at build time would
+break that parity and discard the evidence for it.
+
 ### Steady state across 895 tiles
 
 The tile count is **895**, generated rather than assumed. `land_tiles.py`
@@ -541,27 +640,39 @@ tail = part write + span query, bracketed 60-240 s
      = 1,155 to 1,335 s  =  0.321 to 0.371 instance-hours
 ```
 
-| 895 land tiles | shard 512 | shard 1024 |
+The global figures scale on `tile_scene_rows`, the **3,083,129** tile-scene
+pairs the inventory holds, and not on 895 copies of `S30W065`. That tile holds
+4,776 scenes against a mean of 3,445, so pricing the globe from it overstates
+the S3 line by 13%. `Corrections` withdraws the $2,067 that did.
+
+| 895 land tiles | reading from S3 | **staged** |
 |---|---|---|
-| EC2, on-demand @ $2.72/hr | $781 - $903 | $781 - $903 |
-| EC2, spot @ ~$0.95/hr | $273 - $315 | $273 - $315 |
-| S3 GET requests | **$2,067** | **$779** |
+| EC2, on-demand @ $2.72/hr | $781 - $903 | $837 - $1,002 |
+| EC2, spot @ ~$0.95/hr | $273 - $315 | $302 - $362 |
+| S3 GET requests | **$1,822** | **$2.32** |
+| **total, on-demand** | **$2,603 - $2,725** | **$839 - $1,004** |
+| **total, spot** | **$2,095 - $2,137** | **$304 - $364** |
 
 Read the EC2 rows as DERIVED. Measurement supplies the per-tile compute and the
-tile count. The tail is a bracket. The S3 rows multiply the measured per-tile
-request cost, $2.31 at a 512 px shard and $0.87 at 1024 px, by the same tile
-count.
+tile count. The tail is a bracket, and the staged column adds 60 to 120 s per
+tile for the fetch, and prices the disk it writes to. The S3 rows are
+arithmetic over `tile_scene_rows`: 154.9 opens x 2 bands x 4.77 GETs unstaged,
+against 2 GETs staged.
+
+Staging cuts the total by **2.6x on demand and 6.9x on spot**, and moves the
+tile from 4.8 minutes to about 6.5. EC2 rises. It rises by far less than the
+requests it removes.
 
 Removing the per-tile search saves 38.1 s x 895 tiles, or 9.5 instance-hours.
-That is $26 on-demand and $9 spot, against an S3 line of $2,067. The search was
+That is $26 on-demand and $9 spot, against an S3 line of $1,822. The search was
 never the money. It was 895 dependencies on a public service, one per machine,
 each able to fail a run that had already paid for its instance.
 
 S3 charges do not amortise, because they scale with reads rather than with
-instance time. At the shard size the full tile ran on they cost more than twice
-the on-demand compute, and more than six times the spot compute. Shard size is
-the largest cost lever in this pipeline, and `Corrections` prices what it costs
-in memory.
+instance time. Unstaged they cost more than twice the on-demand compute and more
+than six times the spot compute. Shard size moves them by a factor of 2.8, and
+staging moves them by a factor of 738, so shard size is no longer the lever
+worth spending memory on.
 
 The whole session, across five EC2 sessions, eight completed department runs,
 one 200-scene quarter-tile smoke run, and two quarter-tile attempts that never
@@ -959,6 +1070,17 @@ a zero count.
   raster, but the largest run through the new path is six scenes.
 - **The 895 tiles have never been priced against a real run.** The per-tile
   compute is measured and the tile count is measured. Their product is not.
+- **No fleet has staged.** The unit tests cover the fetch, the dedup, the
+  verification, the retry counter, and a composite computed from staged files
+  with every socket in the process blocked. The largest run through the staged
+  path is three synthetic scenes. No run has yet fetched a real 97 GB slice,
+  so the 60 to 120 s staging phase is a bracket over 25 Gbps and 1,000 MB/s of
+  disk, not a measurement.
+- **The staged disk requirement is estimated, not measured per object.** The
+  guard reserves 52 MB for a thermal band and 8 MB for a QA band, derived from
+  233 GB over 3,910 scenes. HEAD is billable, so nothing checks the real size
+  before fetching. A slice of larger-than-average scenes falls back on the
+  in-flight free-space floor.
 - **The pixel mask still carries both land defects.** The tile list here drops
   the Null Island placeholder and the antimeridian slivers. The mask in
   `nlebovits/landsat-lst` does not, so a pixel inside either is composited
@@ -1008,6 +1130,18 @@ a zero count.
 
 Every entry is a claim an earlier version stated as fact. Each shares one
 mistake: it presented an estimate as a measurement.
+
+**S3 GET requests cost $2,067 across 895 tiles.** That multiplied 895 by the
+$2.31 measured on `S30W065`, which carries 4,776 scenes against a mean of 3,445.
+The global line scales on `tile_scene_rows`, the 3,083,129 tile-scene pairs the
+inventory holds, and comes to **$1,822**. The dense tile was the one that had
+been run, and the arithmetic used it as the mean without saying so.
+
+**Shard size is the largest cost lever in this pipeline.** True when written and
+superseded. Moving from a 512 px shard to 1024 px cuts requests 2.8x and costs
+four times the memory per shard. Staging cuts them 738x and costs disk, which is
+cheaper than memory and does not cap the shard plan. Shard size is now a memory
+decision, not a cost one.
 
 **The antimeridian slivers selected 45 open-ocean cells, and the Null Island
 placeholder selected four: `N00E000`, `N00W005`, `S05E000`, `S05W005`.** Both
@@ -1136,6 +1270,7 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `qa-parity/` | that comparison, with both rasters and the difference image |
 | `sweep_throughput.py` | configuration sweep driver |
 | `cost_report.py` | the labelled, deterministic cost report |
+| `staging.py` | fetches each scene object once, and the L2SR filter |
 | `measure_s3_requests.py` | counts the S3 GET requests one shard issues |
 | `s3-requests/` | the request measurement: both shard sizes, and the priced tile |
 | `dryrun/` | local graph-build runs, no cluster and no reads |

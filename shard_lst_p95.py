@@ -3,7 +3,7 @@
 # dependencies = [
 #   "frisky>=0.7.2", "dask", "odc-stac", "pystac-client",
 #   "planetary-computer", "xarray", "numpy", "geopandas",
-#   "psutil", "rich",
+#   "psutil", "rich", "boto3",
 # ]
 # ///
 """Sharded p95 LST composite. One shard, one task, no shuffle.
@@ -35,9 +35,11 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
+import staging
 from lst_qa import (
     LST_NODATA_DN,
     LST_OFFSET,
@@ -62,6 +64,12 @@ from tile_inventory import (
 
 #: Where the staged artifacts live on a VM unless the driver says otherwise.
 DEFAULT_INVENTORY_URI = Path("artifacts/tile_scene_inventory.parquet")
+
+#: Where scene objects are fetched to before the cluster starts. Overridden by
+#: `LST_STAGE_DIR` and then by `--stage-dir`. The system temp directory is the
+#: default because it is the one path that exists on every machine; a fleet
+#: instance should point this at its NVMe mount instead.
+DEFAULT_STAGE_DIR = Path(tempfile.gettempdir()) / "landsat-lst-stage"
 
 #: The read environment still has a source, because requester-pays and the
 #: region belong to the bucket the hrefs point at. It no longer selects a
@@ -364,6 +372,43 @@ def load_tile_items(args, tile_id: str):
     return items, boxes, provenance(manifest)
 
 
+def stage_scenes_for(args, item_dicts, work_idx):
+    """Fetch this slice's scene objects to local disk, or say why it did not.
+
+    Runs after `--max-shards`, so a two-shard smoke run fetches what those two
+    shards need rather than the whole slice.
+
+    Returns:
+        The staging report, or None when the run reads from S3. The report is
+        this run's S3 line, counted rather than derived from a sampled
+        requests-per-read.
+    """
+    if args.rehearse:
+        print("stage         skipped: the rehearsal reads no objects")
+        return None
+    if args.no_stage:
+        print(
+            "stage         skipped: --no-stage. Every shard reads from S3, and "
+            "about 155 shards touch each scene"
+        )
+        return None
+    report = staging.stage_scenes(
+        item_dicts,
+        sorted({i for _, idx in work_idx for i in idx}),
+        args.stage_dir,
+    )
+    print(
+        f"stage         {report['objects']:,} objects, "
+        f"{report['bytes'] / GIB:.1f} GiB in {report['seconds']:.1f}s "
+        f"-> {report['stage_dir']}"
+    )
+    print(
+        f"              {report['get_requests']:,} billable GETs, "
+        f"{report['retries']} retries"
+    )
+    return report
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Sharded p95 LST composite: one shard, one task, no shuffle.",
@@ -437,6 +482,35 @@ def parse_args(argv=None):
         "--shard-slice runs, then exit",
     )
     p.add_argument("--out-dir", type=Path, default=Path("./shard-run"))
+    p.add_argument(
+        "--stage-dir",
+        type=Path,
+        default=Path(os.environ.get("LST_STAGE_DIR", DEFAULT_STAGE_DIR)),
+        help="local directory the scene objects are fetched into before the "
+        "cluster starts. Wants throughput as well as capacity: the compute "
+        "phase already reads about 358 MB/s and staging writes on top of it",
+    )
+    p.add_argument(
+        "--no-stage",
+        action="store_true",
+        help="read every shard straight from S3, as the pipeline did before "
+        "staging existed. About 155 shards touch each scene and each open "
+        "costs 4.77 requests, so this is the expensive path and it is kept "
+        "for measuring against",
+    )
+    p.add_argument(
+        "--keep-staged",
+        action="store_true",
+        help="leave the staged files behind. Steady state runs one tile per "
+        "instance back to back, so the default removes them",
+    )
+    p.add_argument(
+        "--keep-scenes-without-thermal",
+        action="store_true",
+        help="keep the L2SR products that carry no lwir11 band. They load as "
+        "fill and reach neither the percentile nor the monthly counts, so "
+        "the default drops them",
+    )
     p.add_argument(
         "--force",
         action="store_true",
@@ -678,6 +752,25 @@ def main(argv=None) -> int:  # noqa: C901
     # rehearsal fakes them, so nothing here converts a pystac object.
     item_dicts = items
 
+    # L2SR products carry no thermal band, load as fill, and reach neither the
+    # percentile nor the monthly counts. Dropping them is output-neutral and
+    # buys back a layer on the time axis of every shard they touch, which is
+    # what caps shard size at 94% of the worker memory limit. Skipped under
+    # --rehearse, where the synthetic items carry no assets at all.
+    dropped_no_thermal = 0
+    if not args.rehearse and not args.keep_scenes_without_thermal:
+        item_dicts, item_bboxes, dropped_no_thermal = (
+            staging.drop_scenes_without_thermal(item_dicts, item_bboxes)
+        )
+        if dropped_no_thermal:
+            print(
+                f"              {dropped_no_thermal} of {len(items)} carry no "
+                f"thermal band; dropped"
+            )
+        if not item_dicts:
+            print("no scenes carry a thermal band")
+            return 1
+
     # Slice the PLAN, never the filtered list. Shards with no overlapping
     # scenes drop out of `work`, so slicing after filtering shifts every index
     # and machines silently leave gaps. The rehearsal caught exactly that:
@@ -693,20 +786,26 @@ def main(argv=None) -> int:  # noqa: C901
             f"slice         shards[{lo}:{hi}] -> {len(mine)} of {len(shards)} planned"
         )
 
-    work = []
-    for sh in mine:
-        idx = items_for_shard(sh, item_bboxes)
-        if idx:
-            work.append((sh, [item_dicts[i] for i in idx]))
+    # One pass over the plan, read twice. `work` and `barren` partition this
+    # slice, and staging needs the union of the indices in `work`, so all three
+    # come from the same list rather than from three sweeps of the same test.
+    per_shard = [items_for_shard(sh, item_bboxes) for sh in mine]
+    work_idx = [(sh, idx) for sh, idx in zip(mine, per_shard, strict=True) if idx]
     # Shards with no overlapping scene are still this slice's responsibility.
     # Recording them as all-nodata keeps coverage complete, so the merge can
     # tell "no Landsat here" (ocean, edge) from "a machine died", which it
     # cannot do if they are simply absent.
-    barren = [sh for sh in mine if not items_for_shard(sh, item_bboxes)]
+    barren = [sh for sh, idx in zip(mine, per_shard, strict=True) if not idx]
     if barren:
         print(f"              {len(barren)} shards have no scenes; written as nodata")
     if args.max_shards:
-        work = work[: args.max_shards]
+        work_idx = work_idx[: args.max_shards]
+
+    # Staging runs after --max-shards, so a smoke run over two shards fetches
+    # the objects those two shards need and not the whole slice.
+    stage_report = stage_scenes_for(args, item_dicts, work_idx)
+
+    work = [(sh, [item_dicts[i] for i in idx]) for sh, idx in work_idx]
     counts = [len(d) for _, d in work]
     print(
         f"shards        {len(work)} with data, "
@@ -778,6 +877,12 @@ def main(argv=None) -> int:  # noqa: C901
             )
     compute_s = time.perf_counter() - t_compute
 
+    # Every shard has been gathered, so nothing reads the staged files again.
+    # A failed run keeps them, which is what a rerun and a post-mortem both
+    # want; the disk guard on the next run says so rather than filling up.
+    if stage_report is not None and not args.keep_staged:
+        staging.cleanup(args.stage_dir)
+
     valid = lst_out != LST_NODATA_DN
     cel = (
         lst_out[valid].astype("float64") * LST_SCALE + LST_OFFSET
@@ -803,6 +908,11 @@ def main(argv=None) -> int:  # noqa: C901
         # numbers rather than beside them.
         "inventory": run_provenance,
         "tile": tile_id,
+        # What this run actually put on the wire. `cost_report.py --s3-get-requests`
+        # prices it directly, so the S3 line stops being derived from a
+        # requests-per-read sampled on one laptop against three shards.
+        "staging": stage_report,
+        "scenes_dropped_no_thermal": dropped_no_thermal,
     }
     if cel is not None:
         summary |= {
@@ -870,6 +980,15 @@ def main(argv=None) -> int:  # noqa: C901
     (args.out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, default=str)
     )
+    # Beside the summary as well as inside it, because pricing a run reads only
+    # this and `cost_report.py` should not have to know the summary's shape.
+    if stage_report is not None:
+        (args.out_dir / "staging.json").write_text(
+            json.dumps(
+                stage_report | {"scenes_dropped_no_thermal": dropped_no_thermal},
+                indent=2,
+            )
+        )
     print(f"artifacts     {args.out_dir.resolve()}")
     return 0
 
