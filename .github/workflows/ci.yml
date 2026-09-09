@@ -1,0 +1,51 @@
+# Runs the same gates as the prek hooks, so a pull request cannot land
+# what a local commit would refuse. Nothing passes with warnings.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Check formatting
+        run: uvx ruff@0.14.1 format --check .
+
+      - name: Lint
+        run: uvx ruff@0.14.1 check .
+
+      - name: Dead code
+        run: |
+          uvx vulture@2.14 \
+            cost_report.py measure_s3_requests.py profile_lst_p95.py \
+            shard_lst_p95.py sweep_throughput.py dryrun \
+            vulture_whitelist.py --min-confidence 80
+
+      - name: Spell check
+        run: |
+          uvx codespell \
+            --skip "*.csv,*.json,*.log,*.npz,*.tif,.git" \
+            $(git ls-files '*.py' '*.md')

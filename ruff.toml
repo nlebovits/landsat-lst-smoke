@@ -1,0 +1,11 @@
+# This repository is a set of standalone PEP 723 benchmark scripts, not a
+# package. There is no pyproject.toml, so ruff reads its settings here.
+
+# Worktrees that Claude Code creates under .claude/ are copies of this
+# repository. Linting them double-reports every finding.
+extend-exclude = [".claude"]
+
+[lint.per-file-ignores]
+# The dry-run scripts import mid-file on purpose, so that each import lands
+# inside its own timing block. That placement is the measurement.
+"dryrun/*.py" = ["E402"]

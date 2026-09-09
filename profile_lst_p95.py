@@ -52,9 +52,7 @@ from pathlib import Path
 # Constants from the source data and the encoding contract.
 # --------------------------------------------------------------------------
 
-BOUNDARY_URL = (
-    "https://raw.githubusercontent.com/nlebovits/landsat-lst/main/data/pergamino_dept.gpkg"
-)
+BOUNDARY_URL = "https://raw.githubusercontent.com/nlebovits/landsat-lst/main/data/pergamino_dept.gpkg"
 STAC_PLANETARY_COMPUTER = "https://planetarycomputer.microsoft.com/api/stac/v1"
 STAC_EARTH_SEARCH = "https://earth-search.aws.element84.com/v1"
 SOURCES = {
@@ -84,8 +82,18 @@ LST_MAX_DN = 65535
 QA_CLOUD_BITS = 0b11000
 
 MONTH_NAMES = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
 ]
 
 MB = 1024.0 * 1024.0
@@ -138,7 +146,9 @@ def _sampler_main(parent_pid: int, out_path: str, interval: float, stop_evt) -> 
             t_mono = time.monotonic()
             t_wall = time.time()
             try:
-                children = [c for c in parent.children(recursive=True) if c.pid != own_pid]
+                children = [
+                    c for c in parent.children(recursive=True) if c.pid != own_pid
+                ]
             except psutil.Error:
                 break
 
@@ -183,22 +193,24 @@ def _sampler_main(parent_pid: int, out_path: str, interval: float, stop_evt) -> 
                 disk_read = dio.read_bytes / MB if dio else 0.0
             except Exception:
                 disk_read = 0.0
-            writer.writerow([
-                f"{t_mono:.4f}",
-                f"{t_wall:.4f}",
-                len(live),
-                f"{client_rss:.2f}",
-                f"{worker_rss:.2f}",
-                f"{client_rss + worker_rss:.2f}",
-                f"{cpu:.1f}",
-                f"{vm.used / MB:.1f}",
-                f"{vm.available / MB:.1f}",
-                f"{sw.used / MB:.1f}",
-                f"{net_recv:.3f}",
-                f"{net_sent:.3f}",
-                f"{disk_read:.3f}",
-                ";".join(detail),
-            ])
+            writer.writerow(
+                [
+                    f"{t_mono:.4f}",
+                    f"{t_wall:.4f}",
+                    len(live),
+                    f"{client_rss:.2f}",
+                    f"{worker_rss:.2f}",
+                    f"{client_rss + worker_rss:.2f}",
+                    f"{cpu:.1f}",
+                    f"{vm.used / MB:.1f}",
+                    f"{vm.available / MB:.1f}",
+                    f"{sw.used / MB:.1f}",
+                    f"{net_recv:.3f}",
+                    f"{net_sent:.3f}",
+                    f"{disk_read:.3f}",
+                    ";".join(detail),
+                ]
+            )
             fh.flush()
             time.sleep(interval)
 
@@ -427,7 +439,9 @@ def set_gdal_env(
     return cfg
 
 
-def fetch_boundary(out_dir: Path, url: str) -> tuple[tuple[float, float, float, float], Path]:
+def fetch_boundary(
+    out_dir: Path, url: str
+) -> tuple[tuple[float, float, float, float], Path]:
     """Download the department polygon and return its WGS84 bounds."""
     import geopandas as gpd
 
@@ -646,7 +660,9 @@ def collect_frisky(
     try:
         # query_spans, not get_spans: with processes=True the worker spans live
         # in the worker processes, and get_spans only drains this one.
-        spans = frisky.query_spans(limit=limit, dashboard_url=dashboard_url, request_timeout=60)
+        spans = frisky.query_spans(
+            limit=limit, dashboard_url=dashboard_url, request_timeout=60
+        )
     except Exception as exc:
         summary["query_spans_error"] = repr(exc)
 
@@ -757,11 +773,15 @@ def parse_args(argv=None):
     )
     p.add_argument("--out-dir", type=Path, default=Path("./profile-run"))
     p.add_argument(
-        "--chunk", type=int, default=256,
+        "--chunk",
+        type=int,
+        default=256,
         help="spatial block for the p95 reduction; drives peak memory",
     )
     p.add_argument(
-        "--load-chunk", type=int, default=1024,
+        "--load-chunk",
+        type=int,
+        default=1024,
         help="spatial block for the COG reads; bigger cuts warp-halo refetching",
     )
     p.add_argument("--time-chunk", type=int, default=10)
@@ -803,13 +823,20 @@ def parse_args(argv=None):
     p.add_argument("--max-scenes", type=int, default=None, help="cap for a smoke run")
     p.add_argument("--sample-interval", type=float, default=0.1)
     p.add_argument("--gdal-threads", default="1", help="GDAL_NUM_THREADS, or ALL_CPUS")
-    p.add_argument("--ingested-bytes", type=int, default=32768,
-                   help="GDAL_INGESTED_BYTES_AT_OPEN; header bytes grabbed on open")
+    p.add_argument(
+        "--ingested-bytes",
+        type=int,
+        default=32768,
+        help="GDAL_INGESTED_BYTES_AT_OPEN; header bytes grabbed on open",
+    )
     p.add_argument("--http-version", default="2", help="GDAL_HTTP_VERSION")
     p.add_argument("--gdal-extra", default="", help="extra GDAL config, K=V,K=V")
     p.add_argument("--tracing-capacity", type=int, default=10_000_000)
     p.add_argument(
-        "--span-limit", type=int, default=2_000_000, help="max spans to pull from frisky"
+        "--span-limit",
+        type=int,
+        default=2_000_000,
+        help="max spans to pull from frisky",
     )
     p.add_argument(
         "--span-dump-limit",
@@ -826,10 +853,14 @@ def parse_args(argv=None):
         "tile S30W065 is -65,-35,-60,-30.",
     )
     p.add_argument(
-        "--source", choices=sorted(SOURCES), default="planetary-computer",
+        "--source",
+        choices=sorted(SOURCES),
+        default="planetary-computer",
         help="earth-search reads s3://usgs-landsat, which is requester pays",
     )
-    p.add_argument("--no-tracemalloc", action="store_true", help="python-heap tracking off")
+    p.add_argument(
+        "--no-tracemalloc", action="store_true", help="python-heap tracking off"
+    )
     p.add_argument(
         "--compare-passes",
         action="store_true",
@@ -841,7 +872,9 @@ def parse_args(argv=None):
         help="skip task counting and dask.optimize. Both materialise the whole "
         "graph and do not scale; required above roughly 200k tasks",
     )
-    p.add_argument("--force", action="store_true", help="run even if predicted to overflow")
+    p.add_argument(
+        "--force", action="store_true", help="run even if predicted to overflow"
+    )
     return p.parse_args(argv)
 
 
@@ -893,8 +926,10 @@ def main(argv=None) -> int:
 
     print(f"host          {platform.node()}  {os.cpu_count()} cores")
     print(f"source        {args.source}  {SOURCES[args.source]}")
-    print(f"cluster       {args.workers} workers x {args.threads_per_worker} threads "
-          f"x {args.memory_limit_gib} GiB = {budget_gib:.0f} GiB total")
+    print(
+        f"cluster       {args.workers} workers x {args.threads_per_worker} threads "
+        f"x {args.memory_limit_gib} GiB = {budget_gib:.0f} GiB total"
+    )
     print(
         f"chunking      read {args.load_chunk or args.chunk}, "
         f"reduce {args.chunk}, time {args.time_chunk}"
@@ -973,7 +1008,9 @@ def main(argv=None) -> int:
                 dashboard_address="127.0.0.1:0",
                 silence_summary=True,
             )
-            client = cluster.get_client()  # frisky.Client(cluster) would raise
+            # Bound, not used: the client must outlive this block, and
+            # frisky.Client(cluster) would raise.
+            _client = cluster.get_client()
             dashboard = cluster.dashboard_address
             if not str(dashboard).startswith("http"):
                 dashboard = f"http://{dashboard}"
@@ -1078,7 +1115,10 @@ def main(argv=None) -> int:
             else:
                 stats = graph_stats(lst_u16, qa_count)
                 rec["meta"].update(
-                    {k: stats[k] for k in ("raw_tasks", "optimized_tasks", "fusion_ratio")}
+                    {
+                        k: stats[k]
+                        for k in ("raw_tasks", "optimized_tasks", "fusion_ratio")
+                    }
                 )
         (out_dir / "graph.json").write_text(json.dumps(stats, indent=2, default=str))
         if args.no_graph_stats:
@@ -1119,7 +1159,8 @@ def main(argv=None) -> int:
                 "dtype": str(qa_vals.dtype),
                 "bands": int(qa_vals.shape[0]),
                 "per_month_mean": {
-                    MONTH_NAMES[i]: float(qa_vals[i].mean()) for i in range(qa_vals.shape[0])
+                    MONTH_NAMES[i]: float(qa_vals[i].mean())
+                    for i in range(qa_vals.shape[0])
                 },
             }
         run["result"] = summary_stats
@@ -1190,7 +1231,8 @@ def main(argv=None) -> int:
             "mb_per_s_peak": win.get("net_recv_mb_s_peak", 0.0),
             "mb_per_scene": mb / n_scenes if n_scenes else 0.0,
             "s_per_scene": wall / n_scenes if n_scenes else 0.0,
-            "concurrency": run["config"]["workers"] * run["config"]["threads_per_worker"],
+            "concurrency": run["config"]["workers"]
+            * run["config"]["threads_per_worker"],
         }
         # Time actually spent inside task bodies, over wall. Tells us how much
         # of the available concurrency the reads managed to use.

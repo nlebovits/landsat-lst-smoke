@@ -20,3 +20,6 @@ styles/Readability/
 styles/ai-tells/
 # `vale sync` also unpacks the ai-tells agent template here.
 styles/config/templates/
+
+# Claude Code worktrees and local session state.
+.claude/

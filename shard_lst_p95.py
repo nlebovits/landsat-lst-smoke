@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -54,14 +53,27 @@ QA_CLOUD_BITS = 0b11000
 
 LST_SCALE, LST_OFFSET = 0.01, -50.0
 LST_NODATA_DN, LST_MIN_DN, LST_MAX_DN = 0, 1, 65535
-MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+MONTHS = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+]
 GIB = 1024.0**3
 
 
 # --------------------------------------------------------------------------
 # Read environment
 # --------------------------------------------------------------------------
+
 
 def configure_read_env(source: str = "earth-search") -> None:
     """Set the GDAL and AWS variables that every S3 read path depends on.
@@ -80,8 +92,8 @@ def configure_read_env(source: str = "earth-search") -> None:
     if source == "earth-search":
         os.environ.setdefault("AWS_REQUEST_PAYER", "requester")
         os.environ.setdefault(
-            "AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-west-2"))
-
+            "AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-west-2")
+        )
 
 
 # --------------------------------------------------------------------------
@@ -104,7 +116,9 @@ class Shard:
         return f"Shard(r{self.row} c{self.col} {self.ny}x{self.nx} {self.bbox})"
 
 
-def plan_shards(bbox, pixels_per_degree: int, shard: int) -> tuple[list[Shard], int, int]:
+def plan_shards(
+    bbox, pixels_per_degree: int, shard: int
+) -> tuple[list[Shard], int, int]:
     """Cut the output grid into shard x shard pixel blocks.
 
     The grid is anchored to whole degrees, not to the bbox, so a shard lands on
@@ -139,7 +153,8 @@ def items_for_shard(shard: Shard, item_bboxes) -> list[int]:
     """
     w, s, e, n = shard.bbox
     return [
-        i for i, (iw, isouth, ie, inorth) in enumerate(item_bboxes)
+        i
+        for i, (iw, isouth, ie, inorth) in enumerate(item_bboxes)
         if iw < e and ie > w and isouth < n and inorth > s
     ]
 
@@ -154,8 +169,9 @@ def shard_bytes(shard_px: int, n_scenes: int) -> float:
 # --------------------------------------------------------------------------
 
 
-def rehearse_shard(shard: Shard, item_dicts, crs: str, resolution: float,
-                   read_threads: int = 4) -> dict:
+def rehearse_shard(
+    shard: Shard, item_dicts, crs: str, resolution: float, read_threads: int = 4
+) -> dict:
     """Same contract as process_shard, with synthetic pixels and no S3.
 
     Exercises everything a real run does except the read: submit, the return
@@ -173,14 +189,21 @@ def rehearse_shard(shard: Shard, item_dicts, crs: str, resolution: float,
     qa = np.full((12, shard.ny, shard.nx), min(n // 12, 255), dtype="uint8")
     time.sleep(0.01)
     return {
-        "row": shard.row, "col": shard.col, "y0": shard.y0, "x0": shard.x0,
-        "lst_p95": dn.astype("uint16"), "qa_count": qa,
-        "n_scenes": n, "load_s": 0.0, "reduce_s": 0.0,
+        "row": shard.row,
+        "col": shard.col,
+        "y0": shard.y0,
+        "x0": shard.x0,
+        "lst_p95": dn.astype("uint16"),
+        "qa_count": qa,
+        "n_scenes": n,
+        "load_s": 0.0,
+        "reduce_s": 0.0,
     }
 
 
-def process_shard(shard: Shard, item_dicts, crs: str, resolution: float,
-                  read_threads: int = 4) -> dict:
+def process_shard(
+    shard: Shard, item_dicts, crs: str, resolution: float, read_threads: int = 4
+) -> dict:
     """Load, mask, reduce and encode one shard. Returns small arrays only.
 
     Deliberately eager: no dask inside. The whole point is that this fits in
@@ -239,12 +262,15 @@ def process_shard(shard: Shard, item_dicts, crs: str, resolution: float,
     bad = ~np.isfinite(dn_out) | (dn_out < LST_MIN_DN) | (dn_out > LST_MAX_DN)
     dn_out[bad] = LST_NODATA_DN
     return {
-        "row": shard.row, "col": shard.col,
-        "y0": shard.y0, "x0": shard.x0,
+        "row": shard.row,
+        "col": shard.col,
+        "y0": shard.y0,
+        "x0": shard.x0,
         "lst_p95": dn_out.astype("uint16"),
         "qa_count": qa_count,
         "n_scenes": int(lst.shape[0]),
-        "load_s": t_load, "reduce_s": t_reduce,
+        "load_s": t_load,
+        "reduce_s": t_reduce,
     }
 
 
@@ -257,9 +283,14 @@ def search_items(args, bbox):
     if plats and args.platforms.strip().lower() != "all":
         query["platform"] = {"in": plats}
     cat = pystac_client.Client.open(SOURCES[args.source])
-    items = list(cat.search(
-        collections=[COLLECTION], bbox=bbox,
-        datetime=f"{args.start}/{args.end}", query=query).items())
+    items = list(
+        cat.search(
+            collections=[COLLECTION],
+            bbox=bbox,
+            datetime=f"{args.start}/{args.end}",
+            query=query,
+        ).items()
+    )
     return items, [tuple(i.bbox) for i in items]
 
 
@@ -268,7 +299,9 @@ def parse_args(argv=None):
         description="Sharded p95 LST composite: one shard, one task, no shuffle.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--bbox", required=True, help="west,south,east,north EPSG:4326 (use --bbox=...)")
+    p.add_argument(
+        "--bbox", required=True, help="west,south,east,north EPSG:4326 (use --bbox=...)"
+    )
     p.add_argument("--pixels-per-degree", type=int, default=3600)
     p.add_argument("--crs", default="EPSG:4326")
     p.add_argument("--shard", type=int, default=512, help="shard edge in pixels")
@@ -280,8 +313,12 @@ def parse_args(argv=None):
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--threads-per-worker", type=int, default=4)
     p.add_argument("--memory-limit-gib", type=float, default=13.0)
-    p.add_argument("--read-threads", type=int, default=4,
-                   help="threads used to read scenes inside one shard")
+    p.add_argument(
+        "--read-threads",
+        type=int,
+        default=4,
+        help="threads used to read scenes inside one shard",
+    )
     p.add_argument("--max-shards", type=int, default=None, help="cap, for smoke runs")
     p.add_argument(
         "--shard-slice",
@@ -292,7 +329,10 @@ def parse_args(argv=None):
         "on another cover the tile exactly once between them",
     )
     p.add_argument(
-        "--rehearse", type=int, default=0, metavar="N",
+        "--rehearse",
+        type=int,
+        default=0,
+        metavar="N",
         help="run the whole pipeline with N synthetic scenes and no S3 reads; "
         "proves submit, gather, assembly, part writing and merge for free",
     )
@@ -305,12 +345,21 @@ def parse_args(argv=None):
         "--shard-slice runs, then exit",
     )
     p.add_argument("--out-dir", type=Path, default=Path("./shard-run"))
-    p.add_argument("--force", action="store_true",
-                   help="run even if slots x read-threads oversubscribes the cores")
-    p.add_argument("--dry-run", action="store_true",
-                   help="plan shards and print the budget; no cluster, no reads")
-    p.add_argument("--search-in-dry-run", action="store_true",
-                   help="also hit STAC, to report real scenes per shard")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="run even if slots x read-threads oversubscribes the cores",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="plan shards and print the budget; no cluster, no reads",
+    )
+    p.add_argument(
+        "--search-in-dry-run",
+        action="store_true",
+        help="also hit STAC, to report real scenes per shard",
+    )
     return p.parse_args(argv)
 
 
@@ -338,28 +387,40 @@ def merge_parts(dirs, out_dir: Path) -> int:
                 y0, x0 = (int(v) for v in tag.split("_"))
                 a = z[key]
                 q = z["qa_" + tag]
-                lst[y0:y0 + a.shape[0], x0:x0 + a.shape[1]] = a
-                qa[:, y0:y0 + q.shape[1], x0:x0 + q.shape[2]] = q
-                seen[y0:y0 + a.shape[0], x0:x0 + a.shape[1]] = True
+                lst[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = a
+                qa[:, y0 : y0 + q.shape[1], x0 : x0 + q.shape[2]] = q
+                seen[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = True
                 n += 1
 
     out_dir.mkdir(parents=True, exist_ok=True)
     covered = float(seen.mean())
     valid = lst != LST_NODATA_DN
     print(f"merged        {n} shards from {len(parts)} part files")
-    print(f"raster        {w} x {h}   coverage {covered*100:.2f}%")
+    print(f"raster        {w} x {h}   coverage {covered * 100:.2f}%")
     if covered < 1.0:
         missing = int((~seen).sum())
         print(f"WARNING       {missing:,} px never written; a slice is missing")
     if valid.any():
         cel = lst[valid].astype("float64") * LST_SCALE + LST_OFFSET
-        print(f"LST p95       min {cel.min():.1f} C  mean {cel.mean():.1f} C  "
-              f"max {cel.max():.1f} C  ({100*valid.mean():.1f}% valid)")
+        print(
+            f"LST p95       min {cel.min():.1f} C  mean {cel.mean():.1f} C  "
+            f"max {cel.max():.1f} C  ({100 * valid.mean():.1f}% valid)"
+        )
     np.save(out_dir / "lst_p95_dn.npy", lst)
     np.save(out_dir / "qa_count.npy", qa)
-    (out_dir / "merge.json").write_text(json.dumps(
-        {"shards": n, "parts": len(parts), "coverage": covered,
-         "raster": [h, w], "meta": meta}, indent=2, default=str))
+    (out_dir / "merge.json").write_text(
+        json.dumps(
+            {
+                "shards": n,
+                "parts": len(parts),
+                "coverage": covered,
+                "raster": [h, w],
+                "meta": meta,
+            },
+            indent=2,
+            default=str,
+        )
+    )
     print(f"artifacts     {out_dir.resolve()}")
     return 0 if covered == 1.0 else 2
 
@@ -386,9 +447,11 @@ def main(argv=None) -> int:
 
     print(f"bbox          {bbox}")
     print(f"grid          {args.crs} @ 1/{args.pixels_per_degree} deg")
-    print(f"raster        {width} x {height} px  ({width*height/1e6:.0f} Mpx)")
-    print(f"shards        {len(shards)}  of {args.shard}x{args.shard} px "
-          f"({max(s.row for s in shards)+1} x {max(s.col for s in shards)+1})")
+    print(f"raster        {width} x {height} px  ({width * height / 1e6:.0f} Mpx)")
+    print(
+        f"shards        {len(shards)}  of {args.shard}x{args.shard} px "
+        f"({max(s.row for s in shards) + 1} x {max(s.col for s in shards) + 1})"
+    )
 
     if args.dry_run:
         if args.shard_slice:
@@ -397,21 +460,28 @@ def main(argv=None) -> int:
             hi = int(b) if b else len(shards)
             mine = shards[lo:hi]
             px = sum(sh.ny * sh.nx for sh in mine)
-            print(f"slice         shards[{lo}:{hi}] -> {len(mine)} shards, "
-                  f"{px:,} px ({100*px/(width*height):.1f}% of the tile)")
-            ys = [sh.y0 for sh in mine]; xs = [sh.x0 for sh in mine]
+            print(
+                f"slice         shards[{lo}:{hi}] -> {len(mine)} shards, "
+                f"{px:,} px ({100 * px / (width * height):.1f}% of the tile)"
+            )
+            ys = [sh.y0 for sh in mine]
+            xs = [sh.x0 for sh in mine]
             print(f"              rows {min(ys)}..{max(ys)}  cols {min(xs)}..{max(xs)}")
         edge = [s for s in shards if s.ny != args.shard or s.nx != args.shard]
         print(f"edge shards   {len(edge)} smaller than {args.shard} px")
         cover = sum(s.ny * s.nx for s in shards)
-        assert cover == width * height, f"shards cover {cover}, raster is {width*height}"
+        assert cover == width * height, (
+            f"shards cover {cover}, raster is {width * height}"
+        )
         print(f"coverage      {cover:,} px == raster, no gaps or overlap")
 
         print("\nnaive budget, assuming every shard sees every scene:")
         for n in (711, 1765, 3910):
             per = shard_bytes(args.shard, n)
-            print(f"  at {n:>5} scenes: {per:5.2f} GiB per shard, "
-                  f"{per*concurrency:6.1f} GiB across {concurrency} slots")
+            print(
+                f"  at {n:>5} scenes: {per:5.2f} GiB per shard, "
+                f"{per * concurrency:6.1f} GiB across {concurrency} slots"
+            )
 
         if args.search_in_dry_run:
             items, item_bboxes = search_items(args, bbox)
@@ -419,19 +489,39 @@ def main(argv=None) -> int:
             counts.sort()
             hi = counts[-1]
             print(f"\nactual scenes per shard (from {len(items)} total):")
-            print(f"  min {counts[0]}  p50 {counts[len(counts)//2]}  "
-                  f"p95 {counts[int(len(counts)*0.95)]}  max {hi}")
+            print(
+                f"  min {counts[0]}  p50 {counts[len(counts) // 2]}  "
+                f"p95 {counts[int(len(counts) * 0.95)]}  max {hi}"
+            )
             per = shard_bytes(args.shard, hi)
-            print(f"  worst shard: {per:.2f} GiB, "
-                  f"{per*concurrency:.1f} GiB across {concurrency} slots")
-            print(f"  total shard-scene reads: {sum(counts):,} "
-                  f"vs {len(items)*len(shards):,} unfiltered "
-                  f"({len(items)*len(shards)/max(sum(counts),1):.0f}x saved)")
+            print(
+                f"  worst shard: {per:.2f} GiB, "
+                f"{per * concurrency:.1f} GiB across {concurrency} slots"
+            )
+            print(
+                f"  total shard-scene reads: {sum(counts):,} "
+                f"vs {len(items) * len(shards):,} unfiltered "
+                f"({len(items) * len(shards) / max(sum(counts), 1):.0f}x saved)"
+            )
 
-        (args.out_dir / "shards.json").write_text(json.dumps(
-            [{"row": s.row, "col": s.col, "y0": s.y0, "x0": s.x0,
-              "ny": s.ny, "nx": s.nx, "bbox": s.bbox} for s in shards], indent=2))
-        print(f"\nplan written  {args.out_dir/'shards.json'}")
+        (args.out_dir / "shards.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "row": s.row,
+                        "col": s.col,
+                        "y0": s.y0,
+                        "x0": s.x0,
+                        "ny": s.ny,
+                        "nx": s.nx,
+                        "bbox": s.bbox,
+                    }
+                    for s in shards
+                ],
+                indent=2,
+            )
+        )
+        print(f"\nplan written  {args.out_dir / 'shards.json'}")
         return 0
 
     # ---------------- execute ----------------
@@ -439,8 +529,10 @@ def main(argv=None) -> int:
     # blocked by a runtime concurrency decision.
     total_threads = concurrency * args.read_threads
     cores = os.cpu_count() or 1
-    print(f"concurrency   {concurrency} shard slots x {args.read_threads} read "
-          f"threads = {total_threads} threads on {cores} cores")
+    print(
+        f"concurrency   {concurrency} shard slots x {args.read_threads} read "
+        f"threads = {total_threads} threads on {cores} cores"
+    )
     if total_threads > cores * 6 and not args.force:
         raise SystemExit(
             f"{total_threads} threads on {cores} cores will thrash: slots and "
@@ -460,8 +552,12 @@ def main(argv=None) -> int:
     if args.rehearse:
         w, so, e, no = bbox
         item_bboxes = [
-            (w + (e - w) * (i % 7) / 7 - 0.3, so + (no - so) * (i // 7 % 7) / 7 - 0.3,
-             w + (e - w) * (i % 7) / 7 + 0.6, so + (no - so) * (i // 7 % 7) / 7 + 0.6)
+            (
+                w + (e - w) * (i % 7) / 7 - 0.3,
+                so + (no - so) * (i // 7 % 7) / 7 - 0.3,
+                w + (e - w) * (i % 7) / 7 + 0.6,
+                so + (no - so) * (i // 7 % 7) / 7 + 0.6,
+            )
             for i in range(args.rehearse)
         ]
         items = [{"id": f"fake-{i}"} for i in range(args.rehearse)]
@@ -490,8 +586,9 @@ def main(argv=None) -> int:
         lo = int(a) if a else 0
         hi = int(b) if b else len(shards)
         mine = shards[lo:hi]
-        print(f"slice         shards[{lo}:{hi}] -> {len(mine)} of "
-              f"{len(shards)} planned")
+        print(
+            f"slice         shards[{lo}:{hi}] -> {len(mine)} of {len(shards)} planned"
+        )
 
     work = []
     for sh in mine:
@@ -504,17 +601,20 @@ def main(argv=None) -> int:
     # cannot do if they are simply absent.
     barren = [sh for sh in mine if not items_for_shard(sh, item_bboxes)]
     if barren:
-        print(f"              {len(barren)} shards have no scenes; "
-              f"written as nodata")
+        print(f"              {len(barren)} shards have no scenes; written as nodata")
     if args.max_shards:
         work = work[: args.max_shards]
     counts = [len(d) for _, d in work]
-    print(f"shards        {len(work)} with data, "
-          f"scenes/shard min {min(counts)} p50 {sorted(counts)[len(counts)//2]} "
-          f"max {max(counts)}")
-    print(f"worst shard   {shard_bytes(args.shard, max(counts)):.2f} GiB, "
-          f"{shard_bytes(args.shard, max(counts))*concurrency:.1f} GiB across "
-          f"{concurrency} slots\n")
+    print(
+        f"shards        {len(work)} with data, "
+        f"scenes/shard min {min(counts)} p50 {sorted(counts)[len(counts) // 2]} "
+        f"max {max(counts)}"
+    )
+    print(
+        f"worst shard   {shard_bytes(args.shard, max(counts)):.2f} GiB, "
+        f"{shard_bytes(args.shard, max(counts)) * concurrency:.1f} GiB across "
+        f"{concurrency} slots\n"
+    )
 
     proc = psutil.Process()
     peak = {"rss": 0.0}
@@ -538,10 +638,9 @@ def main(argv=None) -> int:
     t0 = time.perf_counter()
     fn = rehearse_shard if args.rehearse else process_shard
     futures = [
-        client.submit(fn, sh, d, args.crs, res, args.read_threads)
-        for sh, d in work
+        client.submit(fn, sh, d, args.crs, res, args.read_threads) for sh, d in work
     ]
-    print(f"submitted     {len(futures)} shards in {time.perf_counter()-t0:.1f}s")
+    print(f"submitted     {len(futures)} shards in {time.perf_counter() - t0:.1f}s")
 
     done = 0
     stats = []
@@ -559,47 +658,71 @@ def main(argv=None) -> int:
             continue
         y0, x0 = res_d["y0"], res_d["x0"]
         a = res_d["lst_p95"]
-        lst_out[y0:y0 + a.shape[0], x0:x0 + a.shape[1]] = a
+        lst_out[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = a
         q = res_d["qa_count"]
-        qa_out[:, y0:y0 + q.shape[1], x0:x0 + q.shape[2]] = q
-        stats.append({k: res_d[k] for k in ("row", "col", "n_scenes", "load_s", "reduce_s")})
+        qa_out[:, y0 : y0 + q.shape[1], x0 : x0 + q.shape[2]] = q
+        stats.append(
+            {k: res_d[k] for k in ("row", "col", "n_scenes", "load_s", "reduce_s")}
+        )
         del res_d, a, q
         done += 1
         peak["rss"] = max(peak["rss"], proc.memory_info().rss / GIB)
         if done % 25 == 0 or done == len(futures):
             el = time.perf_counter() - t_compute
-            print(f"  {done:4d}/{len(futures)}  {el:6.1f}s  "
-                  f"{el/done:5.2f}s/shard  client RSS {peak['rss']:.1f} GiB")
+            print(
+                f"  {done:4d}/{len(futures)}  {el:6.1f}s  "
+                f"{el / done:5.2f}s/shard  client RSS {peak['rss']:.1f} GiB"
+            )
     compute_s = time.perf_counter() - t_compute
 
     valid = lst_out != LST_NODATA_DN
-    cel = lst_out[valid].astype("float64") * LST_SCALE + LST_OFFSET if valid.any() else None
+    cel = (
+        lst_out[valid].astype("float64") * LST_SCALE + LST_OFFSET
+        if valid.any()
+        else None
+    )
     summary = {
-        "bbox": bbox, "crs": args.crs, "pixels_per_degree": args.pixels_per_degree,
-        "raster": [height, width], "shard_px": args.shard,
-        "n_shards": len(work), "n_scenes": len(items),
-        "search_s": t_search, "compute_s": compute_s,
+        "bbox": bbox,
+        "crs": args.crs,
+        "pixels_per_degree": args.pixels_per_degree,
+        "raster": [height, width],
+        "shard_px": args.shard,
+        "n_shards": len(work),
+        "n_scenes": len(items),
+        "search_s": t_search,
+        "compute_s": compute_s,
         "s_per_shard": compute_s / max(len(work), 1),
         "client_rss_peak_gib": peak["rss"],
         "valid_fraction": float(valid.mean()),
         "shard_stats": stats,
     }
     if cel is not None:
-        summary |= {"min_c": float(cel.min()), "mean_c": float(cel.mean()),
-                    "max_c": float(cel.max())}
-        print(f"\nLST p95       min {cel.min():.1f} C  mean {cel.mean():.1f} C  "
-              f"max {cel.max():.1f} C  ({100*valid.mean():.1f}% valid)")
-    print(f"compute       {compute_s:.1f}s for {len(work)} shards "
-          f"({compute_s/max(len(work),1):.2f}s each)")
+        summary |= {
+            "min_c": float(cel.min()),
+            "mean_c": float(cel.mean()),
+            "max_c": float(cel.max()),
+        }
+        print(
+            f"\nLST p95       min {cel.min():.1f} C  mean {cel.mean():.1f} C  "
+            f"max {cel.max():.1f} C  ({100 * valid.mean():.1f}% valid)"
+        )
+    print(
+        f"compute       {compute_s:.1f}s for {len(work)} shards "
+        f"({compute_s / max(len(work), 1):.2f}s each)"
+    )
     print(f"client RSS    {peak['rss']:.2f} GiB peak")
     qa_mean = {MONTHS[i]: float(qa_out[i].mean()) for i in range(12)}
     summary["qa_count_per_month"] = qa_mean
     print("qa_count      " + "  ".join(f"{m} {v:.1f}" for m, v in qa_mean.items()))
 
     try:
-        spans = frisky.query_spans(limit=2_000_000, dashboard_url=dash, request_timeout=60)
+        spans = frisky.query_spans(
+            limit=2_000_000, dashboard_url=dash, request_timeout=60
+        )
         summary["n_spans"] = len(spans)
-        (args.out_dir / "spans.json").write_text(json.dumps(spans[:200000], default=str))
+        (args.out_dir / "spans.json").write_text(
+            json.dumps(spans[:200000], default=str)
+        )
     except Exception as exc:
         summary["span_error"] = repr(exc)
     cluster.close()
@@ -610,17 +733,30 @@ def main(argv=None) -> int:
     payload = {}
     for sh in mine:  # every planned shard in this slice, barren ones included
         tag = f"{sh.y0}_{sh.x0}"
-        payload["lst_" + tag] = lst_out[sh.y0:sh.y0 + sh.ny, sh.x0:sh.x0 + sh.nx]
-        payload["qa_" + tag] = qa_out[:, sh.y0:sh.y0 + sh.ny, sh.x0:sh.x0 + sh.nx]
+        payload["lst_" + tag] = lst_out[sh.y0 : sh.y0 + sh.ny, sh.x0 : sh.x0 + sh.nx]
+        payload["qa_" + tag] = qa_out[:, sh.y0 : sh.y0 + sh.ny, sh.x0 : sh.x0 + sh.nx]
     if payload:
         _np.savez_compressed(args.out_dir / "part-000.npz", **payload)
-        (args.out_dir / "part-meta.json").write_text(json.dumps(
-            {"raster": [height, width], "bbox": bbox, "crs": args.crs,
-             "pixels_per_degree": args.pixels_per_degree,
-             "shard_px": args.shard, "n_shards": len(work)}, indent=2))
-        print(f"part written  {args.out_dir/'part-000.npz'} ({len(payload)//2} shards)")
+        (args.out_dir / "part-meta.json").write_text(
+            json.dumps(
+                {
+                    "raster": [height, width],
+                    "bbox": bbox,
+                    "crs": args.crs,
+                    "pixels_per_degree": args.pixels_per_degree,
+                    "shard_px": args.shard,
+                    "n_shards": len(work),
+                },
+                indent=2,
+            )
+        )
+        print(
+            f"part written  {args.out_dir / 'part-000.npz'} ({len(payload) // 2} shards)"
+        )
 
-    (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
+    (args.out_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, default=str)
+    )
     print(f"artifacts     {args.out_dir.resolve()}")
     return 0
 
