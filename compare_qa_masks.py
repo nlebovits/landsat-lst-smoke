@@ -268,19 +268,26 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    from shard_lst_p95 import (
-        configure_read_env,
-        items_for_shard,
-        plan_shards,
-        search_items,
-    )
+    from shard_lst_p95 import configure_read_env, items_for_shard, plan_shards
+
+    # The catalogue query lives in stac_reference now. This is a measurement
+    # tool, so it describes what the old runtime did; the runtime itself reads
+    # the precomputed inventory and opens no catalogue.
+    from stac_reference import search_items
 
     configure_read_env(args.source)
     bbox = tuple(float(v) for v in args.bbox.split(","))
     shards, _, _ = plan_shards(bbox, args.pixels_per_degree, args.shard)
     shard = shards[args.shard_index]
 
-    items, item_bboxes = search_items(args, bbox)
+    items, item_bboxes = search_items(
+        bbox,
+        start=args.start,
+        end=args.end,
+        platforms=args.platforms,
+        cloud_cover_lt=args.cloud_cover_lt,
+        source=args.source,
+    )
     idx = items_for_shard(shard, item_bboxes)
     if not idx:
         raise SystemExit(f"shard {args.shard_index} has no scenes")

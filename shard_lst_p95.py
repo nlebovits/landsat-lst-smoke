@@ -45,15 +45,29 @@ from lst_qa import (
     encode_celsius,
     masked_celsius,
 )
-from stac_window import DEFAULT_END, DEFAULT_START, datetime_range
+from land_tiles import tile_bounds
+from stac_window import (
+    DEFAULT_CLOUD_COVER_LT,
+    DEFAULT_END,
+    DEFAULT_PLATFORMS,
+    DEFAULT_START,
+)
+from tile_inventory import (
+    INVENTORY_SCHEMA_VERSION,
+    check_manifest,
+    items_for_tile,
+    provenance,
+    read_manifest,
+)
 
-STAC_EARTH_SEARCH = "https://earth-search.aws.element84.com/v1"
-STAC_PLANETARY_COMPUTER = "https://planetarycomputer.microsoft.com/api/stac/v1"
-SOURCES = {
-    "earth-search": STAC_EARTH_SEARCH,
-    "planetary-computer": STAC_PLANETARY_COMPUTER,
-}
-COLLECTION = "landsat-c2-l2"
+#: Where the staged artifacts live on a VM unless the driver says otherwise.
+DEFAULT_INVENTORY_URI = Path("artifacts/tile_scene_inventory.parquet")
+
+#: The read environment still has a source, because requester-pays and the
+#: region belong to the bucket the hrefs point at. It no longer selects a
+#: catalogue: the items come from the inventory, and every href it writes is
+#: `s3://usgs-landsat`.
+READ_SOURCES = ("earth-search", "planetary-computer")
 
 MONTHS = [
     "Jan",
@@ -273,26 +287,55 @@ def process_shard(
     }
 
 
-def search_items(args, bbox):
-    """STAC search once, in the client. Returns items and their bboxes."""
-    import pystac_client
+def resolve_area(args):
+    """The bbox this run covers, and the tile it belongs to.
 
-    query = {"eo:cloud_cover": {"lt": args.cloud_cover_lt}}
-    plats = [p.strip() for p in args.platforms.split(",") if p.strip()]
-    if plats and args.platforms.strip().lower() != "all":
-        query["platform"] = {"in": plats}
-    cat = pystac_client.Client.open(SOURCES[args.source])
-    items = list(
-        cat.search(
-            collections=[COLLECTION],
-            bbox=bbox,
-            datetime=datetime_range(args.start, args.end),
-            query=query,
-        ).items()
+    `--tile` is the production form: it fixes the bbox on the shared grid, so
+    two machines given the same tile cut the same pixels. `--bbox` stays for
+    dry runs and rehearsals, which plan shards without reading anything.
+
+    Returns:
+        The bbox as `(west, south, east, north)`, and the tile id or None.
+    """
+    if args.tile and args.bbox:
+        raise SystemExit("pass --tile or --bbox, not both")
+    if args.tile:
+        return tile_bounds(args.tile), args.tile
+    if not args.bbox:
+        raise SystemExit("pass --tile (production) or --bbox (dry run)")
+    bbox = tuple(float(v) for v in args.bbox.split(","))
+    if len(bbox) != 4:
+        raise SystemExit("--bbox needs west,south,east,north")
+    return bbox, None
+
+
+def load_tile_items(args, tile_id: str):
+    """Every scene for one tile, from the precomputed inventory.
+
+    Replaces the per-tile Earth Search query. The artifact is built once by
+    `usgs_inventory`, staged for the fleet, and read here with a row-group
+    lookup. Nothing in this function opens a catalogue.
+
+    The manifest is checked before any read. A window or a filter the artifact
+    does not cover stops the run here, which is the point: the alternative is
+    a finished composite built from the wrong scenes.
+
+    Returns:
+        The item dicts, their tile-local bboxes, and the run provenance.
+    """
+    manifest = read_manifest(args.inventory_uri)
+    check_manifest(
+        manifest,
+        start=args.start,
+        end=args.end,
+        platforms=args.platforms,
+        cloud_cover_lt=args.cloud_cover_lt,
+        schema_version=INVENTORY_SCHEMA_VERSION,
     )
-    # pystac types Item.bbox as list[float] | None. Every item a bbox search
-    # returns has one.
-    return items, [tuple(i.bbox) for i in items]  # ty: ignore[invalid-argument-type]
+    items, boxes = items_for_tile(
+        args.inventory_uri, tile_id, bounds=tile_bounds(tile_id)
+    )
+    return items, boxes, provenance(manifest)
 
 
 def parse_args(argv=None):
@@ -301,16 +344,38 @@ def parse_args(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--bbox", required=True, help="west,south,east,north EPSG:4326 (use --bbox=...)"
+        "--tile",
+        default=None,
+        help="tile id such as S30W065. Sets the bbox from the production grid "
+        "and selects this tile's rows in the inventory",
+    )
+    p.add_argument(
+        "--bbox",
+        default=None,
+        help="west,south,east,north EPSG:4326 (use --bbox=...). Only for "
+        "--rehearse and --dry-run; a real run needs --tile, because the "
+        "inventory is addressed by tile",
+    )
+    p.add_argument(
+        "--inventory-uri",
+        type=Path,
+        default=DEFAULT_INVENTORY_URI,
+        help="the precomputed tile-scene inventory this run reads",
+    )
+    p.add_argument(
+        "--land-tiles-uri",
+        type=Path,
+        default=Path("artifacts/land_tiles.parquet"),
+        help="the authoritative land-tile list, for the driver",
     )
     p.add_argument("--pixels-per-degree", type=int, default=3600)
     p.add_argument("--crs", default="EPSG:4326")
     p.add_argument("--shard", type=int, default=512, help="shard edge in pixels")
     p.add_argument("--start", default=DEFAULT_START)
     p.add_argument("--end", default=DEFAULT_END)
-    p.add_argument("--cloud-cover-lt", type=int, default=100)
-    p.add_argument("--platforms", default="landsat-8,landsat-9")
-    p.add_argument("--source", choices=sorted(SOURCES), default="earth-search")
+    p.add_argument("--cloud-cover-lt", type=int, default=DEFAULT_CLOUD_COVER_LT)
+    p.add_argument("--platforms", default=DEFAULT_PLATFORMS)
+    p.add_argument("--source", choices=sorted(READ_SOURCES), default="earth-search")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--threads-per-worker", type=int, default=4)
     p.add_argument("--memory-limit-gib", type=float, default=13.0)
@@ -432,9 +497,7 @@ def main(argv=None) -> int:  # noqa: C901
     args = parse_args(argv)
     if args.merge:
         return merge_parts(args.merge, args.out_dir)
-    bbox = tuple(float(v) for v in args.bbox.split(","))
-    if len(bbox) != 4:
-        raise SystemExit("--bbox needs west,south,east,north")
+    bbox, tile_id = resolve_area(args)
     res = 1.0 / args.pixels_per_degree
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -487,7 +550,9 @@ def main(argv=None) -> int:  # noqa: C901
             )
 
         if args.search_in_dry_run:
-            items, item_bboxes = search_items(args, bbox)
+            if tile_id is None:
+                raise SystemExit("--search-in-dry-run needs --tile")
+            items, item_bboxes, _ = load_tile_items(args, tile_id)
             counts = [len(items_for_shard(sh, item_bboxes)) for sh in shards]
             counts.sort()
             hi = counts[-1]
@@ -564,23 +629,22 @@ def main(argv=None) -> int:  # noqa: C901
             for i in range(args.rehearse)
         ]
         items = [{"id": f"fake-{i}"} for i in range(args.rehearse)]
+        run_provenance = {"source": "rehearsal, synthetic items"}
     else:
-        items, item_bboxes = search_items(args, bbox)
+        if tile_id is None:
+            raise SystemExit(
+                "a real run needs --tile: the inventory is addressed by tile. "
+                "Use --bbox only with --dry-run or --rehearse."
+            )
+        items, item_bboxes, run_provenance = load_tile_items(args, tile_id)
     t_search = time.perf_counter() - t_search
-    print(f"scenes        {len(items)} in {t_search:.1f}s")
+    print(f"scenes        {len(items)} from the inventory in {t_search:.2f}s")
     if not items:
         print("no scenes matched")
         return 1
-    if args.source == "planetary-computer" and not args.rehearse:
-        import planetary_computer
-
-        for it in items:
-            planetary_computer.sign_inplace(it)
-    # Under --rehearse the items are already dicts. The branch that calls
-    # .to_dict() only ever sees pystac Items.
-    item_dicts = (
-        items if args.rehearse else [it.to_dict() for it in items]  # ty: ignore[unresolved-attribute]
-    )
+    # Both paths hand over plain dicts now. The inventory builds them and the
+    # rehearsal fakes them, so nothing here converts a pystac object.
+    item_dicts = items
 
     # Slice the PLAN, never the filtered list. Shards with no overlapping
     # scenes drop out of `work`, so slicing after filtering shifts every index
@@ -702,6 +766,11 @@ def main(argv=None) -> int:  # noqa: C901
         "client_rss_peak_gib": peak["rss"],
         "valid_fraction": float(valid.mean()),
         "shard_stats": stats,
+        # Which inventory answered this run. A composite is only reproducible
+        # if the scene list behind it is named, so this travels with the
+        # numbers rather than beside them.
+        "inventory": run_provenance,
+        "tile": tile_id,
     }
     if cel is not None:
         summary |= {

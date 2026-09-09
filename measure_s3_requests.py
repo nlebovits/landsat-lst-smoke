@@ -192,12 +192,12 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path("s3-requests.json"))
     args = ap.parse_args()
 
-    from shard_lst_p95 import (
-        configure_read_env,
-        items_for_shard,
-        plan_shards,
-        search_items,
-    )
+    from shard_lst_p95 import configure_read_env, items_for_shard, plan_shards
+
+    # The catalogue query lives in stac_reference now. This is a measurement
+    # tool, so it describes what the old runtime did; the runtime itself reads
+    # the precomputed inventory and opens no catalogue.
+    from stac_reference import search_items
 
     # Same settings as the real run, and curl verbose on top of them.
     configure_read_env(args.source)
@@ -207,7 +207,14 @@ def main() -> int:
     bbox = tuple(float(v) for v in args.bbox.split(","))
     shards, h, w = plan_shards(bbox, args.pixels_per_degree, args.shard)
 
-    items, boxes = search_items(args, bbox)
+    items, boxes = search_items(
+        bbox,
+        start=args.start,
+        end=args.end,
+        platforms=args.platforms,
+        cloud_cover_lt=args.cloud_cover_lt,
+        source=args.source,
+    )
     dicts = [i.to_dict() for i in items]
     print(
         f"scenes {len(items)}   shards planned {len(shards)}   "
