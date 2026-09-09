@@ -168,7 +168,7 @@ Collection 2 Level 2, `LANDSAT_OT_C2_L2.parquet.gz`, updated daily.
 |---|---|---|
 | transfer | 100 items per request, 22.4 KB each | 433 MB, one download |
 | for the whole band | about 42 GB of JSON | 433 MB |
-| wall clock | 38.1 s x 895 machines | 58 s, on a laptop |
+| wall clock | 38.1 s x 895 machines | 32 s, on a laptop, 5.3 GB peak |
 | runtime dependency | 895, one per machine | none |
 
 Both inventories describe the same archive. Over 2021 to 2025 inside +/-60

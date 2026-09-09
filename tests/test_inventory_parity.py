@@ -150,14 +150,13 @@ def derived(scanned, oracle):
     scene = table.column("Landsat Scene Identifier").to_pylist()
     cloud = table.column("Scene Cloud Cover L1").to_numpy(zero_copy_only=False)
 
-    start = np.asarray(
-        table.column("Start Time").to_numpy(zero_copy_only=False),
-        dtype="datetime64[us]",
-    )
-    stop = np.asarray(
-        table.column("Stop Time").to_numpy(zero_copy_only=False),
-        dtype="datetime64[us]",
-    )
+    # The raw strings, because sub-second precision has to be read from them.
+    # Parsing to datetime64[us] first would not work: `str()` on a us-precision
+    # value always prints six decimals, so every row would look sub-second.
+    raw_start = table.column("Start Time").to_pylist()
+    raw_stop = table.column("Stop Time").to_pylist()
+    start = np.asarray(raw_start, dtype="datetime64[us]")
+    stop = np.asarray(raw_stop, dtype="datetime64[us]")
     centre = start + (stop - start) // 2
 
     out = {}
@@ -178,7 +177,7 @@ def derived(scanned, oracle):
             "cloud": float(cloud[i]),
             "data_type": data_type[i],
             "centre": centre[i],
-            "sub_second": "." in str(start[i]),
+            "sub_second": "." in raw_start[i] and "." in raw_stop[i],
         }
     return out
 
