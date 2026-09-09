@@ -1,0 +1,50 @@
+# This repository is a set of standalone PEP 723 benchmark scripts. Each one
+# still declares its own inline dependencies and still runs with `uv run
+# <script>.py` against a per-script environment.
+#
+# This file exists so that the quality gates have somewhere to resolve
+# against. `ty` cannot type-check an import it cannot find, and pytest cannot
+# import a script whose dependencies are not installed. The `dev` group is the
+# union of every script's inline block, plus the two tools.
+#
+# Keep the two in step. A dependency added to a script's PEP 723 block belongs
+# here as well.
+
+[project]
+name = "landsat-lst-smoke"
+version = "0.0.0"
+description = "Profiling a p95 composite of land surface temperature"
+requires-python = ">=3.12,<3.15"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  # The union of the inline blocks in profile_lst_p95.py, shard_lst_p95.py
+  # and measure_s3_requests.py. cost_report.py and sweep_throughput.py are
+  # standard library only.
+  "frisky>=0.7.2",
+  "dask",
+  "odc-stac",
+  "pystac-client",
+  "planetary-computer",
+  "xarray",
+  "numpy",
+  "geopandas",
+  "rioxarray",
+  "psutil",
+  "rich",
+  # Gates.
+  "ty>=0.0.1a14",
+  "pytest>=8",
+  "pytest-timeout>=2.3",
+]
+
+[tool.uv]
+# Nothing here is importable as a package. Without this, uv tries to build and
+# install the repository into its own environment and fails on the missing
+# module.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --timeout=60"

@@ -137,7 +137,10 @@ def lifetimes(tag, profile, region):
     return sorted(rows, key=lambda r: (r["launch"], r["id"]))
 
 
-def main() -> int:
+# The CLI entry point: argument parsing, then one branch per cost line, then
+# the report. Splitting it would scatter the arithmetic this script exists to
+# make auditable in one place.
+def main() -> int:  # noqa: C901
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -169,7 +172,13 @@ def main() -> int:
         "API, for a run whose instances have aged out of "
         "describe-instances. Repeatable",
     )
-    p.add_argument("--json", type=argparse.FileType("w"), default=None)
+    # FileType is deprecated from 3.14. This repository pins 3.12, and
+    # swapping it changes how the CLI reports an unwritable path.
+    p.add_argument(
+        "--json",
+        type=argparse.FileType("w"),  # ty: ignore[deprecated]
+        default=None,
+    )
     a = p.parse_args()
 
     RATES, rate_src = fetch_rates(a.region)

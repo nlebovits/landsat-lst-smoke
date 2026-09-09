@@ -1,9 +1,23 @@
 # This repository is a set of standalone PEP 723 benchmark scripts, not a
-# package. There is no pyproject.toml, so ruff reads its settings here.
+# package. There is no [tool.ruff] table in pyproject.toml, so ruff reads its
+# settings here.
 
 # Worktrees that Claude Code creates under .claude/ are copies of this
 # repository. Linting them double-reports every finding.
 extend-exclude = [".claude"]
+
+[lint]
+# C901 replaces the xenon hook that landsat-lst runs. xenon grades a whole
+# module and offers no per-function escape, so on this repository it either
+# fails on four argparse-and-report `main` functions or has to be set so loose
+# that it gates nothing. C901 gates each function and names the ones it
+# exempts.
+extend-select = ["C901"]
+
+[lint.mccabe]
+# The ceiling sits one above `collect_frisky`, the most complex function that
+# is not a CLI entry point. New code has to come in under it.
+max-complexity = 12
 
 [lint.per-file-ignores]
 # The dry-run scripts import mid-file on purpose, so that each import lands

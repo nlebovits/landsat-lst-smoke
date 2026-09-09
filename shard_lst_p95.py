@@ -291,7 +291,9 @@ def search_items(args, bbox):
             query=query,
         ).items()
     )
-    return items, [tuple(i.bbox) for i in items]
+    # pystac types Item.bbox as list[float] | None. Every item a bbox search
+    # returns has one.
+    return items, [tuple(i.bbox) for i in items]  # ty: ignore[invalid-argument-type]
 
 
 def parse_args(argv=None):
@@ -425,7 +427,9 @@ def merge_parts(dirs, out_dir: Path) -> int:
     return 0 if covered == 1.0 else 2
 
 
-def main(argv=None) -> int:
+# The CLI entry point: plan, filter, submit, gather, write, and the merge and
+# rehearse modes that short-circuit it. Each branch ends the run.
+def main(argv=None) -> int:  # noqa: C901
     args = parse_args(argv)
     if args.merge:
         return merge_parts(args.merge, args.out_dir)
@@ -573,7 +577,11 @@ def main(argv=None) -> int:
 
         for it in items:
             planetary_computer.sign_inplace(it)
-    item_dicts = items if args.rehearse else [it.to_dict() for it in items]
+    # Under --rehearse the items are already dicts. The branch that calls
+    # .to_dict() only ever sees pystac Items.
+    item_dicts = (
+        items if args.rehearse else [it.to_dict() for it in items]  # ty: ignore[unresolved-attribute]
+    )
 
     # Slice the PLAN, never the filtered list. Shards with no overlapping
     # scenes drop out of `work`, so slicing after filtering shifts every index
@@ -736,7 +744,12 @@ def main(argv=None) -> int:
         payload["lst_" + tag] = lst_out[sh.y0 : sh.y0 + sh.ny, sh.x0 : sh.x0 + sh.nx]
         payload["qa_" + tag] = qa_out[:, sh.y0 : sh.y0 + sh.ny, sh.x0 : sh.x0 + sh.nx]
     if payload:
-        _np.savez_compressed(args.out_dir / "part-000.npz", **payload)
+        # numpy declares savez_compressed(**kwds: ArrayLike) alongside a bool
+        # allow_pickle, so a dict of arrays collides with the named parameter.
+        _np.savez_compressed(
+            args.out_dir / "part-000.npz",
+            **payload,  # ty: ignore[invalid-argument-type]
+        )
         (args.out_dir / "part-meta.json").write_text(
             json.dumps(
                 {
