@@ -617,17 +617,26 @@ prices itself. `cost_report.py --s3-get-requests` reads that total from
 `staging.json` and skips the `reads x bands x requests-per-read` derivation
 entirely. No total then rests on the softest figure in this document.
 
-The cost moves to disk, and the measured object sizes make it larger than the
-first estimate. A quarter-tile slice of 1,765 scenes writes **139 GB** at the
-measured 78.5 MB mean, and the guard reserves **213 GB** because it budgets
-near the maximum. That write competes with the 358 MB/s the compute phase
-already reads, and the workers hold 96 of 128 GB so page cache absorbs none of
-it.
+The cost moves to disk, and the measured object sizes make it much larger than
+the first estimate. Steady state runs one whole tile per instance, which is
+4,776 scenes on `S30W065` and 3,445 on a mean tile:
 
-A 150 GB root volume is refused, which rules out the volume the full-tile run
-used. Either use `c6id.16xlarge` and its 2 x 1900 GB NVMe at $3.2256/hr against
-$2.72/hr, or keep `c6i.16xlarge` and give it a gp3 volume of at least 250 GB
-provisioned to 1,000 MB/s, which adds about $0.07/hr. The second is cheaper.
+| per instance | scenes | staged | guard reserves |
+|---|---|---|---|
+| a quarter-tile slice, 324 shards | 2,004 | 157 GB | 242 GB |
+| a mean tile, 1,296 shards | 3,445 | 270 GB | 416 GB |
+| `S30W065`, 1,296 shards | 4,776 | 375 GB | 577 GB |
+
+That write competes with the 358 MB/s the compute phase already reads, and the
+workers hold 96 of 128 GB so page cache absorbs none of it.
+
+**Use `c6id.16xlarge` and its 2 x 1900 GB NVMe.** A 150 GB root volume is
+refused, which rules out the volume the full-tile run used, and so is a 250 GB
+gp3 volume once one instance takes a whole tile. gp3 tops out at 1,000 MB/s in
+any case, which alone would put the staging phase at 270 s.
+
+`--stage-dir` has to name that volume. The default is the system temp directory,
+which on these instances is the root volume.
 
 ### Scenes with no thermal band
 
@@ -687,13 +696,19 @@ pairs the inventory holds, and not on 895 copies of `S30W065`. That tile holds
 4,776 scenes against a mean of 3,445, so pricing the globe from it overstates
 the S3 line by 13%. `Corrections` withdraws the $2,067 that did.
 
+A mean tile holds 3,445 scenes, so staging writes **270 GB** and takes 90 to
+270 s at 3.0 to 1.0 GB/s. The staged column prices `c6id.16xlarge` at $3.2256/hr
+against $2.72, because 416 GB of reserve rules out every gp3 volume worth
+attaching.
+
 | 895 land tiles | reading from S3 | **staged** |
 |---|---|---|
-| EC2, on-demand @ $2.72/hr | $781 - $903 | $837 - $1,002 |
-| EC2, spot @ ~$0.95/hr | $273 - $315 | $302 - $362 |
+| instance | `c6i.16xlarge` @ $2.72/hr | `c6id.16xlarge` @ $3.2256/hr |
+| EC2, on-demand | $781 - $903 | $999 - $1,287 |
+| EC2, spot | $273 - $315 (~$0.95/hr) | $341 - $439 (~$1.10/hr) |
 | S3 GET requests | **$1,822** | **$2.32** |
-| **total, on-demand** | **$2,603 - $2,725** | **$839 - $1,004** |
-| **total, spot** | **$2,095 - $2,137** | **$304 - $364** |
+| **total, on-demand** | **$2,603 - $2,725** | **$1,001 - $1,289** |
+| **total, spot** | **$2,095 - $2,137** | **$343 - $441** |
 
 Read the EC2 rows as DERIVED. Measurement supplies the per-tile compute and the
 tile count. The tail is a bracket, and the staged column adds 60 to 120 s per
@@ -701,9 +716,10 @@ tile for the fetch, and prices the disk it writes to. The S3 rows are
 arithmetic over `tile_scene_rows`: 154.9 opens x 2 bands x 4.77 GETs unstaged,
 against 2 GETs staged.
 
-Staging cuts the total by **2.6x on demand and 6.9x on spot**, and moves the
-tile from 4.8 minutes to about 6.5. EC2 rises. It rises by far less than the
-requests it removes.
+Staging cuts the total by **2.0x to 2.7x on demand and 4.7x to 6.2x on spot**.
+EC2 rises, on a faster instance and for longer, and still rises by far less than
+the requests it removes. The staging phase is the widest term in the bracket,
+and no run has measured it.
 
 Removing the per-tile search saves 38.1 s x 895 tiles, or 9.5 instance-hours.
 That is $26 on-demand and $9 spot, against an S3 line of $1,822. The search was
@@ -1112,16 +1128,20 @@ a zero count.
   raster, but the largest run through the new path is six scenes.
 - **The 895 tiles have never been priced against a real run.** The per-tile
   compute is measured and the tile count is measured. Their product is not.
-- **No fleet has staged.** The unit tests cover the fetch, the dedup, the
-  verification, the retry counter, and a composite computed from staged files
-  with every socket in the process blocked. The largest run through the staged
-  path is three synthetic scenes. No run has yet fetched a real 97 GB slice,
-  so the 60 to 120 s staging phase is a bracket over 25 Gbps and 1,000 MB/s of
-  disk, not a measurement.
-- **The staged disk requirement is estimated, not measured per object.** The
-  guard reserves 52 MB for a thermal band and 8 MB for a QA band, derived from
-  233 GB over 3,910 scenes. HEAD is billable, so nothing checks the real size
-  before fetching. A slice of larger-than-average scenes falls back on the
+- **No fleet has staged, and the staging phase is the widest term in the
+  cost.** The live check fetched 12 objects. A mean tile needs 3,445 scenes and
+  270 GB, and the 90 to 270 s bracket assumes 3.0 to 1.0 GB/s of combined
+  network and disk. That factor of three is the difference between $999 and
+  $1,287 of EC2 across 895 tiles. One slice measures it.
+- **The per-tile scene count in `Cost` is not the inventory's.** The 1,094.8 s
+  of compute was measured against the 3,910 scenes Earth Search returned.
+  The artifact assigns 4,776 to `S30W065` and 3,445 to a mean tile, so the
+  compute term rests on a scene list that no longer matches the one a fleet
+  would read.
+- **The staged disk requirement is estimated per object, not checked.** The
+  guard reserves 95 MB for a thermal band and 10 MB for a QA band, from HEADs
+  over 30 scenes per platform. HEAD is billable, so nothing checks the real
+  size before fetching. A slice of larger-than-average scenes falls back on the
   in-flight free-space floor.
 - **The pixel mask still carries both land defects.** The tile list here drops
   the Null Island placeholder and the antimeridian slivers. The mask in
