@@ -57,4 +57,11 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --timeout=60"
+# Network tests are opt-in. They query Earth Search as a parity oracle, which
+# is slow and depends on a public service being up, so the default run and CI
+# skip them. Run them with `uv run pytest -m network`.
+addopts = "-q --timeout=60 -m 'not network and not s3'"
+markers = [
+  "network: reaches Earth Search or the USGS bulk metadata service",
+  "s3: reads s3://usgs-landsat, which is requester-pays and costs money",
+]

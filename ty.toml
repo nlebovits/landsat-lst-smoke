@@ -12,6 +12,7 @@
 include = [
   "compare_qa_masks.py",
   "cost_report.py",
+  "land_tiles.py",
   "measure_s3_requests.py",
   "profile_lst_p95.py",
   "shard_lst_p95.py",
