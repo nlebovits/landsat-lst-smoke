@@ -1,0 +1,25 @@
+{
+  "shards": 1296,
+  "parts": 4,
+  "coverage": 1.0,
+  "raster": [
+    18000,
+    18000
+  ],
+  "meta": {
+    "raster": [
+      18000,
+      18000
+    ],
+    "bbox": [
+      -65.0,
+      -35.0,
+      -60.0,
+      -30.0
+    ],
+    "crs": "EPSG:4326",
+    "pixels_per_degree": 3600,
+    "shard_px": 512,
+    "n_shards": 324
+  }
+}

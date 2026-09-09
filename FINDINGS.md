@@ -681,3 +681,52 @@ reports `75,168,000 px never written`.
 Read throughput, and therefore wall time and cost. Everything else — geometry,
 coverage, slicing, assembly, memory shape of the merge (peak 8.2 GB for a full
 tile), and the concurrency guard — is answerable before an instance exists.
+
+## Full tile, four machines: 4.8 minutes
+
+`S30W065`, 18,000 x 18,000 px, 3,910 scenes, 1,296 shards across four
+`c6i.16xlarge` (64 vCPU each), one `--shard-slice` per machine.
+
+| slice | shards | compute | per shard |
+|---|---|---|---|
+| 0 | 324 | 273.5 s | 0.84 s |
+| 1 | 324 | 289.7 s | 0.89 s |
+| 2 | 324 | 284.6 s | 0.88 s |
+| 3 | 324 | 247.0 s | 0.76 s |
+
+**4.8 minutes wall**, set by the slowest slice. Zero errors on all four. The
+merge assembled 1,296 of 1,296 shards at **100.00% coverage** in 13.3 s, peaking
+at 8.26 GB.
+
+```
+LST p95   min -49.7 C   mean 45.8 C   max 90.6 C   (100.0% valid)
+```
+
+### The tails are the thinly-observed pixels, and only those
+
+| band | share of tile | mean observations per pixel |
+|---|---|---|
+| 0-60 C | **99.967%** | 173.3 |
+| below -20 C or above 75 C | **0.027%** | **6.0** |
+
+p1 is 29.7 C, p50 46.4 C, p99 53.3 C. The extremes sit on pixels with about six
+observations against 173 elsewhere, where a 95th percentile carries no
+information. `qa_count` is the band that lets a consumer drop them, which is
+why it is written without a nodata value.
+
+### Cost
+
+Four instances for roughly an hour of billed time, about **$10** for this run.
+The compute itself is 4.8 minutes; the rest is boot, dependency install, the
+3,910-scene STAC search on every machine, and `savez_compressed` writing a
+175 MB part file single-threaded.
+
+Three cheap fixes for a production loop, none of them the compute:
+
+- **Share the STAC search.** Every machine repeats a ~3 minute search of the
+  same 3,910 items. Doing it once and shipping the item list removes it.
+- **Write parts uncompressed.** `savez_compressed` on ~1.1 GB per slice took
+  longer than the compute did. `savez` trades disk for wall clock.
+- **Keep instances warm.** Boot plus install is ~160 s per machine per run.
+
+With those, a full tile is closer to 6 minutes end to end and about $3.

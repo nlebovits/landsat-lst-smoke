@@ -1,0 +1,37 @@
+### FULL TILE S30W065 slice 324:648 on 64 vCPU ###
+start 06:08:17
+bbox          (-65.0, -35.0, -60.0, -30.0)
+grid          EPSG:4326 @ 1/3600 deg
+raster        18000 x 18000 px  (324 Mpx)
+shards        1296  of 512x512 px (36 x 36)
+concurrency   64 shard slots x 4 read threads = 256 threads on 64 cores
+scenes        3910 in 37.8s
+slice         shards[324:648] -> 324 of 1296 planned
+shards        324 with data, scenes/shard min 178 p50 529 max 725
+worst shard   0.71 GiB, 45.3 GiB across 64 slots
+
+dashboard     http://127.0.0.1:33771
+submitted     324 shards in 97.9s
+    25/324    14.6s   0.58s/shard  client RSS 3.5 GiB
+    50/324    30.0s   0.60s/shard  client RSS 3.7 GiB
+    75/324    39.1s   0.52s/shard  client RSS 3.9 GiB
+   100/324    41.9s   0.42s/shard  client RSS 4.1 GiB
+   125/324    55.0s   0.44s/shard  client RSS 4.3 GiB
+   150/324    79.9s   0.53s/shard  client RSS 4.4 GiB
+   175/324   112.3s   0.64s/shard  client RSS 4.6 GiB
+   200/324   139.5s   0.70s/shard  client RSS 4.7 GiB
+   225/324   174.8s   0.78s/shard  client RSS 4.9 GiB
+   250/324   210.9s   0.84s/shard  client RSS 5.1 GiB
+   275/324   239.9s   0.87s/shard  client RSS 5.2 GiB
+   300/324   264.5s   0.88s/shard  client RSS 5.4 GiB
+   324/324   289.7s   0.89s/shard  client RSS 5.4 GiB
+
+LST p95       min -49.7 C  mean 46.2 C  max 89.8 C  (25.6% valid)
+compute       289.7s for 324 shards (0.89s each)
+client RSS    5.45 GiB peak
+qa_count      Jan 4.6  Feb 3.4  Mar 4.3  Apr 3.1  May 3.7  Jun 3.3  Jul 3.1  Aug 3.9  Sep 3.7  Oct 3.5  Nov 3.4  Dec 4.9
+part written  part/part-000.npz (324 shards)
+artifacts     /home/ubuntu/part
+exit=0 slice1
+end 06:17:10
+SLICE DONE

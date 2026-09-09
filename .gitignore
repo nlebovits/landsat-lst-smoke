@@ -7,3 +7,8 @@ __pycache__/
 # live in summary.json and the frisky-*.txt reports, which are committed.
 spans.json
 trace.json
+
+# Full-tile outputs: 683 MB of part files and a 4.3 GB merged raster.
+# Regenerable; the logs and summaries beside them are committed.
+fulltile/part*/part-000.npz
+fulltile/tile/*.npy
