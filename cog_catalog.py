@@ -332,6 +332,15 @@ def write_cog(
     GDAL's COG driver is create-copy only, so this writes a tiled GeoTIFF
     first and copies it. The copy is what builds the overviews and moves the
     header, including the statistics, to the front of the file.
+
+    Not rio-cogeo, which is the usual choice and which the Portolan reference
+    tool uses. `cog_translate` drops band tags unless it is called with
+    `forward_band_tags=True`, and the per-band statistics are band tags. The
+    default therefore produces a file that reads as a valid COG and fails the
+    statistics requirement, with nothing on the surface to show it. GDAL's
+    `CreateCopy` forwards band metadata with no flag. Both routes produce the
+    same block size, overviews, scale, offset, and nodata; this one has the
+    safer default.
     """
     import rasterio
 
