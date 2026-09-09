@@ -207,15 +207,26 @@ def _default_client():
 def _release_page_cache(fh) -> None:
     """Tell the kernel it can drop what we just wrote.
 
-    A quarter-tile slice stages about 157 GB. Writing it leaves that much clean
-    page cache behind, and the cluster starts immediately afterwards wanting
-    close to 100 GiB of worker heap on a 128 GiB box. Reclaim is supposed to
-    handle it. Under 64 processes allocating at once it does not have to keep
-    up, and a run that fits on paper dies at cluster start.
+    A mean tile stages about 278 GB onto an instance holding 256 GiB of RAM.
+    The written volume exceeds memory, so the kernel has to reclaim that cache
+    whatever happens, and it would otherwise do so while 64 workers are
+    allocating about 118 GiB between them. Releasing each object as it lands
+    moves the reclaim to a point where nothing is competing for the memory.
 
-    The workers re-read these files from NVMe within seconds, so the cache is
-    not worth holding: the read repopulates what it needs, under memory
-    pressure the kernel can account for.
+    The workers re-read these files from NVMe seconds later, so the cache is
+    not worth holding: the read repopulates what it needs.
+
+    `fsync` first, because `POSIX_FADV_DONTNEED` cannot drop a dirty page and
+    would silently do nothing without it. MEASURED at 3,139 MB/s against
+    7,711 MB/s for the same writes without either call, on 24 objects of 85 MB
+    across 16 threads. The cost is real and it does not bind: staging is
+    network-bound at the 922 MB/s an `m6id.16xlarge` measured in region, which
+    is 3.4x below the slower figure.
+
+    This is not what fixed the run that died at cluster start. That was
+    `shard_bytes` under-reporting by 3.9x, and a corrected budget alone would
+    have fit. The justification here is the written volume against RAM, which
+    holds independently.
 
     Best effort. `posix_fadvise` is Linux-only and advisory everywhere.
     """
