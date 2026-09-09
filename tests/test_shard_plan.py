@@ -182,9 +182,18 @@ class TestConfigureReadEnv:
         assert os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] == "YES"
         assert os.environ["AWS_REQUEST_PAYER"] == "requester"
 
-    def test_planetary_computer_does_not_request_requester_pays(self, monkeypatch):
-        monkeypatch.delenv("AWS_REQUEST_PAYER", raising=False)
-        configure_read_env("planetary-computer")
+    def test_planetary_computer_is_refused(self, monkeypatch):
+        """It used to configure a read environment that could not read.
+
+        Every href in the inventory is `s3://usgs-landsat`, which is
+        requester-pays. Selecting planetary-computer skipped
+        `AWS_REQUEST_PAYER` and left a run that failed on every scene. The flag
+        selected a catalogue before the inventory replaced the per-tile search;
+        now it selects a read environment, and there is only one.
+        """
         import os
 
+        monkeypatch.delenv("AWS_REQUEST_PAYER", raising=False)
+        with pytest.raises(SystemExit, match="requester-pays"):
+            configure_read_env("planetary-computer")
         assert "AWS_REQUEST_PAYER" not in os.environ

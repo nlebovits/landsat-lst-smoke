@@ -37,11 +37,16 @@ jobs:
       - name: Lint
         run: uvx ruff@0.14.1 check .
 
+      # Same list as the vulture hook in prek.toml. If they drift, a module
+      # gets checked locally and not here, or the other way round.
       - name: Dead code
         run: |
           uvx vulture@2.14 \
-            cost_report.py measure_s3_requests.py profile_lst_p95.py \
-            shard_lst_p95.py sweep_throughput.py dryrun \
+            compare_qa_masks.py cost_report.py fleet_plan.py \
+            land_tiles.py measure_land_defects.py measure_s3_requests.py \
+            measure_scene_centre.py profile_lst_p95.py shard_lst_p95.py \
+            stac_reference.py stac_window.py sweep_throughput.py \
+            tile_inventory.py usgs_inventory.py dryrun \
             vulture_whitelist.py --min-confidence 80
 
       - name: Spell check
@@ -67,8 +72,10 @@ jobs:
 
       # --extra-search-path puts the repository root on the module path.
       # measure_s3_requests.py imports shard_lst_p95 after a sys.path insert.
+      # tests/ goes on it too, because pytest puts it there and the test
+      # modules import their shared fixtures from conftest by name.
       - name: ty
-        run: uv run ty check --extra-search-path .
+        run: uv run ty check --extra-search-path . --extra-search-path tests
 
   test:
     name: Unit tests

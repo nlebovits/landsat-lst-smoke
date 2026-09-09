@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "generated_utc": "2026-09-09T11:38:05+00:00",
+  "generator_commit": "1744702aa1c45d7d490080a058435c6d3b256a2c",
+  "source": {
+    "url": "https://landsat.usgs.gov/landsat/metadata_service/bulk_metadata_files/LANDSAT_OT_C2_L2.parquet.gz",
+    "last_modified": "Wed, 09 Sep 2026 10:09:22 GMT",
+    "etag": "\"19c473fa-65b0a0b901dc7\"",
+    "content_length": "432305146",
+    "compressed_bytes": 432305146,
+    "parquet_bytes": 641854279,
+    "sha256": "8595855f212d25f5e3944eb4d17f44fba269720099e665bb238adeadecfb844f"
+  },
+  "start": "2021-01-01",
+  "end": "2025-12-31T23:59:59Z",
+  "platforms": "landsat-8,landsat-9",
+  "cloud_cover_lt": 100,
+  "collection": "landsat-c2-l2",
+  "natural_earth_version": "ne_10m_land",
+  "buffer_meters": 25000,
+  "latitude_limit": 60,
+  "land_geometry_sha256": "35170d2371beacac96c858f71b048de9c4065433c44637e98c71b0a7ab0c9339",
+  "tile_count": 895,
+  "tiles_with_scenes": 895,
+  "source_rows": 4155588,
+  "scenes_scanned": 1461612,
+  "scenes_in_window": 1460446,
+  "scenes_on_tiles": 1457559,
+  "tile_scene_rows": 3083129,
+  "max_snap_meters": 0.6764,
+  "month_boundary_lookups": 36,
+  "scan_seconds": 1.5,
+  "row_groups": 895,
+  "build": {
+    "artifact_bytes": 167086917,
+    "build_seconds": 33.7,
+    "note": "measured after the write, so not embedded in the artifact"
+  }
+}

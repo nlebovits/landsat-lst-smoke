@@ -38,7 +38,9 @@ CONFIGS = [
 ]
 
 
-def run_one(label, workers, threads, chunk, gdal_threads, extra, scenes, out_root):
+def run_one(
+    label, workers, threads, chunk, gdal_threads, extra, scenes, out_root, source
+):
     out_dir = (
         out_root / label.split()[0] / f"{workers}w{threads}t_c{chunk}_{gdal_threads}"
     )
@@ -50,6 +52,12 @@ def run_one(label, workers, threads, chunk, gdal_threads, extra, scenes, out_roo
         "--python",
         "3.12",
         str(SCRIPT),
+        # Named rather than inherited. `profile_lst_p95.py` defaults to
+        # planetary-computer, so a sweep that leaves this out measures a
+        # different bucket, a different signing path, and a different request
+        # count than the sharded pipeline it exists to inform.
+        "--source",
+        source,
         "--max-scenes",
         str(scenes),
         "--workers",
@@ -107,6 +115,12 @@ def main():
     ap.add_argument("--scenes", type=int, default=24)
     ap.add_argument("--out-root", type=Path, default=HERE / "sweep")
     ap.add_argument("--only", default="", help="substring filter on the label")
+    ap.add_argument(
+        "--source",
+        default="earth-search",
+        help="passed through to profile_lst_p95.py, which defaults to "
+        "planetary-computer. earth-search is the bucket the fleet reads",
+    )
     args = ap.parse_args()
     args.out_root.mkdir(parents=True, exist_ok=True)
 
@@ -114,7 +128,9 @@ def main():
     results = []
     for i, (label, w, t, c, gt, extra) in enumerate(configs, 1):
         print(f"[{i}/{len(configs)}] {label} ...", flush=True)
-        res = run_one(label, w, t, c, gt, extra, args.scenes, args.out_root)
+        res = run_one(
+            label, w, t, c, gt, extra, args.scenes, args.out_root, args.source
+        )
         results.append(res)
         if "error" in res:
             print(f"    FAILED: {res['error'][:200]}", flush=True)

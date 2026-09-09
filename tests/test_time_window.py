@@ -97,9 +97,13 @@ class TestStacQuery:
 
         import pystac_client
 
+        import stac_reference
+
         monkeypatch.setattr(pystac_client, "Client", FakeClient)
-        args = shard_lst_p95.parse_args(["--bbox=-62.5,-35.0,-60.0,-32.5"])
-        items, bboxes = shard_lst_p95.search_items(args, QUARTER_TILE)
+        # The query moved to stac_reference when the runtime stopped searching.
+        # It still has to carry the window, because the parity oracle in
+        # tests/test_inventory_parity.py compares against what it returns.
+        items, bboxes = stac_reference.search_items(QUARTER_TILE)
 
         assert items == [] and bboxes == []
         assert seen["datetime"] == "2021-01-01/2025-12-31T23:59:59Z"

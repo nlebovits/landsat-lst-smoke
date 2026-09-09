@@ -28,3 +28,9 @@ styles/config/templates/
 
 # Claude Code worktrees and local session state.
 .claude/
+
+# The scene inventory is 167 MB and rebuilds in 58 s from the USGS bulk file
+# and a cached download. `artifacts/inventory_manifest.json` records the
+# version it was built from, which is what a run needs to quote.
+artifacts/tile_scene_inventory.parquet
+artifacts/fleet_plan.json

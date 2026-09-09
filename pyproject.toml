@@ -57,4 +57,18 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --timeout=60"
+# Network tests are opt-in. They query Earth Search as a parity oracle, which
+# is slow and depends on a public service being up, so the default run and CI
+# skip them.
+#
+# The two marks are independent and `test_load_parity.py` carries both: it
+# queries the catalogue and then reads the bucket. So `-m network` alone bills
+# S3. The catalogue-only run is:
+#
+#     uv run pytest -m "network and not s3"     # free, Earth Search only
+#     AWS_PROFILE=... uv run pytest -m s3       # costs money
+addopts = "-q --timeout=60 -m 'not network and not s3'"
+markers = [
+  "network: reaches Earth Search or the USGS bulk metadata service",
+  "s3: reads s3://usgs-landsat, which is requester-pays and costs money",
+]
