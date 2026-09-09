@@ -541,6 +541,31 @@ and would confirm the figure rather than move it. `--max-scenes` samples evenly
 across each shard's items instead of taking the first N, because how many blocks
 a scene touches depends on where its footprint falls on the shard.
 
+### The staged path, measured on an instance
+
+MEASURED on one `m6id.16xlarge` in us-west-2, 64 shards of `S30W065` at a
+360 px shard and 64 workers:
+
+| | |
+|---|---|
+| objects staged | **1,998** for 999 scenes, two bands each |
+| GETs | **1,998**, zero retries |
+| staged volume | **78.9 GiB in 91.9 s = 922 MB/s** |
+| per scene | 84.8 MB, against the 78.5 MB the disk guard assumes |
+| worst shard | **0.88 GiB**, 56.6 GiB across 64 slots on 247 GiB |
+| compute | 65.9 s for 64 shards |
+| composite | min 14.3 C, mean 47.7 C, max 65.2 C |
+
+One GET per object, on the wire, at fleet width. The memory model holds at 64
+workers: 56.6 GiB against the 247 the box reports, where the superseded model
+would have predicted 14 GiB and invited the configuration that killed an
+earlier instance.
+
+The staging rate is the figure this run existed to produce, and it came in
+below the 1.0 to 3.0 GB/s the cost section had assumed. Reading whole objects
+over a 1 ms round trip is bounded by something other than the 200 ms round trip
+that bounds the laptop, and 922 MB/s is what that something costs.
+
 ### Staging: fetch each object once
 
 The request count is not a property of the reader. It is a property of the shard
@@ -793,10 +818,12 @@ tile-scene pairs, and not on 895 copies of `S30W065`. That tile holds
 4,776 scenes against a mean of 3,445, so pricing the globe from it overstates
 the S3 line by 13%. `Corrections` withdraws the $2,067 that did.
 
-A mean tile holds 3,445 scenes, so staging writes **270 GB** and takes 90 to
-270 s at 3.0 to 1.0 GB/s. The staged column prices `m6id.16xlarge` at $3.7968/hr
-and a 360 px shard, which is the only configuration that fits the memory a
-worst-case shard needs.
+A mean tile holds 3,445 scenes. MEASURED on an `m6id.16xlarge` in us-west-2,
+staging moves **922 MB/s**, so a mean tile writes about 278 GB in **302 s**.
+That is below the 1.0 to 3.0 GB/s this document assumed before the run, and it
+adds about $100 across the fleet. The staged column prices `m6id.16xlarge` at
+$3.7968/hr and a 360 px shard, which is the configuration that fits the memory
+a worst-case shard needs.
 
 Only **769** of the 895 land tiles hold a scene with a thermal band. The other
 126 would boot, stage, compute, and write an all-nodata composite, so both
@@ -806,11 +833,11 @@ columns run 769 and the unstaged column is restated on the same basis.
 |---|---|---|
 | instance | `c6i.16xlarge` @ $2.72/hr | `m6id.16xlarge` @ $3.7968/hr |
 | shard | 512 px | 360 px |
-| EC2, on-demand | $671 - $776 | $1,116 - $1,408 |
-| EC2, spot | $234 - $271 (~$0.95/hr) | $309 - $384 (~$1.10/hr) |
+| EC2, on-demand | $671 - $776 | $1,288 - $1,434 |
+| EC2, spot | $234 - $271 (~$0.95/hr) | $375 - $418 (~$1.10/hr) |
 | S3 GET requests | **$1,718** | **$2.32** |
-| **total, on-demand** | **$2,389 - $2,494** | **$1,118 - $1,410** |
-| **total, spot** | **$1,952 - $1,989** | **$311 - $386** |
+| **total, on-demand** | **$2,389 - $2,494** | **$1,290 - $1,436** |
+| **total, spot** | **$1,952 - $1,989** | **$377 - $420** |
 
 Read the EC2 rows as DERIVED. Measurement supplies the per-tile compute and the
 tile count. The tail is a bracket, and the staged column adds 60 to 120 s per
@@ -818,16 +845,14 @@ tile for the fetch, and prices the disk it writes to. The S3 rows are
 arithmetic over `tile_scene_rows`: 154.9 opens x 2 bands x 4.77 GETs unstaged,
 against 2 GETs staged.
 
-Staging cuts the total by **1.7x to 2.2x on demand and 5.1x to 6.4x on spot**.
+Staging cuts the total by **1.7x to 1.9x on demand and 4.6x to 5.3x on spot**.
 EC2 rises, on a larger instance, at a smaller shard, and for longer, and still
 rises by far less than the requests it removes.
 
-The staged column has an unmeasured term at each end. Its staging phase is
-bracketed
-90 to 270 s at an assumed 3.0 to 1.0 GB/s, and its 12% compute penalty for a
-360 px shard is an upper bound taken at ten scenes. **No instance has yet
-completed a staged run**, so that column is arithmetic over measured parts
-rather than an observation.
+One term in the staged column stays a bracket. Per-tile compute is scaled from
+the 512 px full-tile run by the measured 12% penalty, because one 64-shard wave
+cannot be extrapolated: 25 shards took 59.3 s and the next 39 took 6.6,
+which is page-cache warmup on the staged files rather than a rate.
 
 Removing the per-tile search saves 38.1 s x 895 tiles, or 9.5 instance-hours.
 That is $26 on-demand and $9 spot, against an S3 line of $1,822. The search was
@@ -1236,12 +1261,19 @@ a zero count.
   raster, but the largest run through the new path is six scenes.
 - **The 895 tiles have never been priced against a real run.** The per-tile
   compute is measured and the tile count is measured. Their product is not.
-- **No staged run has completed on an instance.** Three `c6id.16xlarge`
-  attempts produced no composite: the first wrote its results to a serial
-  console that AWS discards on termination, the second stopped on a missing
-  `pyarrow`, and the third lost its workers to the memory model below. The
-  staged column in `Cost` is arithmetic over measured parts, not an
-  observation.
+- **One staged run has completed, over 64 shards of one tile.** It measured
+  the staging rate, confirmed the memory model at 64 workers, and wrote a
+  composite. It did not run a whole tile, and no fleet has run at all. Three
+  `c6id.16xlarge` attempts came before it and produced no composite: the first
+  wrote its results to a serial console that AWS discards on termination, the
+  second stopped on a missing `pyarrow`, and the third lost its workers to the
+  memory model below.
+- **frisky aborts at worker teardown.** After `part written` and the artifact
+  line, worker threads hit `panic in a function that cannot unwind` and abort.
+  The results are already on disk, so the run is not lost, but the process exit
+  code no longer reports what happened. A fleet driver that reads the exit
+  status would treat a finished tile as a failure. The same panic appears in
+  `Sharp edges in the cluster library`, there in the client during `gather`.
 - **The memory model is fitted to a noisy sample.** `measure_shard_memory.py`
   polls RSS every 20 ms, which misses peaks: 300 scenes read 0.98 GiB on one
   sweep and 1.40 on the next. 18 bytes per pixel-scene is the upper envelope of
