@@ -245,64 +245,22 @@ value.
 
 ## Tuning results that still hold
 
-From the department run at 711 scenes, before the shard design: **93.6 s of
-compute, 139.3 s end to end** on one `m6i.4xlarge` in `us-west-2`, reading
-`s3://usgs-landsat` in region, peaking at 31.8 GiB with every output pixel
-valid.
+The department run at 711 scenes preceded the shard design. Its measurements
+stand. The shard design supersedes most of the conclusions drawn from them.
 
-```bash
-uv run profile_lst_p95.py --source earth-search \
-  --load-chunk 1024 --chunk 512 \
-  --workers 8 --threads-per-worker 4 --memory-limit-gib 6
-```
+Reads dominate. `lwir11` and `qa_pixel` take 97.3% of `worker.exec.call` and the
+percentile takes 1.7%, with `worker.exec.gil` at 0.1%. The domestic link, not
+the reader stack, set the local ceiling: a bare `urllib` thread pool with no
+geospatial code in the path measured 5.53 MB/s, against 5.2 to 5.8 MB/s for the
+full `odc` pipeline. Larger read blocks cut wall time 4.3x at 24 scenes, from
+175.3 s to 40.5 s, by moving 2.8x less data rather than by moving it faster. The
+reduce half of that recommendation no longer applies, because `--chunk` never
+controlled the reduce block and the shard design has no reduce block. See
+`Corrections`. Round-trip latency from the laptop runs 7 to 21 ms to the
+Planetary Computer blob against 153 to 254 ms to `us-west-2`, so every
+production run belongs in region.
 
-### Reads dominate the pipeline
-
-| task | share of execution | | concurrency | MB/s | latency p50 |
-|---|---|---|---|---|---|
-| `lwir11` read | 78.3% | | 1 | 0.97 | 709 ms |
-| `qa_pixel` read | 19.0% | | 16 | 4.87 | 2,839 ms |
-| `custom_nanquantile` | 1.7% | | 32 | 5.53 | 4,400 ms |
-| everything else | 1.0% | | 64 | 5.42 | 8,108 ms |
-| | | | 128 | 9.30 | 11,988 ms |
-
-`worker.exec.gil` accounts for 0.1% of execution, so threads come close to free
-and the processor is not the constraint. Decoding the cloud-optimised GeoTIFFs
-costs 97.3% and the percentile 1.7%. The domestic link, not the reader stack,
-set the local ceiling. A bare `urllib` thread pool with no geospatial code in
-the path measured 5.53 MB/s at 32 concurrent range requests. The full `odc`
-pipeline measured 5.2 to 5.8 MB/s.
-
-### Load big blocks
-
-| read / reduce | compute | bytes moved | | endpoint | round-trip latency |
-|---|---|---|---|---|---|
-| 256 / 256 | 107.4 s | ~591 MB | | Planetary Computer, `landsateuwest` | 7 to 21 ms |
-| 512 / 512 | 60.7 s | ~334 MB | | AWS S3, `us-west-2` | 153 to 254 ms |
-| 1024 / 1024 | 48.1 s | ~236 MB | | AWS S3, `eu-central-1` | 47 ms |
-| **1024 / 256** | **40.5 s** | **211 MB** | | | |
-
-Large blocks speed up reads. The source uses Universal Transverse
-Mercator (UTM) and the destination does not, so every destination block needs a
-skewed source window plus an edge halo. Neighbouring blocks then re-fetch the
-same source tiles. At 24 scenes locally that is **175.3 s down to 40.5 s, a 4.3x
-speedup**, produced by moving 2.8x less data rather than by moving it faster.
-When bandwidth binds the job, move less. The reduce half of that recommendation no
-longer applies: `--chunk` never controlled the reduce block, and the shard
-design has no reduce block. See `Corrections`.
-
-Round Trip Time (RTT) decides the region. Running from Europe against
-`us-west-2` raises latency 12x while raising bandwidth 23x. Little's Law then
-puts a gigabit link at 33 concurrent streams for 1 MB requests, or about 509 for
-64 KB. Blocking readers give one request per thread, so that regime needs an
-async reader. **Running in region removes the problem instead**, at 1 to 11
-streams, which ordinary threads cover. `odc.loader` exposes
-`register_driver` and a `ReaderDriver` protocol if a future workload ever needs
-an async path.
-
-### More processes, not more cores
-
-All runs: 711 scenes, `m6i.4xlarge` (16 vCPU, 64 GiB), `us-west-2`,
+All runs below: 711 scenes, `m6i.4xlarge` (16 vCPU, 64 GiB), `us-west-2`,
 `s3://usgs-landsat` requester-pays, read chunk 1024, identical output.
 
 | run | workers x threads | reduce | compute | total | MB/s | peak RSS | tasks | CPU used |
@@ -316,30 +274,17 @@ All runs: 711 scenes, `m6i.4xlarge` (16 vCPU, 64 GiB), `us-west-2`,
 | **8 workers** | **8 x 4** | 512 | **93.6 s** | **139.3 s** | **65.9** | 31.83 GiB | 44,157 | **76%** |
 | control B | 4 x 8 | 512 | 112.6 s | 154.8 s | 54.6 | 30.20 GiB | 44,157 | 44 to 55% |
 
-The topology runs pinned total threads at 32 on the same 16 vCPUs, so only the
-process split moved. Processor use more than tripled and wall time halved. The
-cores had idled all along, because one process could not feed them: sends
-serialised behind one queue and memory concentrated into one spill manager.
-Consolidating to one worker eliminated worker-to-worker transfer, which zero
-`tcp.recv.queue`, `tcp.send.queue`, and `worker.transfer.recv` spans confirm. It
-still lost, with `worker.exec.call` rising from 1,728 s to 2,777 s for identical
-work. On the 2-worker run the wire moved 9.58 GiB in 12.8 s while
-queueing cost 470 s, and the send queue alone came to 118.9% of one worker's
-wall-clock capacity. The shard design supersedes this result, because a sharded
-run transfers 0 B.
+Total threads stayed at 32 on the same 16 vCPUs, so only the process split
+moved. Processor use more than tripled and wall time halved. One process could
+not feed the cores, because sends serialised behind one queue and memory
+concentrated into one spill manager. The shard design supersedes the result,
+because a sharded run transfers 0 B.
 
-### Run-to-run variance is 9.6 percent
-
-The control runs differed by 11.4 s on a mean of 118.3 s. That noise floor
-governs how to read every other number here.
-
-- The 8-worker gain of 24.7 s is 2.2x the noise. It holds, and processor
-  utilisation corroborates it mechanistically.
-- The chunk 256 versus 512 difference, 12.1 s or 8.4%, falls **inside** the
-  noise floor. This evidence does not make 512 better than 256.
-- The chunk 128 versus 256 difference of 59% falls far outside it and holds.
-
-Any single-run comparison in this work has about ten percent uncertainty.
+**Run-to-run variance is 9.6%.** The control runs differed by 11.4 s on a mean
+of 118.3 s. The 8-worker gain of 24.7 s is 2.2x that noise and holds. The
+chunk 256 versus 512 difference of 12.1 s falls inside it, so this evidence does
+not make 512 better than 256. Any single-run comparison here has about ten
+percent uncertainty.
 
 ## Cost
 
