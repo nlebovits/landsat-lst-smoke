@@ -714,19 +714,98 @@ observations against 173 elsewhere, where a 95th percentile carries no
 information. `qa_count` is the band that lets a consumer drop them, which is
 why it is written without a nodata value.
 
-### Cost
+### Cost, audited
 
-Four instances for roughly an hour of billed time, about **$10** for this run.
-The compute itself is 4.8 minutes; the rest is boot, dependency install, the
-3,910-scene STAC search on every machine, and `savez_compressed` writing a
-175 MB part file single-threaded.
+An earlier version of this section claimed about **$10** for the full-tile run,
+with 55 minutes of overhead against 4.8 minutes of compute. **Both figures were
+wrong.** They came from assuming each instance ran roughly an hour. AWS says
+otherwise:
 
-Three cheap fixes for a production loop, none of them the compute:
+| instance | launch (UTC) | terminate (UTC) | lifetime |
+|---|---|---|---|
+| `i-01140eb2b3090f95a` | 06:07:33 | 06:18:15 | **642 s** |
+| `i-0190abda85788d281` | 06:07:33 | 06:18:15 | 642 s |
+| `i-062dc4088e6d06202` | 06:07:33 | 06:18:15 | 642 s |
+| `i-072d85a880e92be10` | 06:07:33 | 06:18:15 | 642 s |
 
-- **Share the STAC search.** Every machine repeats a ~3 minute search of the
-  same 3,910 items. Doing it once and shipping the item list removes it.
-- **Write parts uncompressed.** `savez_compressed` on ~1.1 GB per slice took
-  longer than the compute did. `savez` trades disk for wall clock.
-- **Keep instances warm.** Boot plus install is ~160 s per machine per run.
+`c6i.16xlarge`, `ami-04678417fc39d7171`, us-west-2b, Linux on-demand, shared
+tenancy. **0.7133 instance-hours**, and EC2 bills Linux per second.
 
-With those, a full tile is closer to 6 minutes end to end and about $3.
+| item | basis | cost |
+|---|---|---|
+| EC2 | 0.7133 ih x $2.72/hr | **$1.94** |
+| EBS | 4 x 150 GB gp3 x 0.178 h x ($0.08/730) | $0.012 |
+| Public IPv4 | 4 x 0.178 h x $0.005 | $0.004 |
+| S3 GET, requester pays | 605,617 reads x 2 bands x R req x $0.0004/1000 | **$0.97 - $3.88** |
+| S3 to EC2 transfer, same region | | $0.00 |
+| **total** | | **$2.92 - $5.83** |
+
+Measured: instance lifetimes, and the 605,617 shard-scene reads from the shard
+plan. Estimated: the $2.72/hr list rate, which the Pricing API would not confirm
+for this SSO role (`AccessDenied`), though spot at $0.89-$1.03 is consistent
+with it; and R, the requests GDAL issues per windowed read, bracketed at 2 to 8
+rather than guessed. Cost Explorer is also `AccessDenied`, so no billed figure
+was available to check against.
+
+**Overhead is 2.2x, not 13x.** 10.7 minutes of lifetime against 4.8 minutes of
+compute leaves 5.9 minutes for boot, dependency install, the STAC search, the
+part write and the span query. The earlier claim that `savez_compressed` alone
+took 15-20 minutes is impossible inside a 642-second lifetime.
+
+**Quarter tile**, one instance, 562 s: $0.43 EC2 plus $0.24-$0.96 S3 =
+**$0.67 - $1.39**.
+
+### Global, 520 land tiles
+
+| | on-demand | spot (~$0.95/hr) |
+|---|---|---|
+| EC2 | $1,010 | $353 |
+| S3 GET | $505 - $2,020 | same |
+| **total** | **$1,515 - $3,030** | **$858 - $2,373** |
+
+Materially worse than the ~$610 quoted before, because **S3 request charges were
+omitted entirely and are comparable to or larger than compute**. On spot they
+dominate.
+
+That changes what to optimise. Request count is now a cost term, not only a
+latency term, so **larger `--load-chunk` values pay twice**: fewer, larger reads
+cut both wall clock and the GET bill. This is the opposite of the earlier
+conclusion here, and it follows from the line item that was missing.
+
+Remaining overhead is still worth removing, but it is minutes rather than tens
+of minutes: every machine repeats the same STAC search over 3,910 items, boot
+plus dependency install is ~160 s, and the part write is single-threaded
+`savez_compressed` over ~1.1 GB.
+
+## How to price a run, so this does not recur
+
+The $10 error came from inferring instance lifetime from how long the work felt,
+while polling loops returned instantly and made wall clock run far ahead of that
+sense. The fix is to never infer it. AWS records it exactly:
+
+```bash
+aws ec2 describe-instances --region us-west-2 \
+  --filters "Name=tag:purpose,Values=<tag>" \
+  --query 'Reservations[].Instances[].[InstanceId,InstanceType,LaunchTime,StateTransitionReason]' \
+  --output text
+```
+
+`LaunchTime` and the timestamp inside `StateTransitionReason` give the lifetime
+to the second, and terminated instances stay queryable for about an hour. Linux
+on-demand bills per second past a 60-second minimum, so the cost is
+`instance_seconds / 3600 x rate`, with no hourly rounding.
+
+Then price every line, not just EC2:
+
+| line | why it is easy to miss |
+|---|---|
+| EC2 | the only one usually remembered |
+| EBS | small here, but scales with volume size x lifetime |
+| Public IPv4 | $0.005/hr per address since 2024, per instance |
+| **S3 GET** | **requester-pays; at this read pattern it rivals or beats EC2** |
+| data transfer | free S3 to EC2 in-region, not free across regions |
+
+Separate measured from estimated in the write-up. Here the lifetimes and read
+counts were measured; the hourly rate and requests-per-read were estimated, and
+the Pricing API and Cost Explorer were both `AccessDenied` for this SSO role, so
+neither could confirm the total.
