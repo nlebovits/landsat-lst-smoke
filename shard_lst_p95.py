@@ -452,7 +452,13 @@ def parse_args(argv=None):
         action="store_true",
         help="also hit STAC, to report real scenes per shard",
     )
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    # Refuse an unreadable source here rather than after the shard plan is
+    # printed. `configure_read_env` runs late enough that a run could get a
+    # full budget report before learning its source cannot read a scene.
+    if args.source != SUPPORTED_READ_SOURCE:
+        configure_read_env(args.source)
+    return args
 
 
 def merge_parts(dirs, out_dir: Path) -> int:

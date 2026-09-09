@@ -173,8 +173,10 @@ Collection 2 Level 2, `LANDSAT_OT_C2_L2.parquet.gz`, updated daily.
 
 Both inventories describe the same archive. Over 2021 to 2025 inside +/-60
 degrees, with `eo:cloud_cover < 100` and Landsat 8 and 9, the bulk file yields
-**1,460,446** scenes. `tests/test_inventory_parity.py` enumerates the two sets
-over a bounded region and finds no item on either side that the other lacks.
+**1,460,446** scenes, of which **1,457,559** reach a land tile and go into the
+artifact. `tests/test_inventory_parity.py` enumerates the two sets over three
+bounded regions, one of them across the antimeridian, and finds no item on
+either side that the other lacks.
 
 The bulk file has no STAC assets and no `proj:*` fields. Each one is an
 exact function of columns it does carry, and each rule is checked against Earth
@@ -203,8 +205,9 @@ wrong for 112 of 400 scenes.
 The transform is **exact, not close**. The corner columns hold five decimal
 places, about 1 m, so a reprojected corner lands about a metre from the true
 origin. Landsat Level 2 products sit on a 30 m lattice offset by half a pixel,
-so snapping to that lattice recovers the origin exactly. Across all 1,460,446
-scenes the largest snap moved a corner **0.68 m**, against a 15 m half-pixel.
+so snapping to that lattice recovers the origin exactly. Across the 1,457,559
+scenes the artifact holds, the largest snap moved a corner **0.68 m**, against
+a 15 m half-pixel.
 `MAX_SNAP_METERS` stops the build at 7.5 m, so the reconstruction is checked on
 every row rather than argued for.
 
@@ -945,6 +948,11 @@ a zero count.
   the Null Island placeholder and the antimeridian slivers. The mask in
   `nlebovits/landsat-lst` does not, so a pixel inside either is composited
   rather than masked.
+- **The scene-centre offset is measured on Landsat 8 only.** 4.24 ms is
+  systematic across 401 scenes of Landsat 8 2021, which is the block that
+  carries microsecond timestamps. Landsat 9 publishes none, so the same
+  separation cannot be run on it, and the offset is assumed to hold there.
+  The 30 s guard covers 7,000 times the measured value either way.
 - **Landsat 7 is out of scope and untested.** The pipeline runs Landsat 8 and
   9, and the bulk file covers OLI/TIRS only. Adding Landsat 7 needs a second
   bulk file and a different thermal band.
@@ -980,6 +988,31 @@ a zero count.
 
 Every entry is a claim an earlier version stated as fact. Each shares one
 mistake: it presented an estimate as a measurement.
+
+**The antimeridian slivers selected 45 open-ocean cells, and the Null Island
+placeholder selected four: `N00E000`, `N00W005`, `S05E000`, `S05W005`.** Both
+wrong, and the table in the same section already disagreed with the first.
+`measure_land_defects.py` builds the tile list with each defect present and
+reports the difference. The slivers select **68** cells and the placeholder
+selects **3**: `N00E000`, `N00W005`, and `N05E000`. `S05E000` and `S05W005`
+were never reachable, because the buffered placeholder spans 0.2291 degrees
+around the origin and those cells begin five degrees south of it. `N05W005`
+lies under the disc and stays in the list, because it holds the coast of Côte
+d'Ivoire.
+
+**Forty-nine of the 966 cells had no Landsat coverage, which is what open ocean
+looks like from the catalogue.** True as stated and misleading as used. The
+corrections remove 71 cells, not 49. The other 22 hold scenes, because Landsat
+images open water. Coverage rules a cell out; it does not rule one in.
+
+**The bulk file truncates the acquisition start and stop to whole seconds, so
+the computed centre falls within 1.117 s of the published one.** Both halves
+fail. Precision is mixed: Landsat 8 2021 carries microseconds, 2022 is 53%
+whole-second, and everything later is whole-second. And truncating both
+timestamps moves their midpoint by strictly under a second, so 1.117 s cannot
+come from truncation and nothing reproduces it. Measured apart,
+`measure_scene_centre.py` finds a systematic 4.24 ms definitional offset on the
+untruncated rows and a worst case of 0.89 s on the truncated ones.
 
 **Steady state across 520 tiles, at $469 to $539 of on-demand EC2 and $1,202
 of S3.** Withdrawn. The 520 has no derivation in this repository or in
