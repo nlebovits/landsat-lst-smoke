@@ -21,9 +21,10 @@ Nothing crosses a worker boundary, so there is no rechunk and no shuffle.
 
     512 x 512 px x 1765 scenes x 13 bytes = 6.0 GB per shard
 
-Thirteen bytes, not four: the decoded float32 stack is one of five arrays that
-are live at once. See `shard_bytes`, which counted only that one until a fleet
-instance ran out of memory. The figure stays constant as the area grows. A quarter tile is 324 shards; a full tile is 1,296. Frisky schedules
+Thirteen bytes, not four: the decoded float32 stack is one of five arrays live
+at once. See `shard_bytes`,
+which counted only that one array until a fleet instance ran out of memory. The
+figure stays constant as the area grows. A quarter tile is 324 shards; a full tile is 1,296. Frisky schedules
 250,000-400,000 tasks/s, so the task count is free.
 
     uv run shard_lst_p95.py --bbox=-62.5,-35.0,-60.0,-32.5 \
@@ -220,8 +221,19 @@ def items_for_shard(shard: Shard, item_bboxes) -> list[int]:
 #:     valid   bool     1      the mask, kept for the monthly counts
 #:     copy    float32  4      nanpercentile partitions a copy, not in place
 #:
-#: MEASURED at 1.52 GiB peak RSS for 404 scenes at 512 px, against 1.28 GiB of
-#: array and about 0.25 GiB of interpreter, numpy and GDAL.
+#: CONFIRMED by `measure_shard_memory.py --mode memory`, which measures a
+#: slope of 12.7 bytes per pixel-scene over six scene counts at 512 px. 13 is
+#: the accounting figure and it sits just above the measurement, so it never
+#: under-predicts. Over-reserving costs worker slots an operator can add back;
+#: under-reserving cost a fleet instance its workers.
+#:
+#: Each point runs in a fresh interpreter, and it has to. glibc does not return
+#: freed arenas promptly, so measuring a second shard in the same process
+#: reports the high-water mark of the first: two contaminated sweeps put the
+#: slope at 17 and 18 and disagreed with each other by 18% at 700 scenes.
+#:
+#: The independent check is frisky. It reported 1.50 GiB per worker on the
+#: full-tile run, against 1.53 from this model at 404 scenes.
 SHARD_BYTES_PER_PIXEL_SCENE = 13
 
 #: Per-worker overhead outside the arrays, in GiB. From the same measurement.

@@ -6,10 +6,13 @@ and 1.85 GB for one shard's time stack. Two bugs in this area reached a
 four-instance run before rehearsal mode caught them, so each number is a test.
 """
 
+import json
 import sys
 from pathlib import Path
 
 import pytest
+
+ARTIFACTS = Path(__file__).resolve().parent.parent / "artifacts"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -156,20 +159,43 @@ class TestShardBytes:
     now a measurement rather than a figure quoted from the document.
     """
 
-    def test_it_matches_the_measured_peak(self):
-        """MEASURED: 1.52 GiB peak RSS, 404 scenes at 512 px, one process.
+    #: MEASURED by `measure_shard_memory.py --mode memory` at 512 px.
+    #: The committed sweep, read rather than copied, so the test and the
+    #: artifact cannot drift. Regenerate both together with
+    #: `measure_shard_memory.py --mode memory --out artifacts/shard_memory.json`.
+    SWEEP = [
+        (row["scenes"], row["peak_rss_gib"])
+        for row in json.loads((ARTIFACTS / "shard_memory.json").read_text())["rows"]
+    ]
 
-        `scratchpad/fdprobe.py` samples /proc/self/statm through one real
-        `process_shard` call over synthetic scenes. The model has to land on
-        that, because everything downstream is sized from it.
+    @pytest.mark.parametrize(("scenes", "measured"), SWEEP)
+    def test_it_never_under_predicts_the_measured_peak(self, scenes, measured):
+        """The model may sit above the sample. It may not sit below it.
+
+        Sampling RSS at 20 ms misses peaks, so the sweep is a lower bound on
+        the real high-water mark and 300 scenes reads below 200. A model fitted
+        through the middle of that would under-predict half the time, and
+        under-predicting is what cost a fleet instance its workers.
         """
-        assert shard_bytes(512, 404) == pytest.approx(1.52, abs=0.05)
+        assert shard_bytes(512, scenes) >= measured
+
+    def test_it_stays_close_at_the_scene_counts_a_fleet_reads(self):
+        """Conservative, not arbitrary. Slack here costs worker slots.
+
+        Bounded over 400 scenes and up, which is the range a tile presents:
+        199 to 971 per shard, with the densest tiles at the top. The lighter
+        samples are where missed peaks dominate, and 300 reading below 200 is
+        the proof that they do.
+        """
+        worst = max(shard_bytes(512, n) / m for n, m in self.SWEEP if n >= 400)
+        assert worst < 1.25
 
     def test_it_counts_every_array_that_is_live_at_once(self):
         """Five arrays, 13 bytes per pixel-scene, not the decoded stack alone.
 
         dn uint16 and qa uint16 at 2 each, celsius float32 at 4, the valid mask
-        at 1, and the copy `nanpercentile` partitions at 4.
+        at 1, and the copy `nanpercentile` partitions at 4. The measured slope
+        is 12.7, so the accounting figure sits just above it.
         """
         arrays = shard_bytes(512, 1765) - SHARD_FIXED_GIB
         float32_only = 512 * 512 * 1765 * 4 / 1024**3
