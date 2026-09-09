@@ -204,6 +204,31 @@ def _default_client():
     )
 
 
+def _release_page_cache(fh) -> None:
+    """Tell the kernel it can drop what we just wrote.
+
+    A quarter-tile slice stages about 157 GB. Writing it leaves that much clean
+    page cache behind, and the cluster starts immediately afterwards wanting
+    close to 100 GiB of worker heap on a 128 GiB box. Reclaim is supposed to
+    handle it. Under 64 processes allocating at once it does not have to keep
+    up, and a run that fits on paper dies at cluster start.
+
+    The workers re-read these files from NVMe within seconds, so the cache is
+    not worth holding: the read repopulates what it needs, under memory
+    pressure the kernel can account for.
+
+    Best effort. `posix_fadvise` is Linux-only and advisory everywhere.
+    """
+    if not hasattr(os, "posix_fadvise"):
+        return
+    try:
+        fh.flush()
+        os.fsync(fh.fileno())
+        os.posix_fadvise(fh.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        pass
+
+
 def _fetch_one(client, bucket: str, key: str, dest: Path) -> tuple[int, int]:
     """One object, one GET, streamed to `dest`.
 
@@ -229,6 +254,7 @@ def _fetch_one(client, bucket: str, key: str, dest: Path) -> tuple[int, int]:
             dest.parent.mkdir(parents=True, exist_ok=True)
             with dest.open("wb") as fh:
                 shutil.copyfileobj(resp["Body"], fh)
+                _release_page_cache(fh)
             written = dest.stat().st_size
             if written != expected:
                 dest.unlink(missing_ok=True)
