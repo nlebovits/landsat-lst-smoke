@@ -1514,6 +1514,51 @@ alone it would have reported 0 GETs. A zero reads like a pipeline that issues no
 requests rather than like a broken counter, so the script now exits non-zero on
 a zero count.
 
+### A worker that aborts, and a shard that does not arrive
+
+frisky aborts a worker process on a Rust panic it cannot unwind. One
+`m6id.16xlarge` run of the deep slice emitted five of them and the next run of
+the same configuration emitted none, so it is intermittent.
+
+**It fires at cluster start, not at teardown.** The console puts all five
+between the `worst shard` print and the `dashboard` print:
+
+```
+worst shard   1.54 GiB, 98.3 GiB across 64 slots
+thread '<unnamed>' (38475) panicked at library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+thread caused non-unwinding panic. aborting.
+    [x5]
+dashboard     http://127.0.0.1:45491
+```
+
+frisky 0.7.2 is the newest release on PyPI and publishes no repository URL, so
+there is no upgrade and nowhere to report it. The extension is a stripped
+release build.
+
+**It costs nothing, MEASURED.** `SIGABRT` on four of eight workers mid-run is
+what a non-unwinding panic does to a worker, and the run finished all 200
+shards with no errors and exit 0. frisky reschedules a dead worker's task.
+`tests/test_run_survives_worker_death.py` is that experiment.
+
+**What does lose a tile quietly is a shard that raises.** `process_shard`
+exceptions are caught per shard so one bad shard cannot kill the tile, which is
+right, and then `main` returned 0 regardless, which was not. A run that
+gathered one shard of 64 reported success and wrote a part file and a summary
+to match. A driver reading the exit code, or reading the summary without
+walking `shard_stats`, would call that tile done.
+
+So the run now answers in three places at once:
+
+| shards lost | console | `summary.json` | exit |
+|---|---|---|---|
+| none | nothing | `n_shards_errored: 0` | 0 |
+| some | `FAILED n of m shards errored` | `n_shards_errored: n` | **3** |
+
+Exit 3 still writes the summary and the part file, because the per-shard errors
+are the post-mortem. A driver may now key on the exit code, and `summary.json`
+records the same count for one that would rather read a file.
+
 ### Sharp edges in the cluster library
 
 - `memory_limit` takes an integer count of **bytes, per worker**. It does not
@@ -1552,18 +1597,9 @@ a zero count.
   wrote its results to a serial console that AWS discards on termination, the
   second stopped on a missing `pyarrow`, and the third lost its workers to the
   memory model below.
-- **frisky aborts worker processes at teardown, and the effect on the exit
-  code is unknown.** At `cluster.close()` the workers hit `panic in a function
-  that cannot unwind` and abort. The parent ran through them and finished its
-  work, printing `part written` and `artifacts` at console lines 441 and 442
-  after the last panic at 439, so `summary.json` was written and nothing was
-  lost.
-  Whether the parent then exits non-zero was not observed. The instance was
-  terminated about two minutes after that line, and AWS lags the serial console
-  by minutes, so the markers that would have said were discarded rather than
-  missing. A fleet driver should key on `summary.json` rather than on exit
-  status until someone watches one run to completion. The same panic appears in
-  `Sharp edges in the cluster library`, there in the client during `gather`.
+- **A worker aborting is survivable, and the panic is not the risk.** This
+  entry used to say frisky aborts workers at teardown and leaves the exit code
+  unknown. Both halves were wrong, and the section below has the measurements.
 - **The memory model's slope on real COGs is not tightly determined.** Forty
   points across four shard edges and two sources, and the model bounds every
   one. The synthetic sweeps at 360 and 512 px fit 13.20 and 12.67 bytes per

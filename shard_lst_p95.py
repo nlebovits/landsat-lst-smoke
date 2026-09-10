@@ -1202,6 +1202,10 @@ def main(argv=None) -> int:  # noqa: C901
         "tree_rss_peak_gib": tree_gib,
         "memory_demand_gib": memory_demand,
         "valid_fraction": float(valid.mean()),
+        # A driver needs one number, not a walk over shard_stats. A run that
+        # loses shards still writes a summary and still writes its parts, so
+        # without this the artifact of a half-finished tile looks finished.
+        "n_shards_errored": sum(1 for s in stats if "error" in s),
         "shard_stats": stats,
         # Which inventory answered this run. A composite is only reproducible
         # if the scene list behind it is named, so this travels with the
@@ -1229,6 +1233,12 @@ def main(argv=None) -> int:  # noqa: C901
         f"({compute_s / max(len(work), 1):.2f}s/shard of wall clock, not "
         f"per-shard duration)"
     )
+    n_errored = sum(1 for s in stats if "error" in s)
+    if n_errored:
+        print(
+            f"FAILED        {n_errored} of {len(work)} shards errored; this "
+            f"tile is incomplete"
+        )
     print(f"client RSS    {peak['rss']:.2f} GiB peak")
     if workers_gib:
         # The model against the measurement, on every run. This is the check
@@ -1299,7 +1309,16 @@ def main(argv=None) -> int:  # noqa: C901
             )
         )
     print(f"artifacts     {args.out_dir.resolve()}")
-    return 0
+    # 3 for a tile that lost shards, 0 for one that did not. It used to return
+    # 0 either way, so a run that gathered 1 shard of 64 reported success and
+    # wrote a part file and a summary to match.
+    #
+    # This is the signal a fleet driver needs, and the panic that prompted
+    # looking is not it. MEASURED: SIGABRT on four of eight workers mid-run,
+    # which is what a non-unwinding panic does to a worker, and all 200 shards
+    # still completed with no errors and exit 0. frisky reschedules the work.
+    # What loses a tile quietly is a shard that raises.
+    return 3 if n_errored else 0
 
 
 if __name__ == "__main__":
