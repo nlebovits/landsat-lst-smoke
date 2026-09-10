@@ -792,6 +792,44 @@ full-tile arrays, which are `uint16` of p95 and twelve `uint8` monthly counts:
 the demand, the machine, and the shard edge that would fit. `--force` spends
 the margin for an operator who knows the model runs 6 to 14 percent high.
 
+That guard reads the host it runs on, which is the right machine only once the
+run is already there. Planning happens somewhere else, so `--dry-run` takes
+`--target-memory-gib` and checks the budget against the machine the run is
+headed for. It exits 2 when the configuration would be refused, which prices a
+fleet before an instance exists:
+
+```bash
+uv run shard_lst_p95.py --tile S30W065 --shard 512 --workers 64 \
+    --shard-slice 690:754 --target-memory-gib 128 \
+    --dry-run --search-in-dry-run
+```
+
+```
+  worst shard: 2.80 GiB, 183.1 GiB across 64 slots   OVER by 55.1 GiB
+REFUSED on a 128 GiB machine
+```
+
+That is the configuration that killed the `c6id.16xlarge`, refused from a
+laptop before an instance starts.
+
+#### A slice is not the tile, and the light one was measured
+
+The dry run reports the slice's worst shard as well as the tile's. One machine
+runs one slice, so that slice's worst shard sets the memory it needs. On S30W065 at
+360 px the two differ by a factor of two:
+
+| | scenes per shard |
+|---|---|
+| `shards[0:64]`, the slice the `m6id` ran | min 199, p50 397, **max 404** |
+| `shards[987:1051]`, the deepest slice | min 203, p50 401, **max 820** |
+| whole tile | min 195, p50 408, p95 802, **max 820** |
+
+So the instance run that produced the figures above took a slice at half the
+tile's worst depth. A fleet machine at 360 px faces 102.6 GiB, not the 56.6 the
+lighter slice reported, and that is the number to size an instance from.
+`m6id.16xlarge` holds it with 2.4x to spare. A 512 px shard at the same depth
+needs 186.8 GiB, which fits that box and not a 128 GiB one.
+
 The number was already in this document. A full-tile run printed
 `memory 95.93 GiB / 102.40 GiB (94%)` across 64 workers, which is 1.50 GiB
 each, against a budget function reporting 0.39. It was written up as a tuning

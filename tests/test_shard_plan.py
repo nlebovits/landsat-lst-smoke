@@ -377,6 +377,88 @@ class TestWorkerMemoryGuard:
         assert "--shard 0" in str(exc.value)
 
 
+class TestTheDryRunChecksTheTargetMachine:
+    """Planning happens on a laptop. The run happens on an instance.
+
+    The guard in `main` reads the host it runs on, which is the right machine
+    only when the run is already there. A dry run priced against this laptop
+    would clear a configuration that an m6id refuses, or refuse one it would
+    take. `--target-memory-gib` names the machine instead.
+    """
+
+    def _dry_run(self, slice_artifact, tmp_path, *extra):
+        import shard_lst_p95
+
+        return shard_lst_p95.main(
+            [
+                "--tile",
+                "S30W065",
+                "--inventory-uri",
+                str(slice_artifact),
+                "--shard",
+                "512",
+                "--workers",
+                "64",
+                "--threads-per-worker",
+                "1",
+                "--dry-run",
+                "--search-in-dry-run",
+                "--out-dir",
+                str(tmp_path / "dry"),
+                *extra,
+            ]
+        )
+
+    def test_a_machine_that_cannot_hold_the_run_exits_two(
+        self, slice_artifact, tmp_path, capsys
+    ):
+        # 2, not 1, so a driver can tell a configuration that does not fit from
+        # a plan that failed to build.
+        code = self._dry_run(slice_artifact, tmp_path, "--target-memory-gib", "1")
+        assert code == 2
+        out = capsys.readouterr().out
+        assert "REFUSED on a 1 GiB machine" in out
+        assert "--shard" in out
+
+    def test_a_machine_with_room_exits_zero(self, slice_artifact, tmp_path, capsys):
+        code = self._dry_run(slice_artifact, tmp_path, "--target-memory-gib", "4096")
+        assert code == 0
+        assert "fits" in capsys.readouterr().out
+
+    def test_without_a_target_it_judges_nothing(self, slice_artifact, tmp_path, capsys):
+        # The host planning a fleet run is not the host doing it, so a dry run
+        # given no machine compares against none.
+        code = self._dry_run(slice_artifact, tmp_path)
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "fits" not in out
+        assert "REFUSED" not in out
+
+    def test_the_budget_counts_the_client_arrays(
+        self, slice_artifact, tmp_path, capsys
+    ):
+        # The client gathers into two full-tile arrays while the workers are
+        # still allocating, so the machine holds both at once.
+        self._dry_run(slice_artifact, tmp_path)
+        out = capsys.readouterr().out
+        assert f"+{client_bytes(18000, 18000):.1f} GiB of client output" in out
+
+    def test_it_reports_the_slice_a_machine_runs_not_the_whole_tile(
+        self, slice_artifact, tmp_path, capsys
+    ):
+        """The slice's worst shard is what that machine's memory holds.
+
+        On S30W065 at 360 px the tile's worst shard is 820 scenes deep and
+        `shards[0:64]` is 404. Reporting the tile figure overstates a light
+        slice, and reporting a light slice as the tile understates every other
+        machine in the fleet.
+        """
+        self._dry_run(slice_artifact, tmp_path, "--shard-slice", "0:8")
+        out = capsys.readouterr().out
+        assert "tile:" in out
+        assert "what this machine holds" in out
+
+
 class TestConfigureReadEnv:
     """Both the pipeline and measure_s3_requests.py call this one function.
 

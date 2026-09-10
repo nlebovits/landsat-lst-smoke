@@ -521,6 +521,20 @@ def stage_scenes_for(args, item_dicts, work_idx):
     return report
 
 
+def _target_verdict(args, per_shard_gib, slots, client_gib) -> str:
+    """`  fits` or `  OVER by N GiB` against `--target-memory-gib`.
+
+    A dry run plans for a machine that has not been launched, so the figure it
+    checks against has to be named rather than read from the host. Without the
+    flag there is nothing to compare and this adds nothing to the line.
+    """
+    if not args.target_memory_gib:
+        return ""
+    demand = per_shard_gib * slots + client_gib
+    over = demand - args.target_memory_gib
+    return f"   OVER by {over:.1f} GiB" if over > 0 else "   fits"
+
+
 def no_thermal_coverage(args, tile_id, bbox, n_scenes, dropped, run_provenance) -> int:
     """Record a tile that holds no thermal scene, and succeed.
 
@@ -682,6 +696,16 @@ def parse_args(argv=None):
         help="plan shards and print the budget; no cluster, no reads",
     )
     p.add_argument(
+        "--target-memory-gib",
+        type=float,
+        default=None,
+        help="RAM of the machine this run is planned for, in GiB. The dry run "
+        "checks the worker budget against it and exits 2 if the run would be "
+        "refused, so a configuration can be priced before an instance is "
+        "launched. Without it the dry run reads no machine at all, because the "
+        "host planning a fleet run is not the host doing it",
+    )
+    p.add_argument(
         "--search-in-dry-run",
         action="store_true",
         help="also hit STAC, to report real scenes per shard",
@@ -786,14 +810,15 @@ def main(argv=None) -> int:  # noqa: C901
     )
 
     if args.dry_run:
+        lo, hi_slice = 0, len(shards)
         if args.shard_slice:
             a, _, b = args.shard_slice.partition(":")
             lo = int(a) if a else 0
-            hi = int(b) if b else len(shards)
-            mine = shards[lo:hi]
+            hi_slice = int(b) if b else len(shards)
+            mine = shards[lo:hi_slice]
             px = sum(sh.ny * sh.nx for sh in mine)
             print(
-                f"slice         shards[{lo}:{hi}] -> {len(mine)} shards, "
+                f"slice         shards[{lo}:{hi_slice}] -> {len(mine)} shards, "
                 f"{px:,} px ({100 * px / (width * height):.1f}% of the tile)"
             )
             ys = [sh.y0 for sh in mine]
@@ -807,36 +832,70 @@ def main(argv=None) -> int:  # noqa: C901
         )
         print(f"coverage      {cover:,} px == raster, no gaps or overlap")
 
-        print("\nnaive budget, assuming every shard sees every scene:")
+        client_gib = client_bytes(width, height)
+        print(
+            f"\nnaive budget, assuming every shard sees every scene "
+            f"(+{client_gib:.1f} GiB of client output):"
+        )
         for n in (711, 1765, 3910):
             per = shard_bytes(args.shard, n)
             print(
                 f"  at {n:>5} scenes: {per:5.2f} GiB per shard, "
-                f"{per * concurrency:6.1f} GiB across {concurrency} slots"
+                f"{per * concurrency + client_gib:6.1f} GiB across "
+                f"{concurrency} slots{_target_verdict(args, per, concurrency, client_gib)}"
             )
 
+        refused = False
         if args.search_in_dry_run:
             if tile_id is None:
                 raise SystemExit("--search-in-dry-run needs --tile")
             items, item_bboxes, _ = load_tile_items(args, tile_id)
             counts = [len(items_for_shard(sh, item_bboxes)) for sh in shards]
+            # The slice is what one machine runs, and its worst shard is what
+            # that machine's memory has to hold. Reporting the tile's worst
+            # instead understates a light slice and overstates a heavy one: at
+            # 360 px, S30W065 runs 404 scenes deep at shards[0:64] and 820 at
+            # shards[987:1051].
+            mine_counts = counts[lo:hi_slice] if args.shard_slice else counts
             counts.sort()
-            hi = counts[-1]
             print(f"\nactual scenes per shard (from {len(items)} total):")
             print(
-                f"  min {counts[0]}  p50 {counts[len(counts) // 2]}  "
-                f"p95 {counts[int(len(counts) * 0.95)]}  max {hi}"
+                f"  tile:  min {counts[0]}  p50 {counts[len(counts) // 2]}  "
+                f"p95 {counts[int(len(counts) * 0.95)]}  max {counts[-1]}"
             )
-            per = shard_bytes(args.shard, hi)
+            worst = max(mine_counts) if mine_counts else 0
+            if args.shard_slice:
+                ordered = sorted(mine_counts)
+                print(
+                    f"  slice: min {ordered[0]}  p50 {ordered[len(ordered) // 2]}  "
+                    f"max {worst}   <- what this machine holds"
+                )
+            per = shard_bytes(args.shard, worst)
             print(
                 f"  worst shard: {per:.2f} GiB, "
-                f"{per * concurrency:.1f} GiB across {concurrency} slots"
+                f"{per * concurrency + client_gib:.1f} GiB across "
+                f"{concurrency} slots"
+                f"{_target_verdict(args, per, concurrency, client_gib)}"
             )
             print(
                 f"  total shard-scene reads: {sum(counts):,} "
                 f"vs {len(items) * len(shards):,} unfiltered "
                 f"({len(items) * len(shards) / max(sum(counts), 1):.0f}x saved)"
             )
+            if args.target_memory_gib:
+                try:
+                    worker_memory_guard(
+                        args.shard,
+                        worst,
+                        concurrency,
+                        width,
+                        height,
+                        total_bytes=int(args.target_memory_gib * GIB),
+                    )
+                except SystemExit as exc:
+                    print(f"\nREFUSED on a {args.target_memory_gib:g} GiB machine:")
+                    print(f"  {exc}")
+                    refused = True
 
         (args.out_dir / "shards.json").write_text(
             json.dumps(
@@ -856,7 +915,9 @@ def main(argv=None) -> int:  # noqa: C901
             )
         )
         print(f"\nplan written  {args.out_dir / 'shards.json'}")
-        return 0
+        # 2, not 1, so a driver can tell "this configuration does not fit" from
+        # a plan that failed to build at all.
+        return 2 if refused else 0
 
     # ---------------- execute ----------------
     # Checked here, not before the dry run: planning a slice must never be
