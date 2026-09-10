@@ -452,6 +452,43 @@ def stage_scenes_for(args, item_dicts, work_idx):
     return report
 
 
+def no_thermal_coverage(args, tile_id, bbox, n_scenes, dropped, run_provenance) -> int:
+    """Record a tile that holds no thermal scene, and succeed.
+
+    126 of the 895 land tiles are like this, and every one is an ocean tile
+    holding a small island. `thermal_href IS NULL` is exactly `OLI_TIRS_L2SR`
+    across all 3,083,129 inventory rows, and USGS emits that product where the
+    surface temperature algorithm has no usable emissivity. Compositing there
+    is not a failure. There is nothing to composite.
+
+    `fleet_plan.py` drops these tiles from the launch list, so a fleet never
+    reaches this path. An operator naming the tile by hand does, and gets the
+    same artifact a driver keys on. Writing nothing and exiting non-zero would
+    make a correct outcome read as a dead machine, which is the distinction
+    the barren-shard records exist to preserve.
+    """
+    summary = {
+        "status": "no-thermal-coverage",
+        "tile": tile_id,
+        "bbox": bbox,
+        "n_scenes_inventory": n_scenes,
+        "n_scenes": 0,
+        "scenes_dropped_no_thermal": dropped,
+        "inventory": run_provenance,
+    }
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    (args.out_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, default=str)
+    )
+    print(
+        f"no thermal    all {n_scenes:,} scenes of {tile_id} are OLI_TIRS_L2SR "
+        f"and carry no thermal band"
+    )
+    print("              nothing to composite; summary written, no parts")
+    print(f"artifacts     {args.out_dir.resolve()}")
+    return 0
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Sharded p95 LST composite: one shard, one task, no shuffle.",
@@ -811,8 +848,9 @@ def main(argv=None) -> int:  # noqa: C901
                 f"thermal band; dropped"
             )
         if not item_dicts:
-            print("no scenes carry a thermal band")
-            return 1
+            return no_thermal_coverage(
+                args, tile_id, bbox, len(items), dropped_no_thermal, run_provenance
+            )
 
     # Slice the PLAN, never the filtered list. Shards with no overlapping
     # scenes drop out of `work`, so slicing after filtering shifts every index
