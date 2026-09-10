@@ -53,17 +53,31 @@ TILE = "S30W065"
 pytestmark = [pytest.mark.packaging, pytest.mark.timeout(900)]
 
 
-def fresh_checkout(tmp_path):
+def fresh_checkout(tmp_path, *, with_mask=False):
     """The repository's scripts at a path `uv` has never resolved before.
 
     Mirrors what a fleet instance holds after `git clone`: the modules, the
     committed artifacts, and no `.venv`.
+
+    Args:
+        tmp_path: Where to build the checkout.
+        with_mask: Also write the two artifacts the output mask reads. The
+            buffered geometry is committed and is copied; the ASTER GED
+            observation counts are gitignored and several gigabytes of granules
+            behind, so a synthetic mosaic stands in. What is under test is
+            whether the inline block declares what the mask imports, and a
+            synthetic mosaic exercises the same imports as a real one.
     """
     work = tmp_path / "checkout"
     (work / "artifacts").mkdir(parents=True)
     for script in ROOT.glob("*.py"):
         shutil.copy2(script, work / script.name)
     shutil.copy2(SLICE, work / "artifacts" / SLICE.name)
+    if with_mask:
+        from conftest import LAND_GEOMETRY, write_numobs
+
+        shutil.copy2(LAND_GEOMETRY, work / "artifacts" / LAND_GEOMETRY.name)
+        write_numobs(work / "artifacts" / "aster_numobs.tif")
     return work
 
 
@@ -108,8 +122,15 @@ class TestShardRuntimeResolves:
         assert "total shard-scene reads" in proc.stdout
 
     def test_the_rehearsal_runs_on_the_inline_block_alone(self, tmp_path):
-        """The rehearsal starts a real cluster, so it covers the submit path."""
-        work = fresh_checkout(tmp_path)
+        """The rehearsal starts a real cluster, so it covers the submit path.
+
+        It builds the output mask too, which is the newest reason this test
+        exists. The mask reads a GeoPackage and a GeoTIFF, so the fleet's
+        inline block has to declare rasterio, geopandas, shapely and pyogrio.
+        A block that forgot one would pass every other test in the suite,
+        because the suite runs inside the union of every block.
+        """
+        work = fresh_checkout(tmp_path, with_mask=True)
         proc = run_script(
             work,
             "shard_lst_p95.py",
@@ -144,7 +165,10 @@ class TestTheFleetPlannerResolves:
     """
 
     def test_it_builds_a_plan_on_the_inline_block_alone(self, tmp_path):
-        work = fresh_checkout(tmp_path)
+        # The planner screens every tile for ASTER emissivity, so it imports
+        # the mask as well. Its inline block was the shortest in the
+        # repository before this and is the one a new import gets added around.
+        work = fresh_checkout(tmp_path, with_mask=True)
         shutil.copy2(
             ROOT / "artifacts" / "land_tiles.parquet",
             work / "artifacts" / "land_tiles.parquet",

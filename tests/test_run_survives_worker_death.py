@@ -72,6 +72,10 @@ def rehearsal(out_dir, slice_artifact, extra=()):
             "1",
             "--read-threads",
             "1",
+            # This module is about worker death, not about the mask, and it
+            # runs from a checkout that need not hold the ASTER GED artifact.
+            # `test_output_mask_run.py` covers the masked path, parts and all.
+            "--no-output-mask",
             "--out-dir",
             str(out_dir),
             *extra,
@@ -107,6 +111,7 @@ class TestAWorkerDyingDoesNotLoseTheTile:
                 "1",
                 "--read-threads",
                 "1",
+                "--no-output-mask",
                 "--out-dir",
                 str(out),
             ],
@@ -231,6 +236,7 @@ class TestAShardErringFailsTheRun:
                 "1",
                 "--read-threads",
                 "1",
+                "--no-output-mask",
                 "--out-dir",
                 str(out),
             ],

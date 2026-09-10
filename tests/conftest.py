@@ -14,6 +14,18 @@ reader handles what the writer produces.
 `synthetic_inventory` is built row by row from `make_row`. It is for the edge
 cases the archive does not happen to contain, such as a product with no thermal
 band or a footprint that wraps the antimeridian.
+
+The ASTER GED observation counts are synthetic throughout, and deliberately.
+Building the real artifact needs a NASA Earthdata Login and several gigabytes
+of granules, which no test can have. `numobs_artifact` writes a mosaic on the
+production grid with values this suite chooses, so a gap, a thin tier and a
+well-observed cell are all reachable, and none of it depends on a download.
+
+The buffered land geometry is real and committed. `artifacts/land_buffered.gpkg`
+is the file `land_tiles.py --write-geometry` produces, and its digest is the
+`land_geometry_sha256` that `artifacts/land_tiles.parquet` records. The mask
+checks the two against each other, so a synthetic geometry could not exercise
+that check at all.
 """
 
 from __future__ import annotations
@@ -41,6 +53,27 @@ FULL_ARTIFACT = ROOT / "artifacts" / "tile_scene_inventory.parquet"
 #: The tiles `make_slice.py` cuts. One dense mid-latitude tile, one temperate,
 #: one equatorial, and one on the antimeridian.
 SLICE_TILES = ("N05E010", "N40W075", "S15E175", "S30W065")
+
+#: The committed cut of the buffered land geometry, clipped to `SLICE_TILES`.
+#: Built by `tests/make_land_slice.py`. `masks.land_mask` only rasterises
+#: inside one tile's bbox, so a clipped geometry gives the same mask there as
+#: the full one, and `test_masks.py` asserts that rather than assuming it.
+LAND_GEOMETRY = ROOT / "artifacts" / "land_buffered_slice.gpkg"
+
+#: The full 16 MB geometry, which is gitignored for the same reason the
+#: inventory is. Only the checksum tie needs it, because `land_geometry_sha256`
+#: digests these bytes.
+FULL_LAND_GEOMETRY = ROOT / "artifacts" / "land_buffered.gpkg"
+
+needs_land_geometry = pytest.mark.skipif(
+    not LAND_GEOMETRY.exists(),
+    reason="run tests/make_land_slice.py to cut the geometry fixture",
+)
+
+needs_full_land_geometry = pytest.mark.skipif(
+    not FULL_LAND_GEOMETRY.exists(),
+    reason="run land_tiles.py --write-geometry to write the full geometry",
+)
 
 needs_full_artifact = pytest.mark.skipif(
     not FULL_ARTIFACT.exists(),
@@ -146,6 +179,141 @@ def synthetic_inventory(tmp_path):
         + [make_row("S35W065", i) for i in range(4)]
     )
     return write_inventory(tmp_path / "inv.parquet", rows)
+
+
+def write_numobs(path, *, value=8, gaps=(), lat_limit=None):
+    """A NumObs mosaic on the production grid, with chosen cells set to gap.
+
+    Args:
+        path: Where to write the GeoTIFF.
+        value: The observation count every cell starts at.
+        gaps: `(west, south, east, north)` boxes to zero, in degrees. A zero
+            count is the emissivity gap, so this is how a test builds one.
+        lat_limit: The mosaic's latitude limit. Defaults to production's.
+
+    Returns:
+        The path written.
+    """
+    import numpy as np
+
+    import aster_ged
+    import masks
+
+    lat_limit = aster_ged.LATITUDE_LIMIT if lat_limit is None else lat_limit
+    rows, cols = aster_ged.mosaic_shape(lat_limit)
+    mosaic = np.full((rows, cols), value, dtype="uint8")
+    cells = aster_ged.CELLS_PER_DEGREE
+    for west, south, east, north in gaps:
+        r0 = int(round((lat_limit - north) * cells))
+        r1 = int(round((lat_limit - south) * cells))
+        c0 = int(round((west + 180) * cells))
+        c1 = int(round((east + 180) * cells))
+        mosaic[r0:r1, c0:c1] = masks.GAP_NUMOBS
+    manifest = aster_ged.build_manifest(
+        {},
+        lat_limit=lat_limit,
+        buffer_meters=25000,
+        land_geometry_sha256=land_geometry_sha256(),
+        cell_count=0,
+    )
+    return aster_ged.write_numobs(path, mosaic, manifest, lat_limit=lat_limit)
+
+
+def land_geometry_sha256() -> str:
+    """The digest of the geometry the tests rasterise, which is the slice.
+
+    Production digests the full file. A test cannot, because the full file is
+    gitignored, so every gate the tests exercise is tied to the slice instead
+    and `land_tiles_for_slice` restamps the tile list to match. The tie is the
+    thing under test; which bytes it points at is not.
+    """
+    import masks
+
+    if not LAND_GEOMETRY.exists():
+        return "0" * 64
+    return masks.geometry_checksum(LAND_GEOMETRY)
+
+
+def _restamp_parquet(source, out, edit):
+    """Copy a Parquet file, changing only its schema metadata.
+
+    Row groups are copied one at a time and the schema is reused, so the
+    row-group-per-tile layout `row_groups_for_tile` prunes on survives, and so
+    do the int32 columns `pa.Table.from_pylist` would widen to int64.
+    """
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(source)
+    schema = pf.schema_arrow
+    meta = edit(dict(schema.metadata or {}))
+    stamped = schema.with_metadata(meta)
+    with pq.ParquetWriter(out, stamped, compression="zstd") as writer:
+        for i in range(pf.metadata.num_row_groups):
+            table = pf.read_row_groups([i])
+            writer.write_table(
+                table.replace_schema_metadata(meta), row_group_size=table.num_rows
+            )
+    return out
+
+
+@pytest.fixture(scope="session")
+def masked_plan_inputs(tmp_path_factory):
+    """The tile list and the inventory, both restamped for the geometry slice.
+
+    `fleet_plan` gates on one digest held in three places: the tile list, the
+    inventory, and the ASTER GED mosaic all record the land geometry they were
+    built from, and a plan whose three disagree is refused. Testing that
+    refusal needs all three to agree in the ordinary case, and the committed
+    geometry is a slice with a digest of its own.
+
+    So both artifacts are copied with `land_geometry_sha256` rewritten to the
+    slice's digest and every row left alone. The tie is what is under test.
+    Which bytes it points at is not.
+
+    Returns:
+        The `(land_tiles_uri, inventory_uri)` pair for `build_plan`.
+    """
+    tiles_source = ROOT / "artifacts" / "land_tiles.parquet"
+    if not tiles_source.exists():
+        pytest.skip(f"{tiles_source} is missing; run land_tiles.py")
+    if not SLICE_ARTIFACT.exists():
+        pytest.skip(f"{SLICE_ARTIFACT} is missing; run tests/make_slice.py")
+    digest = land_geometry_sha256()
+    work = tmp_path_factory.mktemp("plan-inputs")
+
+    def stamp_tiles(meta):
+        meta[b"land_geometry_sha256"] = digest.encode()
+        return meta
+
+    def stamp_inventory(meta):
+        manifest = json.loads(meta[b"manifest"])
+        manifest["land_geometry_sha256"] = digest
+        meta[b"manifest"] = json.dumps(manifest).encode()
+        return meta
+
+    tiles = _restamp_parquet(tiles_source, work / "land_tiles.parquet", stamp_tiles)
+    inventory = _restamp_parquet(
+        SLICE_ARTIFACT, work / "inventory_slice.parquet", stamp_inventory
+    )
+    return tiles, inventory
+
+
+@pytest.fixture(scope="session")
+def land_geometry():
+    """The committed buffered land geometry."""
+    if not LAND_GEOMETRY.exists():
+        pytest.skip("run tests/make_land_slice.py to cut the geometry fixture")
+    return LAND_GEOMETRY
+
+
+@pytest.fixture(scope="session")
+def numobs_artifact(tmp_path_factory):
+    """A NumObs mosaic that gives every tile emissivity everywhere.
+
+    Session-scoped. Writing one takes about a second, every test that reads it
+    only reads, and a per-test copy would put a minute on the suite.
+    """
+    return write_numobs(tmp_path_factory.mktemp("ged") / "aster_numobs.tif")
 
 
 @pytest.fixture(scope="session")

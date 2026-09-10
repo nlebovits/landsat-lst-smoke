@@ -42,6 +42,18 @@ def plan(slice_artifact):
     return fleet_plan.build_plan(LAND_TILES, slice_artifact)
 
 
+@pytest.fixture
+def masked_plan(masked_plan_inputs, numobs_artifact, land_geometry):
+    """A plan that also screens the tiles for ASTER emissivity."""
+    tiles, inventory = masked_plan_inputs
+    return fleet_plan.build_plan(
+        tiles,
+        inventory,
+        numobs_uri=numobs_artifact,
+        land_geometry_uri=land_geometry,
+    )
+
+
 class TestThermalRowsForTile:
     """The count `fleet_plan` filters on, from Parquet statistics."""
 
@@ -130,17 +142,25 @@ class TestARunPointedAtABarrenTile:
     """
 
     @pytest.fixture
-    def run(self, slice_artifact, tmp_path):
+    def run(self, slice_artifact, numobs_artifact, land_geometry, tmp_path):
         import json
 
         import shard_lst_p95
 
+        # The mask artifacts are named even though this tile never reaches the
+        # mask. The thermal filter empties the scene list first, and asserting
+        # that order is the point: a tile with no thermal scene must be
+        # recorded as such rather than as a tile the mask emptied.
         code = shard_lst_p95.main(
             [
                 "--tile",
                 BARREN_TILE,
                 "--inventory-uri",
                 str(slice_artifact),
+                "--numobs-uri",
+                str(numobs_artifact),
+                "--land-geometry-uri",
+                str(land_geometry),
                 "--workers",
                 "2",
                 "--threads-per-worker",
@@ -203,3 +223,167 @@ class TestNothingToLaunch:
 
         with pytest.raises(InventoryError, match="OLI_TIRS_L2SR"):
             fleet_plan.build_plan(LAND_TILES, path)
+
+
+class TestTheEmissivityScreen:
+    """The third reason a tile comes out, and the only one the inventory misses.
+
+    A tile can hold thousands of L2SP scenes and still publish nothing, because
+    USGS drops the ST band for a whole footprint but writes a within-scene gap
+    as fill. `thermal_rows_for_tile` sees the first kind exactly. Nothing in the
+    inventory sees the second.
+    """
+
+    def test_a_covered_tile_still_launches(self, masked_plan):
+        assert [t["tile_id"] for t in masked_plan["tiles"]] == list(LIVE_TILES)
+        assert masked_plan["tiles_without_emissivity"] == []
+
+    def test_a_tile_with_no_emissivity_over_land_is_dropped(
+        self, masked_plan_inputs, land_geometry, tmp_path
+    ):
+        from conftest import write_numobs
+
+        # S30W065 is interior South America and is all land, so removing its
+        # emissivity leaves it with nothing to publish.
+        gapped = write_numobs(
+            tmp_path / "numobs.tif", value=8, gaps=[(-65.0, -35.0, -60.0, -30.0)]
+        )
+        tiles, inventory = masked_plan_inputs
+        plan = fleet_plan.build_plan(
+            tiles,
+            inventory,
+            numobs_uri=gapped,
+            land_geometry_uri=land_geometry,
+        )
+        assert plan["tiles_without_emissivity"] == ["S30W065"]
+        assert "S30W065" not in [t["tile_id"] for t in plan["tiles"]]
+        assert plan["tile_count"] == len(LIVE_TILES) - 1
+
+    def test_a_partly_gapped_tile_still_launches(
+        self, masked_plan_inputs, land_geometry, tmp_path
+    ):
+        # Only zero comes out, as with the L2SR share. Half a tile of real
+        # emissivity is half a tile of real temperatures.
+        from conftest import write_numobs
+
+        gapped = write_numobs(
+            tmp_path / "numobs.tif", value=8, gaps=[(-65.0, -35.0, -62.5, -30.0)]
+        )
+        tiles, inventory = masked_plan_inputs
+        plan = fleet_plan.build_plan(
+            tiles,
+            inventory,
+            numobs_uri=gapped,
+            land_geometry_uri=land_geometry,
+        )
+        assert plan["tiles_without_emissivity"] == []
+        assert "S30W065" in [t["tile_id"] for t in plan["tiles"]]
+
+    def test_the_three_exclusions_stay_separate(self, masked_plan):
+        # No scene in the window, no thermal band, and no emissivity are three
+        # facts with three fixes. A tile in two lists would tell an operator to
+        # widen a window that would not help.
+        keys = (
+            "tiles_without_scenes",
+            "tiles_without_thermal",
+            "tiles_without_emissivity",
+        )
+        for i, first in enumerate(keys):
+            for second in keys[i + 1 :]:
+                assert not set(masked_plan[first]) & set(masked_plan[second])
+
+    def test_the_plan_names_the_artifact_behind_the_screen(self, masked_plan):
+        # A tile dropped for emissivity is only reproducible if the mosaic that
+        # dropped it is named.
+        ged = masked_plan["aster_ged"]
+        assert ged["short_name"] == "AG1km"
+        assert ged["version"] == "003"
+        assert masked_plan["numobs_uri"]
+
+    def test_a_plan_without_the_artifact_says_so(self, plan):
+        # `build_plan` runs the inventory checks alone when no mosaic is named,
+        # and records that it did. The driver always names one.
+        assert plan["tiles_without_emissivity"] == []
+        assert plan["aster_ged"] is None
+        assert plan["numobs_uri"] is None
+
+
+class TestTheMaskArtifactsHaveToAgree:
+    """One land geometry, three holders, one digest."""
+
+    def test_a_missing_geometry_stops_the_plan(self, masked_plan_inputs, tmp_path):
+        import masks
+
+        with pytest.raises(masks.MaskError, match="--write-geometry"):
+            tiles, inventory = masked_plan_inputs
+            fleet_plan.build_plan(
+                tiles,
+                inventory,
+                numobs_uri=tmp_path / "numobs.tif",
+                land_geometry_uri=tmp_path / "absent.gpkg",
+            )
+
+    def test_a_missing_mosaic_stops_the_plan(
+        self, masked_plan_inputs, land_geometry, tmp_path
+    ):
+        import aster_ged
+
+        with pytest.raises(aster_ged.GedError, match="uv run aster_ged.py"):
+            tiles, inventory = masked_plan_inputs
+            fleet_plan.build_plan(
+                tiles,
+                inventory,
+                numobs_uri=tmp_path / "absent.tif",
+                land_geometry_uri=land_geometry,
+            )
+
+    def test_a_mosaic_built_from_another_geometry_stops_the_plan(
+        self, masked_plan_inputs, land_geometry, tmp_path
+    ):
+        import aster_ged
+        import numpy as np
+
+        rows, cols = aster_ged.mosaic_shape(60)
+        manifest = aster_ged.build_manifest(
+            {},
+            lat_limit=60,
+            buffer_meters=25_000,
+            land_geometry_sha256="f" * 64,
+            cell_count=0,
+        )
+        path = aster_ged.write_numobs(
+            tmp_path / "other.tif", np.full((rows, cols), 8, "uint8"), manifest
+        )
+        with pytest.raises(aster_ged.GedError, match="land_geometry_sha256"):
+            tiles, inventory = masked_plan_inputs
+            fleet_plan.build_plan(
+                tiles,
+                inventory,
+                numobs_uri=path,
+                land_geometry_uri=land_geometry,
+            )
+
+    def test_the_driver_reports_rather_than_raises(
+        self, masked_plan_inputs, land_geometry, tmp_path, capsys
+    ):
+        # 895 machines are about to be launched from this output. A traceback
+        # is a worse answer than a line naming the artifact and the fix.
+        code = fleet_plan.main(
+            [
+                "--land-tiles-uri",
+                str(masked_plan_inputs[0]),
+                "--inventory-uri",
+                str(masked_plan_inputs[1]),
+                "--numobs-uri",
+                str(tmp_path / "absent.tif"),
+                "--land-geometry-uri",
+                str(land_geometry),
+                "--out",
+                str(tmp_path / "plan.json"),
+            ]
+        )
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "fleet not launched" in out
+        assert "uv run aster_ged.py" in out
+        assert not (tmp_path / "plan.json").exists()

@@ -285,6 +285,46 @@ def land_geometry_checksum(
     return digest.hexdigest()
 
 
+def write_land_geometry(
+    path: Path | str,
+    cache_dir: Path | str = DEFAULT_CACHE_DIR,
+    *,
+    buffer_meters: int = COASTAL_BUFFER_METERS,
+    drop_placeholder: bool = True,
+    fix_antimeridian: bool = True,
+) -> Path:
+    """Ship the buffered geometry as an artifact, beside the tile list.
+
+    The pixel mask is the second caller of this geometry, and it runs on a
+    fleet instance. `load_land_polygons` fetches Natural Earth when its cache
+    is cold, which puts a download inside a run that
+    `tests/test_no_stac_at_runtime.py` requires to be offline, and repeats a
+    buffer over ten thousand parts on every machine.
+
+    So the geometry travels with the tile list instead. The cached file is
+    copied byte for byte rather than rewritten, because `land_geometry_sha256`
+    is a digest of those bytes and a second `to_file` would produce a GeoPackage
+    that holds the same polygons under a different digest.
+
+    Returns:
+        The path written.
+    """
+    import shutil
+
+    kwargs = {
+        "buffer_meters": buffer_meters,
+        "drop_placeholder": drop_placeholder,
+        "fix_antimeridian": fix_antimeridian,
+    }
+    source = buffered_land_path(cache_dir, **kwargs)
+    if not source.exists():
+        load_land_polygons(cache_dir, **kwargs)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, path)
+    return path
+
+
 # --------------------------------------------------------------------------
 # The grid.
 # --------------------------------------------------------------------------
@@ -473,6 +513,15 @@ def main(argv=None) -> int:
     p.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     p.add_argument("--buffer-meters", type=int, default=COASTAL_BUFFER_METERS)
     p.add_argument("--lat-limit", type=int, default=LATITUDE_LIMIT)
+    p.add_argument(
+        "--write-geometry",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="also copy the buffered land geometry to PATH, so the pixel mask "
+        "reads an artifact instead of fetching Natural Earth on a fleet "
+        "instance. Conventionally artifacts/land_buffered.gpkg",
+    )
     args = p.parse_args(argv)
 
     checksum = land_geometry_checksum(args.cache_dir, buffer_meters=args.buffer_meters)
@@ -495,6 +544,11 @@ def main(argv=None) -> int:
     print(f"land geometry ne_10m_land, {args.buffer_meters} m Mercator buffer")
     print(f"              method v{LAND_METHOD_VERSION}, sha256 {checksum[:16]}")
     print(f"written       {args.out}")
+    if args.write_geometry:
+        written = write_land_geometry(
+            args.write_geometry, args.cache_dir, buffer_meters=args.buffer_meters
+        )
+        print(f"              {written} ({written.stat().st_size / 1e6:.1f} MB)")
     return 0
 
 

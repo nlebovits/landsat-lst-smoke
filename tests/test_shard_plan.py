@@ -332,9 +332,15 @@ class TestWorkerMemoryGuard:
     #: of 401, which is why the worst shard is not what 63 workers hold.
     DEEP_SLICE = [820] + [401] * 32 + [203] * 31
 
-    def test_the_client_holds_fourteen_bytes_an_output_pixel(self):
-        """uint16 of p95 plus twelve uint8 monthly counts. 4.2 GiB a tile."""
-        assert client_bytes(self.TILE_PX, self.TILE_PX) == pytest.approx(4.2, abs=0.05)
+    def test_the_client_holds_fifteen_bytes_an_output_pixel(self):
+        """uint16 of p95, twelve uint8 monthly counts, one bool of mask.
+
+        4.5 GiB a tile. The mask is built before staging so that a tile it
+        empties costs nothing, which makes it live for the whole run. At
+        fourteen bytes a 0.3 GiB array on the largest tile sat outside the
+        model, and the model is what a fleet instance is sized from.
+        """
+        assert client_bytes(self.TILE_PX, self.TILE_PX) == pytest.approx(4.5, abs=0.05)
 
     def test_the_configuration_that_killed_an_instance_is_refused(self):
         """64 workers, 512 px, a quarter tile of scenes, on 128 GiB.
@@ -370,7 +376,7 @@ class TestWorkerMemoryGuard:
             total_bytes=247 * self.GIB,
         )
         expected = sum(shard_bytes(360, n) for n in self.DEEP_SLICE)
-        assert demand == pytest.approx(expected + 4.2, abs=0.05)
+        assert demand == pytest.approx(expected + 4.5, abs=0.05)
 
     def test_it_sums_the_actual_depths_rather_than_the_worst(self):
         """The correction this guard needed, MEASURED at 2.77x.
@@ -398,7 +404,7 @@ class TestWorkerMemoryGuard:
         eight = worker_memory_guard(
             360, [820] * 64, 8, self.TILE_PX, self.TILE_PX, total_bytes=247 * self.GIB
         )
-        assert eight == pytest.approx(8 * shard_bytes(360, 820) + 4.2, abs=0.05)
+        assert eight == pytest.approx(8 * shard_bytes(360, 820) + 4.5, abs=0.05)
 
     def test_an_empty_slice_demands_only_the_client_arrays(self):
         demand = worker_memory_guard(

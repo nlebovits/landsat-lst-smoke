@@ -39,6 +39,11 @@ dev = [
   # metadata table never becomes a pandas frame.
   "duckdb>=1.0",
   "pyarrow>=16",
+  # The output mask. `aster_ged.py` reads the ASTER GED granules with h5py and
+  # fetches them with earthaccess, both at build time only; `masks.py` and the
+  # fleet read the GeoTIFF and the GeoPackage those produce.
+  "h5py",
+  "earthaccess",
   "pyproj",
   "shapely",
   "pyogrio",
