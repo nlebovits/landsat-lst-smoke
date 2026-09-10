@@ -552,14 +552,28 @@ MEASURED on one `m6id.16xlarge` in us-west-2, 64 shards of `S30W065` at a
 | GETs | **1,998**, zero retries |
 | staged volume | **78.9 GiB in 91.9 s = 922 MB/s** |
 | per scene | 84.8 MB, against the 78.5 MB the disk guard assumes |
-| worst shard | **0.88 GiB**, 56.6 GiB across 64 slots on 247 GiB |
 | compute | 65.9 s for 64 shards |
 | composite | min 14.3 C, mean 47.7 C, max 65.2 C |
+| machine memory | 247 GiB |
 
-One GET per object, on the wire, at fleet width. The memory model holds at 64
-workers: 56.6 GiB against the 247 the box reports, where the superseded model
-would have predicted 14 GiB and invited the configuration that killed an
-earlier instance.
+One GET per object, on the wire, at fleet width.
+
+DERIVED from `shard_bytes`, and printed by the same run: a worst shard of
+**0.88 GiB**, or 56.6 GiB across 64 slots. That is the model's own output. An
+earlier version of this section put it in the table above and then cited it as
+evidence for the model at 64 workers, which is circular. That run measured only
+the client process, because `shard_lst_p95.py` sampled `psutil.Process()` and
+none of its children.
+
+It samples the children now. `memory_sampler.py` polls the client and every
+worker, and each run writes `memory.csv` beside its summary along with a
+`workers_rss_peak_gib`. The next fleet run reports a measurement in place of a
+prediction. Until one does, the independent check is frisky's
+`memory 95.93 GiB / 102.40 GiB (94%)` across 64 workers on the full-tile run,
+which is 1.50 GiB each against 1.53 from the model at 512 px and 404 scenes.
+
+What the superseded model would have predicted for the same configuration is
+14 GiB, which is the configuration that killed an earlier instance.
 
 The staging rate is the figure this run existed to produce, and it came in
 below the 1.0 to 3.0 GB/s the cost section had assumed. Reading whole objects
@@ -707,13 +721,13 @@ CONFIRMED by `measure_shard_memory.py --mode memory` at 512 px:
 
 | scenes | 100 | 200 | 300 | 404 | 500 | 700 |
 |---|---|---|---|---|---|---|
-| peak RSS, GiB | 0.49 | 0.78 | 1.07 | 1.39 | 1.75 | 2.32 |
+| peak RSS, GiB | 0.49 | 0.78 | 1.11 | 1.42 | 1.74 | 2.33 |
 
-That is a slope of **12.73 bytes per pixel-scene** with a 0.18 GiB intercept, so
-the accounting figure of 13 sits just above the measurement and never
-under-predicts.
+Least squares over those six points gives a slope of **12.67 bytes per
+pixel-scene** with a 0.17 GiB intercept, so the accounting figure of 13 sits
+just above the measurement and never under-predicts.
 
-The same sweep at a 360 px shard measures **12.89**, a ratio of 1.013 against
+The same sweep at a 360 px shard measures **13.20**, a ratio of 1.042 against
 the 512 px figure. Bytes per pixel-scene do not depend on the edge, which is
 what makes the working set fall with its square and what lets a 360 px shard
 fit an instance a 512 px shard does not. Asserting that against the formula
@@ -721,6 +735,38 @@ would have been circular, so `tests/test_shard_plan.py` compares the two
 measured slopes. Erring high is the safe direction: over-reserving costs worker
 slots an operator can add back, and under-reserving cost a fleet instance its
 workers.
+
+Both slopes are least-squares fits, and the earlier figures of 12.73 and 12.89
+were not. They came from averaging consecutive differences, which agreed to
+1.3% while the differences being averaged ran 10.9 to 16.4 bytes. Six points
+do not support three decimal places. They do support the conclusion: the two
+edges agree to within a few percent, and the model bounds every point.
+
+#### The synthetic fixture is not the read the fleet does
+
+`--mode memory` writes one untiled raster at the shard's own edge. The fleet
+reads a window out of a 7800 x 7900 tiled COG, which allocates an intermediate
+the fixture never needs. `--mode timing` already refuses that fixture for
+exactly this reason, and the objection applies to memory as well.
+
+MEASURED against 100 real staged scenes of `S30W065`, at four shard edges:
+
+| source | 256 px | 360 px | 512 px | 1024 px |
+|---|---|---|---|---|
+| synthetic | | 13.20 | 12.67 | |
+| staged COGs | 14.75 | 14.55 | 14.01 | 11.20 |
+
+The model at 13 bytes plus 0.25 GiB bounds all 40 points, staged and
+synthetic. It is the slope that is not tightly determined: a repeat of the
+512 px staged sweep moved it from 14.45 to 14.01, and the 1024 px figure sits
+below every other. Real scenes make shard edge and how much data falls in the
+shard move together, which is the same confound the timing mode documents in
+the other direction.
+
+So the fixture understates the slope by something between nothing and 15%, and
+the margin absorbs it. A staged sweep deep enough to reach the 199 to 971
+scenes in a fleet shard would measure the slope where it matters. That costs
+about 34 GB of requester-pays egress, against the 8.5 GB spent here.
 
 Each point runs in a fresh interpreter, and it has to. glibc does not return
 freed arenas to the kernel promptly, so a second shard measured in the same
@@ -731,6 +777,20 @@ which is how an 18 reached this document for an hour.
 What it cost before the fix: a `c6id.16xlarge` reported a 25 GiB budget across
 64 slots for a real demand of 97, and lost ten worker processes to coredumps
 three minutes into the run. Nothing said `MemoryError`.
+
+#### The model now refuses a run it cannot fit
+
+Correcting `shard_bytes` did not stop that configuration. The corrected figure
+went to a `print` and to no comparison, so the same command would have printed
+a larger number and launched anyway.
+
+`worker_memory_guard` refuses it, and it runs before the first GET the way
+`staging.disk_guard` does, so a configuration that cannot fit does not buy its
+objects first. The demand is every worker's worst shard plus the client's two
+full-tile arrays, which are `uint16` of p95 and twelve `uint8` monthly counts:
+14 bytes an output pixel, or 4.2 GiB for an 18,000 px tile. The message names
+the demand, the machine, and the shard edge that would fit. `--force` spends
+the margin for an operator who knows the model runs 6 to 14 percent high.
 
 The number was already in this document. A full-tile run printed
 `memory 95.93 GiB / 102.40 GiB (94%)` across 64 workers, which is 1.50 GiB
@@ -783,6 +843,95 @@ SELECT count(*) FILTER (thermal_href IS NULL), count(*)
 FROM 'artifacts/tile_scene_inventory.parquet'
 ```
 
+#### Product type and thermal band select the same rows
+
+`thermal_href IS NULL` and `data_type = 'OLI_TIRS_L2SR'` match row for row over
+all 3,083,129 rows, with no exception in either direction:
+
+| data_type | thermal | rows |
+|---|---|---|
+| `OLI_TIRS_L2SP` | present | 2,905,875 |
+| `OLI_TIRS_L2SR` | absent | 177,254 |
+
+#### It follows the footprint, not the date
+
+Grouped by WRS path and row, 95.4% of footprints are all one product or all the
+other:
+
+| WRS path/row | count |
+|---|---|
+| always L2SP | 6,999 |
+| always L2SR | 769 |
+| mixed | 376 |
+| **total** | **8,144** |
+
+The 376 mixed footprints hold a flat L2SR rate by year: 4.3, 5.4, 5.0, 4.2 and
+5.2 percent for 2021 through 2025. Platform makes no difference either, at
+5.8% for landsat-8 against 5.7% for landsat-9.
+
+A static ancillary input explains the 95.4%. A change in the processing system
+does not, because it would show in the years. Nor does a sensor difference,
+because it would show in the platforms.
+
+#### DERIVED: ASTER GED
+
+The Collection 2 algorithm for surface temperature reads land emissivity from
+ASTER GED, which covers no ocean. A footprint with too little usable emissivity
+gets no ST band, and USGS writes the product as L2SR instead.
+
+This is inference from the algorithm's inputs. A check against the ASTER GED
+tile index is the step that would make it MEASURED, and this document does not
+make that check. The footprint determinism, the flat rate over time, and the
+geography below are all consistent with it.
+
+#### Severity across the land tiles
+
+| L2SR share | tiles |
+|---|---|
+| none | 500 |
+| under 5% | 203 |
+| 5% to 25% | 38 |
+| 25% to under 100% | 28 |
+| **100%** | **126** |
+
+Every tile at the top of that range is an island or a coast. The worst twenty:
+
+```
+N40W025 99.9%  Azores          S50E165 82.6%  NZ subantarctic
+S05E165 99.5%  Vanuatu         S30E155 73.9%  Coral Sea
+N20W115 99.3%  Revillagigedo   N10E070 71.4%  Maldives
+N15W110 99.0%  Revillagigedo   N55W180 70.5%  Aleutians
+S20E155 90.7%  Coral Sea       S10E055 66.4%  Seychelles
+S10E165 87.0%  Solomons        N25W165 59.6%  NW Hawaii
+N15E140 83.7%  Marianas        S10E115 50.5%  Indonesia
+N10E145 83.7%  Marianas        S15E055 49.8%  Seychelles
+```
+
+#### Gaps inside a scene are invisible here
+
+**Durban does not appear in this signal.** Tile `S30E030` holds 1,012 scenes
+and zero L2SR rows.
+
+The archive splits ASTER coverage loss into two kinds and the product type sees
+only one:
+
+| kind | how it appears | visible in the inventory |
+|---|---|---|
+| whole footprint | no ST band, product is L2SR | yes, exactly |
+| within a scene | ST band present, gap pixels written as fill | no |
+
+`lst_qa.not_fill` tests `thermal_dn != 0`, so a gap pixel inside an L2SP
+product is already excluded before the percentile. Those pixels are not wrong.
+Their time axis is thin.
+
+`qa_count` is the instrument for the second kind and every run already writes
+it: 12 by height by width, the count of valid observations per pixel per month.
+Summed over the month axis it is a per-pixel observation count for the whole
+window. One limitation, and it is small. `masked_celsius` returns
+`not_fill & qa_clear`, so `qa_count` merges the ASTER gap with cloud.
+Separating them needs a second count of `not_fill` alone, which `process_shard`
+computes already and discards.
+
 What that is worth depends on which path runs. Unstaged, each dropped row saves
 739 requests, and the global line falls by **$105**. Staged, it saves one GET
 per row and the global line falls by 7 cents. The reason to keep the filter is
@@ -815,10 +964,27 @@ tail = part write + span query, bracketed 60-240 s
 ```
 
 **126 of the 895 land tiles have no scene with a thermal band.** Only 769 do.
-The rest carry `OLI_TIRS_L2SR` products alone, so a run there boots, stages,
-computes, and writes an all-nodata composite. Filtering the tile list on the
-inventory saves about $189 and three hours of fleet time, and every figure
-below counts 769.
+The rest carry `OLI_TIRS_L2SR` products alone, so a run there would boot,
+stage, compute, and write an all-nodata composite. Every figure below counts
+769.
+
+`fleet_plan.py` filters them, and the filter costs nothing. The inventory holds
+one row group per tile, so `thermal_href` null-count statistics answer the
+question from Parquet metadata with no column data read at all. The plan names
+them in `tiles_without_thermal`, beside the existing `tiles_without_scenes`,
+because the two are different facts with different fixes: one moves if the
+window moves, and the other does not. Skipping them saves about $189 and three
+hours of fleet time. S15W180 alone holds 4,274 such scenes, about 350 GB of
+staging for nothing.
+
+Only a tile at zero comes out. A tile that is 90% L2SR still composites real
+temperatures from the rest, and 28 of the 895 sit between 25% and 100%.
+
+A run pointed at one of the 126 by hand writes a `summary.json` with status
+`no-thermal-coverage` and exits 0. Nothing to composite is a correct outcome,
+not a dead machine, and the advice below is to key a driver on `summary.json`
+rather than on exit status. Writing no artifact and exiting non-zero would have
+made that impossible for exactly these tiles.
 
 The global figures scale on `tile_scene_rows`, the **2,905,875** thermal-carrying
 tile-scene pairs, and not on 895 copies of `S30W065`. That tile holds
@@ -1287,11 +1453,21 @@ a zero count.
   missing. A fleet driver should key on `summary.json` rather than on exit
   status until someone watches one run to completion. The same panic appears in
   `Sharp edges in the cluster library`, there in the client during `gather`.
-- **The memory model is measured at two shard sizes and one grid.** Twelve
-  points at 360 and 512 px agree on 12.7 to 12.9 bytes per pixel-scene, and the
-  model never under-predicts any of them. Both sweeps use synthetic rasters at
-  EPSG:4326, so nothing reprojects; a UTM source warping into the output grid
-  could hold arrays this does not count.
+- **The memory model's slope on real COGs is not tightly determined.** Forty
+  points across four shard edges and two sources, and the model bounds every
+  one. The synthetic sweeps at 360 and 512 px fit 13.20 and 12.67 bytes per
+  pixel-scene. The staged sweeps on 100 real scenes fit 14.75, 14.55, 14.01 and
+  11.20 at 256, 360, 512 and 1024 px, and a repeat at 512 px moved 14.45 to
+  14.01. Real scenes make shard edge and data coverage move together, so the
+  scatter is partly the fixture. A staged sweep deep enough to reach the 199 to
+  971 scenes in a fleet shard would settle it, at about 34 GB of requester-pays
+  egress. Every sweep is EPSG:4326, so nothing reprojects. A UTM source warping
+  into the output grid could hold arrays this does not count.
+- **No fleet run has measured worker RSS yet.** `memory_sampler.py` is wired
+  into `shard_lst_p95.py` and writes `memory.csv` and `workers_rss_peak_gib` on
+  every run, but the instance runs recorded in this document predate it. Until
+  one run reports it, the only independent check on the model at 64 workers is
+  frisky's 1.50 GiB a worker on the full-tile run.
 - **The staging phase is the widest term in the cost.** The live check fetched
   12 objects. A mean tile needs 3,445 scenes and
   270 GB, and the 90 to 270 s bracket assumes 3.0 to 1.0 GB/s of combined
@@ -1497,6 +1673,7 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `sweep_throughput.py` | configuration sweep driver |
 | `cost_report.py` | the labelled, deterministic cost report |
 | `staging.py` | fetches each scene object once, and the L2SR filter |
+| `memory_sampler.py` | client and worker RSS, sampled from its own process |
 | `measure_shard_memory.py` | what a shard costs in memory, and shard size in compute |
 | `measure_s3_requests.py` | counts the S3 GET requests one shard issues |
 | `s3-requests/` | the request measurement: both shard sizes, and the priced tile |
