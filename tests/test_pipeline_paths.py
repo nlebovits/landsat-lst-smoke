@@ -233,6 +233,72 @@ class TestShardPath:
         # the fixture never added them.
         assert out["kept"]["n_scenes"] == out["dropped"]["n_scenes"] + n_extra
 
+    def test_an_absent_lwir11_asset_really_does_load_as_fill(self, tmp_path):
+        """The premise the test above assumes, against a real read.
+
+        The test above writes `LWIR_FILL_DN` into the array. It does not show
+        that an item with no `lwir11` asset at all produces that value, which
+        is what `tile_inventory.build_item` writes for an `OLI_TIRS_L2SR` row.
+        If `odc.stac` filled with zero-that-is-not-fill, or with something
+        else, then `--keep-scenes-without-thermal` would feed the percentile a
+        real temperature that no sensor measured.
+
+        Reads local GeoTIFFs, so it needs no network and no bucket.
+        """
+        import sys
+
+        import rasterio
+        from rasterio.transform import from_origin
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from measure_shard_memory import item_from_files
+
+        px, res, west, north = 32, 1 / 3600, -60.0, -33.9
+        paths = {}
+        for band, value in (("lwir11", 40000), ("qa_pixel", 0b1000000)):
+            path = tmp_path / f"{band}.TIF"
+            with rasterio.open(
+                path,
+                "w",
+                driver="GTiff",
+                height=px,
+                width=px,
+                count=1,
+                dtype="uint16",
+                crs="EPSG:4326",
+                transform=from_origin(west, north, res, res),
+            ) as ds:
+                ds.write(np.full((px, px), value, "uint16"), 1)
+            paths[band] = str(path)
+
+        complete = item_from_files("WITH_THERMAL", paths)
+        # What build_item writes when `thermal_href` is null: the asset is
+        # absent, not present and empty.
+        l2sr = item_from_files("NO_THERMAL", paths)
+        del l2sr["assets"]["lwir11"]
+        l2sr["properties"]["datetime"] = "2023-07-15T12:00:00Z"
+
+        shard = shard_lst_p95.Shard(
+            0, 0, 0, 0, px, px, (west, north - px * res, west + px * res, north)
+        )
+        kept = shard_lst_p95.process_shard(
+            shard, [complete, l2sr], "EPSG:4326", res, read_threads=1
+        )
+        dropped = shard_lst_p95.process_shard(
+            shard, [complete], "EPSG:4326", res, read_threads=1
+        )
+
+        # Two scenes went in and only one carried a temperature, so the L2SR
+        # product loaded as fill and `not_fill` removed it before the
+        # percentile and the monthly counts.
+        assert kept["n_scenes"] == 2
+        assert dropped["n_scenes"] == 1
+        assert np.array_equal(kept["lst_p95"], dropped["lst_p95"])
+        assert np.array_equal(kept["qa_count"], dropped["qa_count"])
+        # And the comparison covers real temperatures rather than two
+        # all-nodata rasters, which would match and prove nothing.
+        assert (dropped["lst_p95"] != shard_lst_p95.LST_NODATA_DN).any()
+
 
 class TestArrayGraphPath:
     """`build_graph`: the lazy xarray graph the profiling harness measures."""

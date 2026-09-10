@@ -21,6 +21,17 @@ instance shares. A new path is a cold key, which is the fleet's condition.
 
 Marked `packaging` because the run resolves against PyPI. It is opt-in for the
 same reason the network tests are.
+
+Scoped to the scripts a fleet instance runs: `shard_lst_p95.py` for the tile,
+`fleet_plan.py` before the fleet starts, and `cost_report.py` after it stops.
+`staging.py` and `tile_inventory.py` are covered through the first of those,
+because they are imported rather than run. The bench and measurement tools stay
+out: a missing dependency there costs an operator one retry, and the same
+mistake in a fleet script costs an instance.
+
+The module carries its own timeout. `addopts` sets `--timeout=60` for the
+default suite, and a cold `uv` resolve of `frisky`, `odc-stac` and `geopandas`
+can exceed that on its own, which would fail the test for the wrong reason.
 """
 
 from __future__ import annotations
@@ -36,7 +47,10 @@ ROOT = Path(__file__).resolve().parent.parent
 SLICE = ROOT / "artifacts" / "inventory_slice.parquet"
 TILE = "S30W065"
 
-pytestmark = pytest.mark.packaging
+#: The subprocess allows 900 s and pytest-timeout has to allow at least as
+#: much, or the CLI timeout is unreachable and a slow resolve reads as a
+#: dependency failure.
+pytestmark = [pytest.mark.packaging, pytest.mark.timeout(900)]
 
 
 def fresh_checkout(tmp_path):
@@ -119,6 +133,65 @@ class TestShardRuntimeResolves:
             f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
         )
         assert "ModuleNotFoundError" not in proc.stderr
+
+
+class TestTheFleetPlannerResolves:
+    """`fleet_plan.py` runs before the fleet, so its failure is the cheap one.
+
+    It is still a failure that stops everything, and its inline block is the
+    shortest in the repository, which is exactly the block a new import gets
+    added around without being declared.
+    """
+
+    def test_it_builds_a_plan_on_the_inline_block_alone(self, tmp_path):
+        work = fresh_checkout(tmp_path)
+        shutil.copy2(
+            ROOT / "artifacts" / "land_tiles.parquet",
+            work / "artifacts" / "land_tiles.parquet",
+        )
+        proc = run_script(
+            work,
+            "fleet_plan.py",
+            "--inventory-uri",
+            "artifacts/inventory_slice.parquet",
+            "--out",
+            str(tmp_path / "plan.json"),
+        )
+        assert proc.returncode == 0, (
+            f"fleet_plan.py cannot run on its own dependencies:\n"
+            f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        )
+        assert "ModuleNotFoundError" not in proc.stderr
+        assert "tiles         3 to launch" in proc.stdout
+
+
+class TestTheCostReportResolves:
+    """`cost_report.py` prices the run after it ends.
+
+    `pyproject` calls it standard library only. That claim is worth a check,
+    because it is the reason nothing installs anything for it.
+    """
+
+    def test_it_prices_a_recorded_run_on_the_inline_block_alone(self, tmp_path):
+        work = fresh_checkout(tmp_path)
+        proc = run_script(
+            work,
+            "cost_report.py",
+            # --tag is required and names an EC2 filter. With --recorded there
+            # is nothing to look up, so the tag never reaches the API.
+            "--tag",
+            "lst-smoke-test",
+            "--recorded",
+            "c6i.16xlarge:1:3600",
+            "--s3-get-requests",
+            "1998",
+        )
+        assert proc.returncode == 0, (
+            f"cost_report.py cannot run on its own dependencies:\n"
+            f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        )
+        assert "ModuleNotFoundError" not in proc.stderr
+        assert "GETs counted on the wire" in proc.stdout
 
 
 def test_python_is_new_enough_for_the_pinned_floor():

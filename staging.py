@@ -173,7 +173,7 @@ def disk_guard(manifest, stage_dir: Path) -> int:
     return need
 
 
-def _default_client():
+def _default_client(pool_size: int | None = None):
     """One boto3 S3 client, configured so this module can count and saturate.
 
     Two defaults have to go, and neither shows up in a small test.
@@ -190,7 +190,14 @@ def _default_client():
     `max_pool_connections` defaults to 10. The fetch pool runs up to 64
     threads, so 54 of them would queue behind a connection instead of pulling
     an object, and a fleet-sized slice would take six times longer than the
-    network needs.
+    network needs. `pool_size` comes from the pool that will use it, because a
+    caller passing more threads than the default would meet the same queue
+    this argument exists to remove.
+
+    One client, shared. `botocore.Session.create_client` is not thread-safe,
+    and building one per thread also multiplies the connection pool by the
+    thread count. The client itself is thread-safe for calls, which is the
+    part that matters here.
     """
     import boto3
     from botocore.config import Config
@@ -199,7 +206,7 @@ def _default_client():
         "s3",
         config=Config(
             retries={"total_max_attempts": 1, "mode": "standard"},
-            max_pool_connections=_default_threads(),
+            max_pool_connections=pool_size or _default_threads(),
         ),
     )
 
@@ -306,21 +313,25 @@ def stage_scenes(
         rather than derived.
     """
     stage_dir = Path(stage_dir)
+    # Whether this call owns the directory. `cleanup` removes what it is
+    # given, and an operator pointing --stage-dir at an NVMe mount rather than
+    # a directory on it would otherwise lose everything else there.
+    pre_existing = stage_dir.exists() and any(stage_dir.iterdir())
     stage_dir.mkdir(parents=True, exist_ok=True)
     manifest = staging_manifest(item_dicts, indices)
     if not manifest:
         return _empty_report(stage_dir)
     reserved = disk_guard(manifest, stage_dir)
 
-    local = threading.local()
+    n_threads = threads or _default_threads()
     counters = {"bytes": 0, "requests": 0}
     lock = threading.Lock()
+    # One client for every thread. Creating one per thread races inside
+    # botocore and gives each thread its own connection pool.
+    client = client_factory(n_threads)
 
     def fetch(entry):
         item_id, band, href = entry
-        client = getattr(local, "client", None)
-        if client is None:
-            client = local.client = client_factory()
         bucket, key = split_s3_uri(href)
         dest = stage_dir / item_id / f"{band}{_suffix(key)}"
         written, attempts = _fetch_one(client, bucket, key, dest)
@@ -338,7 +349,7 @@ def stage_scenes(
         return item_id, band, str(dest.resolve())
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=threads or _default_threads()) as pool:
+    with ThreadPoolExecutor(max_workers=n_threads) as pool:
         placed = list(pool.map(fetch, manifest))
     elapsed = time.perf_counter() - t0
 
@@ -358,6 +369,9 @@ def stage_scenes(
         "retries": counters["requests"] - len(manifest),
         "reserved_bytes": reserved,
         "stage_dir": str(stage_dir),
+        # `cleanup` reads this. A directory that held files before staging
+        # started belongs to someone else.
+        "owns_stage_dir": not pre_existing,
     }
 
 
@@ -385,13 +399,28 @@ def _empty_report(stage_dir: Path) -> dict:
         "retries": 0,
         "reserved_bytes": 0,
         "stage_dir": str(stage_dir),
+        "owns_stage_dir": True,
     }
 
 
-def cleanup(stage_dir: Path) -> None:
+def cleanup(stage_dir: Path, *, owned: bool = True) -> None:
     """Remove the staged files.
 
     Steady state runs one tile per instance, back to back. A stage directory
     left behind fills the disk on the second tile.
+
+    `owned` is what `stage_scenes` reports. This removes a whole directory
+    tree, and `FINDINGS` tells an operator to point `--stage-dir` at an NVMe
+    mount. A path one level up from the documented `/mnt/nvme/stage` would take
+    everything else on the volume with it, so a directory that already held
+    files is left alone and named.
     """
+    stage_dir = Path(stage_dir)
+    if not owned:
+        print(
+            f"stage         {stage_dir} held files before this run and is left "
+            f"in place. Remove the staged scenes by hand, or point --stage-dir "
+            f"at a directory this run creates."
+        )
+        return
     shutil.rmtree(stage_dir, ignore_errors=True)

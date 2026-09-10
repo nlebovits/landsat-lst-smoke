@@ -171,7 +171,7 @@ class TestStageScenes:
         fake = FakeS3()
 
         report = staging.stage_scenes(
-            items, [0, 1, 2] * 155, tmp_path, threads=4, client_factory=lambda: fake
+            items, [0, 1, 2] * 155, tmp_path, threads=4, client_factory=lambda _n: fake
         )
 
         assert len(fake.calls) == 6
@@ -183,7 +183,7 @@ class TestStageScenes:
         items, _ = real_items
         fake = FakeS3()
         staging.stage_scenes(
-            items, [0], tmp_path, threads=2, client_factory=lambda: fake
+            items, [0], tmp_path, threads=2, client_factory=lambda _n: fake
         )
         assert set(fake.payers) == {"requester"}
 
@@ -193,7 +193,7 @@ class TestStageScenes:
         fake = FakeS3()
 
         staging.stage_scenes(
-            items, [0], tmp_path, threads=2, client_factory=lambda: fake
+            items, [0], tmp_path, threads=2, client_factory=lambda _n: fake
         )
 
         after = items[0]["assets"]["lwir11"]
@@ -211,7 +211,7 @@ class TestStageScenes:
         items, _ = real_items
         fake = FakeS3(payload=b"x" * 4096)
         staging.stage_scenes(
-            items, [0], tmp_path, threads=2, client_factory=lambda: fake
+            items, [0], tmp_path, threads=2, client_factory=lambda _n: fake
         )
         assert Path(items[0]["assets"]["qa_pixel"]["href"]).read_bytes() == b"x" * 4096
 
@@ -223,7 +223,7 @@ class TestStageScenes:
 
         with pytest.raises(staging.StagingError, match="reached disk"):
             staging.stage_scenes(
-                items, [0], tmp_path, threads=1, client_factory=lambda: fake
+                items, [0], tmp_path, threads=1, client_factory=lambda _n: fake
             )
 
         assert not list(tmp_path.rglob("*.TIF"))
@@ -235,7 +235,7 @@ class TestStageScenes:
         fake = FakeS3(fail_first=1)
 
         report = staging.stage_scenes(
-            items, [0], tmp_path, threads=1, client_factory=lambda: fake
+            items, [0], tmp_path, threads=1, client_factory=lambda _n: fake
         )
 
         assert report["objects"] == 2
@@ -247,13 +247,15 @@ class TestStageScenes:
         fake = FakeS3(fail_first=staging.MAX_ATTEMPTS)
         with pytest.raises(staging.StagingError, match="attempts"):
             staging.stage_scenes(
-                items, [0], tmp_path, threads=1, client_factory=lambda: fake
+                items, [0], tmp_path, threads=1, client_factory=lambda _n: fake
             )
 
     def test_no_indices_fetches_nothing(self, real_items, tmp_path):
         items, _ = real_items
         fake = FakeS3()
-        report = staging.stage_scenes(items, [], tmp_path, client_factory=lambda: fake)
+        report = staging.stage_scenes(
+            items, [], tmp_path, client_factory=lambda _n: fake
+        )
         assert fake.calls == []
         assert report["objects"] == 0
 
@@ -281,6 +283,38 @@ class TestTheDefaultClient:
         # on a connection rather than on the network.
         client = staging._default_client()
         assert client.meta.config.max_pool_connections >= staging._default_threads()
+
+    def test_the_pool_follows_the_thread_count_it_was_given(self):
+        # Reading the module default instead would reintroduce the queue for
+        # any caller that asks for more threads than the default.
+        client = staging._default_client(128)
+        assert client.meta.config.max_pool_connections == 128
+
+
+class TestOneClientForEveryThread:
+    """`botocore.Session.create_client` is not thread-safe.
+
+    A client per thread also gives each thread its own connection pool, so 64
+    threads would hold up to 4,096 sockets against the 64 the config asks for.
+    The client is thread-safe for calls, which is the part staging needs.
+    """
+
+    def test_the_factory_is_called_once(self, real_items, tmp_path):
+        made = []
+
+        def factory(pool_size):
+            made.append(pool_size)
+            return FakeS3()
+
+        staging.stage_scenes(
+            items := real_items[0],
+            range(3),
+            tmp_path,
+            threads=8,
+            client_factory=factory,
+        )
+        assert items  # the fixture supplied something to fetch
+        assert made == [8], "one client, built with the pool it will use"
 
 
 class TestDiskGuard:
@@ -334,3 +368,33 @@ class TestCleanup:
 
     def test_a_directory_that_is_already_gone_is_not_an_error(self, tmp_path):
         staging.cleanup(tmp_path / "never-existed")
+
+    def test_a_directory_this_run_did_not_create_survives(self, tmp_path):
+        # FINDINGS tells an operator to point --stage-dir at an NVMe mount.
+        # One level up from the documented path is the whole volume, and this
+        # removes a tree.
+        target = tmp_path / "nvme"
+        target.mkdir()
+        (target / "somebody-elses.db").write_bytes(b"x")
+
+        staging.cleanup(target, owned=False)
+
+        assert (target / "somebody-elses.db").exists()
+
+    def test_staging_reports_whether_it_created_the_directory(
+        self, real_items, tmp_path
+    ):
+        items, _ = real_items
+        fresh = tmp_path / "fresh"
+        report = staging.stage_scenes(
+            items, [0], fresh, threads=2, client_factory=lambda _n: FakeS3()
+        )
+        assert report["owns_stage_dir"] is True
+
+        occupied = tmp_path / "occupied"
+        occupied.mkdir()
+        (occupied / "prior.txt").write_bytes(b"x")
+        report = staging.stage_scenes(
+            items, [1], occupied, threads=2, client_factory=lambda _n: FakeS3()
+        )
+        assert report["owns_stage_dir"] is False

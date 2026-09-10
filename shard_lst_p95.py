@@ -1071,7 +1071,7 @@ def main(argv=None) -> int:  # noqa: C901
     # A failed run keeps them, which is what a rerun and a post-mortem both
     # want; the disk guard on the next run says so rather than filling up.
     if stage_report is not None and not args.keep_staged:
-        staging.cleanup(args.stage_dir)
+        staging.cleanup(args.stage_dir, owned=stage_report.get("owns_stage_dir", True))
 
     valid = lst_out != LST_NODATA_DN
     cel = (
