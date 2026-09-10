@@ -178,13 +178,35 @@ class TestTheMergeInheritsTheMask:
     def test_the_merged_raster_is_masked(self, merged, numobs_artifact, land_geometry):
         _, tile = merged
         lst = np.load(tile / "lst_p95_dn.npy")
-        keep, _ = masks.output_mask(
+        keep, _, _ = masks.output_mask(
             shard_lst_p95.tile_bounds(COASTAL),
             PPD,
             numobs_uri=numobs_artifact,
             land_geometry_uri=land_geometry,
         )
         assert not (lst[~keep] != LST_NODATA_DN).any()
+
+    def test_the_merge_records_the_rule_every_part_agreed_on(self, merged):
+        _, tile = merged
+        report = json.loads((tile / "merge.json").read_text())
+        rule = report["mask_rule"]
+        assert rule["gap_hot_threshold_c"] == masks.GAP_HOT_THRESHOLD_C
+        assert rule["gap_buffer_cells"] == masks.GAP_BUFFER_CELLS
+
+    def test_parts_masked_under_different_rules_are_refused(
+        self, merged, tmp_path, numobs_artifact, land_geometry
+    ):
+        # Two machines that masked the same tile differently make one raster
+        # that no single rule describes. The merge stops rather than blending.
+        _, tile = merged
+        first = tmp_path / "a"
+        second = tmp_path / "b"
+        rehearse(first, COASTAL, numobs_artifact, land_geometry)
+        rehearse(second, COASTAL, numobs_artifact, land_geometry, "--no-output-mask")
+        with pytest.raises(SystemExit, match="different rules"):
+            shard_lst_p95.main(
+                ["--merge", str(first), str(second), "--out-dir", str(tmp_path / "m")]
+            )
 
     def test_the_merged_bands_agree(self, merged):
         _, tile = merged
@@ -215,18 +237,129 @@ class TestAnInlandTileKeepsEverything:
         assert summary["mask"]["pixels_kept"] == summary["mask"]["pixels_total"]
 
 
-class TestATileTheMaskEmpties:
-    """A tile can hold thermal scenes and still publish nothing."""
+class TestASliceSaysWhatItsCountsDescribe:
+    """Some counts are tile-wide and some are this machine's, so say which.
+
+    `output_mask` runs over the whole bbox in every run, slice or not, so
+    `pixels_total` and its siblings are the same number on every machine.
+    `valid_removed_by_mask` counts only the pixels this process assembled.
+    Summing the first group across four slices would multiply the tile by four.
+    """
+
+    @pytest.fixture(scope="class")
+    def slice_run(self, tmp_path_factory, numobs_artifact, land_geometry):
+        out = tmp_path_factory.mktemp("slice")
+        return rehearse(
+            out, INLAND, numobs_artifact, land_geometry, "--shard-slice", "8:16"
+        )
+
+    def test_the_scope_names_the_slice(self, slice_run):
+        _, summary = slice_run
+        assert summary["mask"]["scope"] == "shards[8:16]"
+
+    def test_the_tile_wide_counts_still_describe_the_tile(
+        self, slice_run, run_whole_tile
+    ):
+        # Identical on every machine, which is what makes them unsummable.
+        _, sliced = slice_run
+        _, whole, _ = run_whole_tile
+        for field in ("pixels_total", "pixels_water", "pixels_kept"):
+            assert sliced["mask"][field] == whole["mask"][field]
+
+    def test_a_whole_tile_run_says_so(self, run_whole_tile):
+        _, summary, _ = run_whole_tile
+        assert summary["mask"]["scope"] == "tile"
+
+    @pytest.fixture(scope="class")
+    def run_whole_tile(self, tmp_path_factory, numobs_artifact, land_geometry):
+        out = tmp_path_factory.mktemp("whole")
+        return rehearse(out, INLAND, numobs_artifact, land_geometry) + (out,)
+
+
+class TestATileOfNothingButGapStillPublishes:
+    """The gap region is not a removal, so it cannot empty a tile.
+
+    An earlier build dropped a tile whose every cell was a gap, on the reading
+    that Collection 2 published nothing there. It publishes plenty: USGS
+    interpolates emissivity across a gap cell and retrieves a temperature, and
+    only the ones that fail upward come out.
+    """
 
     @pytest.fixture(scope="class")
     def run(self, tmp_path_factory, land_geometry):
-        out = tmp_path_factory.mktemp("empty")
+        out = tmp_path_factory.mktemp("allgap")
         gapped = write_numobs(
             out.parent / "all_gap.tif",
             value=8,
             gaps=[(-65.0, -35.0, -60.0, -30.0)],
         )
         return rehearse(out, INLAND, gapped, land_geometry) + (out,)
+
+    def test_it_succeeds(self, run):
+        code, _, _ = run
+        assert code == 0
+
+    def test_every_pixel_is_inside_the_gap_region(self, run):
+        _, summary, _ = run
+        mask = summary["mask"]
+        assert mask["pixels_emissivity_gap"] == mask["pixels_total"]
+
+    def test_the_tile_still_keeps_its_pixels(self, run):
+        _, summary, _ = run
+        mask = summary["mask"]
+        assert mask["pixels_kept"] == mask["pixels_total"]
+        assert summary.get("status") != "no-unmasked-pixels"
+
+    def test_it_writes_a_part(self, run):
+        _, _, out = run
+        assert list(out.glob("part-*.npz"))
+
+    def test_only_the_hot_pixels_come_out(self, run):
+        # The region covers every pixel of the tile. The rule still removes
+        # almost none of them, because it removes a pixel for its temperature
+        # and not for its cell. Under the old rule this number was the whole
+        # tile.
+        _, summary, _ = run
+        mask = summary["mask"]
+        assert mask["valid_removed_by_emissivity"] < mask["pixels_total"] / 1000
+        assert mask["valid_removed_by_water"] == 0
+
+
+class TestATileWithNoLand:
+    """The water rule can still empty a tile, and that path still works.
+
+    `land_tiles.py` selects tiles from the same geometry the mask rasterises,
+    so no tile on the fleet's list reaches here. An operator naming a bbox by
+    hand does.
+    """
+
+    @pytest.fixture(scope="class")
+    def run(self, tmp_path_factory, numobs_artifact, land_geometry):
+        out = tmp_path_factory.mktemp("nolands")
+        # Open Pacific, well outside the 25 km buffer of any land.
+        argv = [
+            # One token, because argparse reads a leading minus as an option.
+            "--bbox=-140,-30,-135,-25",
+            "--rehearse",
+            "20",
+            "--numobs-uri",
+            str(numobs_artifact),
+            "--land-geometry-uri",
+            str(land_geometry),
+            "--pixels-per-degree",
+            str(PPD),
+            "--shard",
+            "512",
+            "--workers",
+            "2",
+            "--threads-per-worker",
+            "1",
+            "--out-dir",
+            str(out),
+        ]
+        code = shard_lst_p95.main(argv)
+        summary = json.loads((out / "summary.json").read_text())
+        return code, summary, out
 
     def test_it_succeeds(self, run):
         # A correct outcome reading as a dead machine is the distinction the
@@ -237,10 +370,14 @@ class TestATileTheMaskEmpties:
     def test_the_summary_says_why(self, run):
         _, summary, _ = run
         assert summary["status"] == "no-unmasked-pixels"
-        assert summary["tile"] == INLAND
         assert summary["mask"]["pixels_kept"] == 0
 
-    def test_it_names_the_mosaic_that_emptied_it(self, run):
+    def test_the_scene_count_is_unknown_rather_than_zero(self, run):
+        # This path runs before the search, so the archive was never asked.
+        _, summary, _ = run
+        assert summary["n_scenes"] is None
+
+    def test_it_names_the_mosaic_that_decided(self, run):
         _, summary, _ = run
         assert summary["mask"]["aster_ged"]["short_name"] == "AG1km"
         assert summary["mask"]["numobs_uri"]
@@ -250,9 +387,9 @@ class TestATileTheMaskEmpties:
         assert not list(out.glob("part-*.npz"))
 
     def test_it_reaches_no_cluster(self, run):
-        # The mask is built before staging and before the cluster, so an empty
-        # tile costs neither. `memory.csv` is written by the sampler, which
-        # starts with the cluster.
+        # Both masks are built before staging and before the cluster, so an
+        # empty tile costs neither. `memory.csv` is written by the sampler,
+        # which starts with the cluster.
         _, _, out = run
         assert not (out / "memory.csv").exists()
         assert not (out / "spans.json").exists()

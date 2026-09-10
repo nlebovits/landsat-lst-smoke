@@ -41,8 +41,10 @@ artifacts/fleet_plan.json
 artifacts/aster_numobs.tif
 
 # The buffered land geometry is 16 MB and rebuilds from Natural Earth in a few
-# minutes. `land_tiles.parquet` records its `land_geometry_sha256`, and
-# `artifacts/land_buffered_slice.gpkg` is the committed cut the tests read.
+# minutes. Three committed files stand in for it: `land_tiles.parquet` records
+# its `land_geometry_sha256`, `artifacts/land_buffered_sha256.txt` carries the
+# same digest so CI can check the tie without the file, and
+# `artifacts/land_buffered_slice.gpkg` is the cut the tests rasterise.
 artifacts/land_buffered.gpkg
 
 # Synthetic rasters `measure_shard_memory.py --mode memory` writes. About 1 GB

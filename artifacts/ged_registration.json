@@ -178,9 +178,21 @@
       }
     ]
   },
+  "gap_cells": {
+    "pixels_per_cell": 1296,
+    "gap_cells": 605,
+    "gap_cells_with_a_hot_pixel": 81,
+    "gap_cells_with_none": 524,
+    "share_of_gap_cells_with_none": 0.8661157024793389,
+    "valid_pixels_in_gap_cells": 701839,
+    "hot_pixels_in_gap_cells": 4588,
+    "hot_share_of_cells_with_a_hot_pixel": 0.04769280345949542,
+    "worst_cell_hot_pixels": 195
+  },
   "rules": [
     {
       "rule": "numobs == 0",
+      "shipped": false,
       "valid_removed": 701839,
       "valid_removed_share": 0.002166721337477273,
       "hot_removed": 4588,
@@ -189,14 +201,16 @@
     },
     {
       "rule": "numobs == 0, 1-cell buffer",
-      "valid_removed": 2797314,
-      "valid_removed_share": 0.008635883630610297,
+      "shipped": false,
+      "valid_removed": 2799906,
+      "valid_removed_share": 0.008643885667696782,
       "hot_removed": 5432,
       "hot_removed_share": 0.9152485256950295,
       "hot_left": 503
     },
     {
       "rule": "numobs <= 2",
+      "shipped": false,
       "valid_removed": 22308570,
       "valid_removed_share": 0.06887114370618527,
       "hot_removed": 5228,
@@ -205,11 +219,177 @@
     },
     {
       "rule": "numobs <= 2, 1-cell buffer",
-      "valid_removed": 36883327,
-      "valid_removed_share": 0.11386641609835249,
+      "shipped": false,
+      "valid_removed": 36914431,
+      "valid_removed_share": 0.1139624405433903,
       "hot_removed": 5834,
       "hot_removed_share": 0.9829823083403538,
       "hot_left": 101
+    },
+    {
+      "rule": "numobs == 0 AND >= 70 C",
+      "shipped": false,
+      "valid_removed": 4588,
+      "valid_removed_share": 1.4164099595983877e-05,
+      "hot_removed": 4588,
+      "hot_removed_share": 0.7730412805391744,
+      "hot_left": 1347
+    },
+    {
+      "rule": "numobs == 0, 1-cell buffer AND >= 70 C",
+      "shipped": true,
+      "valid_removed": 5432,
+      "valid_removed_share": 1.6769701178157025e-05,
+      "hot_removed": 5432,
+      "hot_removed_share": 0.9152485256950295,
+      "hot_left": 503
     }
-  ]
+  ],
+  "tile_level": {
+    "tiles_without_thermal": 126,
+    "tiles_over_1pct_emissivity": 0,
+    "tiles_with_no_granule": 126,
+    "worst_twenty": [
+      {
+        "tile_id": "N00E070",
+        "land_cells": 4164,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00E165",
+        "land_cells": 3819,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00E170",
+        "land_cells": 6662,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00E175",
+        "land_cells": 11610,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W155",
+        "land_cells": 1203,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W160",
+        "land_cells": 1681,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W165",
+        "land_cells": 945,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W175",
+        "land_cells": 9690,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W180",
+        "land_cells": 52,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E070",
+        "land_cells": 42648,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E150",
+        "land_cells": 3995,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E155",
+        "land_cells": 423,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E165",
+        "land_cells": 2062,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E170",
+        "land_cells": 17308,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05W030",
+        "land_cells": 2116,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05W160",
+        "land_cells": 7514,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05W165",
+        "land_cells": 1782,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05W180",
+        "land_cells": 3394,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N10E150",
+        "land_cells": 10646,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N10E155",
+        "land_cells": 5931,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      }
+    ]
+  }
 }

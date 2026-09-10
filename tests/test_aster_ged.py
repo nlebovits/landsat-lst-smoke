@@ -197,6 +197,48 @@ class TestTheManifest:
         with pytest.raises(aster_ged.GedError, match="schema_version 0"):
             aster_ged.check_manifest(manifest, land_geometry_sha256="0" * 64)
 
+    def test_the_raster_digest_is_checked_when_the_path_is_given(
+        self, numobs_artifact, tmp_path
+    ):
+        """The digest travels into every run record. Something has to read it.
+
+        Without this the record quotes a number nothing verified, and a
+        truncated or swapped mosaic passes the guard that runs before the first
+        request.
+        """
+        from conftest import land_geometry_sha256
+
+        manifest = aster_ged.read_manifest(numobs_artifact)
+        digest = aster_ged._sha256(Path(numobs_artifact))
+        manifest = manifest | {"raster_sha256": digest}
+        aster_ged.check_manifest(
+            manifest,
+            land_geometry_sha256=land_geometry_sha256(),
+            path=numobs_artifact,
+        )
+
+        wrong = manifest | {"raster_sha256": "e" * 64}
+        with pytest.raises(aster_ged.GedError) as exc:
+            aster_ged.check_manifest(
+                wrong,
+                land_geometry_sha256=land_geometry_sha256(),
+                path=numobs_artifact,
+            )
+        assert "raster_sha256" in str(exc.value)
+        assert digest in str(exc.value)
+
+    def test_a_manifest_with_no_digest_still_passes(self, numobs_artifact):
+        # The copy inside the raster leaves it empty, because a file cannot
+        # contain its own digest. Only the sidecar carries one.
+        from conftest import land_geometry_sha256
+
+        manifest = aster_ged.read_manifest(numobs_artifact) | {"raster_sha256": ""}
+        aster_ged.check_manifest(
+            manifest,
+            land_geometry_sha256=land_geometry_sha256(),
+            path=numobs_artifact,
+        )
+
     def test_a_missing_artifact_names_the_build_command(self, tmp_path):
         with pytest.raises(aster_ged.GedError, match="uv run aster_ged.py"):
             aster_ged.read_manifest(tmp_path / "absent.tif")
@@ -239,6 +281,49 @@ class TestBuildMosaic:
         )
         assert not mosaic.any()
         assert not covered.any()
+
+    def test_a_cell_outside_the_columns_is_skipped_too(self, tmp_path):
+        # An out-of-range column produces an empty numpy slice, which writes
+        # nothing and raises nothing. The row was checked and the column was
+        # not, so this is the half of the guard that was missing.
+        mosaic, covered = aster_ged.build_mosaic(
+            {(30, 180): tmp_path / "absent.h5"}, lat_limit=60
+        )
+        assert not mosaic.any()
+        assert not covered.any()
+
+    def test_the_manifest_names_what_was_placed_not_what_was_cached(self, tmp_path):
+        """A skipped granule counted in the manifest is a manifest that lies.
+
+        A cache filled by a build at another latitude limit holds cells this
+        mosaic has no room for.
+        """
+        cache = {
+            (30, 0): tmp_path / "inside.h5",
+            (70, 0): tmp_path / "too_far_north.h5",
+            (30, 180): tmp_path / "off_the_east_edge.h5",
+        }
+        placed = aster_ged.placeable_granules(cache, lat_limit=60)
+        assert set(placed) == {(30, 0)}
+
+    def test_a_cell_inside_the_band_lands_where_the_grid_says(self, tmp_path):
+        # The negative cases above pass for a build that places nothing at all.
+        # This is the one that fails if placement is broken.
+        import h5py
+        import numpy as np
+
+        path = tmp_path / "AG1km.v003.30.-65.0010.h5"
+        with h5py.File(path, "w") as fh:
+            fh.create_dataset(
+                f"{aster_ged.NUMOBS_GROUP}/NumObs",
+                data=np.full((100, 100), 7, dtype="int16"),
+            )
+        mosaic, covered = aster_ged.build_mosaic({(30, -65): path}, lat_limit=60)
+        row0, col0 = aster_ged.cell_offset(30, -65, 60)
+        block = mosaic[row0 : row0 + 100, col0 : col0 + 100]
+        assert (block == 7).all()
+        assert int(covered.sum()) == 100 * 100
+        assert int((mosaic == 7).sum()) == 100 * 100
 
 
 class TestCoverageIsNotTheCount:

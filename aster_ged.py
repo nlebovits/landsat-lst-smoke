@@ -317,6 +317,31 @@ def fetch_granules(
 # --------------------------------------------------------------------------
 
 
+def placeable_granules(granules: dict, *, lat_limit: int = LATITUDE_LIMIT) -> dict:
+    """The granules whose cell lands wholly inside the mosaic.
+
+    A granule cache can hold cells from a build at another latitude limit, and
+    a filename can name a cell this grid has no room for. Both are skipped
+    rather than wrapped: writing a 70-degree granule anywhere would corrupt a
+    real tile, and wrapping would corrupt the southern edge, which is the
+    harder failure to see.
+
+    Both axes are checked. A column outside the grid produces an empty numpy
+    slice, so it writes nothing, leaves the coverage band at zero, and raises
+    nothing. `build_mosaic` and `build_manifest` read the same filtered dict,
+    so the manifest names what was placed rather than what was on disk.
+    """
+    rows, cols = mosaic_shape(lat_limit)
+    keep = {}
+    for cell, path in granules.items():
+        row0, col0 = cell_offset(*cell, lat_limit)
+        row_fits = 0 <= row0 <= rows - CELLS_PER_DEGREE
+        col_fits = 0 <= col0 <= cols - CELLS_PER_DEGREE
+        if row_fits and col_fits:
+            keep[cell] = path
+    return keep
+
+
 def build_mosaic(granules: dict, *, lat_limit: int = LATITUDE_LIMIT):
     """Every granule placed on the global grid, as counts and coverage.
 
@@ -333,10 +358,9 @@ def build_mosaic(granules: dict, *, lat_limit: int = LATITUDE_LIMIT):
     rows, cols = mosaic_shape(lat_limit)
     mosaic = np.zeros((rows, cols), dtype="uint8")
     covered = np.zeros((rows, cols), dtype="uint8")
-    for (north, west), path in sorted(granules.items()):
+    placeable = placeable_granules(granules, lat_limit=lat_limit)
+    for (north, west), path in sorted(placeable.items()):
         row0, col0 = cell_offset(north, west, lat_limit)
-        if not (0 <= row0 <= rows - CELLS_PER_DEGREE):
-            continue
         block = read_numobs(path)
         rows_ = slice(row0, row0 + CELLS_PER_DEGREE)
         cols_ = slice(col0, col0 + CELLS_PER_DEGREE)
@@ -454,6 +478,7 @@ def check_manifest(
     manifest: dict,
     *,
     land_geometry_sha256: str,
+    path: Path | str | None = None,
     schema_version: int = ASTER_GED_SCHEMA_VERSION,
 ) -> None:
     """Refuse an artifact this run cannot combine with its other inputs.
@@ -461,6 +486,12 @@ def check_manifest(
     The cell list came from a land geometry. A mask built from one geometry and
     a tile list built from another cover different ground, and the output looks
     finished either way.
+
+    Passing `path` also digests the raster and compares it to the manifest's
+    `raster_sha256`. Without it the digest travels into every run record
+    unchecked, so a truncated or swapped mosaic reads as sound and the record
+    quotes a number nothing verified. One SHA-256 over 45.5 MB, once, before
+    the run makes its first request.
 
     Raises:
         GedError: naming the field, both values, and the fix.
@@ -477,6 +508,13 @@ def check_manifest(
             f"land_geometry_sha256 {got!r} in the artifact, "
             f"{land_geometry_sha256!r} in this run's geometry"
         )
+    want_raster = manifest.get("raster_sha256")
+    if path is not None and want_raster:
+        on_disk = _sha256(Path(path))
+        if on_disk != want_raster:
+            problems.append(
+                f"raster_sha256 {on_disk!r} on disk, {want_raster!r} in the manifest"
+            )
     if problems:
         joined = "\n  ".join(problems)
         msg = (
@@ -507,6 +545,28 @@ def provenance(manifest: dict) -> dict:
 # --------------------------------------------------------------------------
 # The runtime read. This is all a fleet instance calls.
 # --------------------------------------------------------------------------
+
+
+def _check_bbox_inside(bounds, bbox) -> None:
+    """Refuse a bbox the mosaic does not cover, naming the span it has.
+
+    Raises:
+        GedError: naming the axis that ran out and both spans.
+    """
+    west, south, east, north = bbox
+    if west < bounds.left or east > bounds.right:
+        msg = (
+            f"bbox {bbox} runs outside the artifact's longitude span "
+            f"[{bounds.left}, {bounds.right}]"
+        )
+        raise GedError(msg)
+    if south < bounds.bottom or north > bounds.top:
+        msg = (
+            f"bbox {bbox} runs outside the artifact's latitude span "
+            f"[{bounds.bottom}, {bounds.top}]. The mosaic covers "
+            f"+/-{int(bounds.top)} degrees."
+        )
+        raise GedError(msg)
 
 
 def window_for_bbox(path: Path | str, bbox, target_shape, bands=(NUMOBS_BAND,)):
@@ -540,20 +600,7 @@ def window_for_bbox(path: Path | str, bbox, target_shape, bands=(NUMOBS_BAND,)):
 
     west, south, east, north = bbox
     with rasterio.open(path) as ds:
-        bounds = ds.bounds
-        if west < bounds.left or east > bounds.right:
-            msg = (
-                f"bbox {bbox} runs outside the artifact's longitude span "
-                f"[{bounds.left}, {bounds.right}]"
-            )
-            raise GedError(msg)
-        if south < bounds.bottom or north > bounds.top:
-            msg = (
-                f"bbox {bbox} runs outside the artifact's latitude span "
-                f"[{bounds.bottom}, {bounds.top}]. The mosaic covers "
-                f"+/-{int(bounds.top)} degrees."
-            )
-            raise GedError(msg)
+        _check_bbox_inside(ds.bounds, bbox)
         window = from_bounds(west, south, east, north, transform=ds.transform)
         return tuple(
             ds.read(
@@ -564,6 +611,116 @@ def window_for_bbox(path: Path | str, bbox, target_shape, bands=(NUMOBS_BAND,)):
             )
             for band in bands
         )
+
+
+def cells_per_pixel_block(pixels_per_degree: int) -> int:
+    """How many tile pixels one GED cell covers on each axis.
+
+    Only a caller that needs an exact block asks for this. `cells_to_pixels`
+    handles any ratio, and the fleet grid of 3600 gives a whole 36 either way.
+
+    Raises:
+        GedError: if the tile grid is not a whole multiple of the cell grid.
+    """
+    if pixels_per_degree % CELLS_PER_DEGREE:
+        msg = (
+            f"pixels_per_degree {pixels_per_degree} is not a multiple of "
+            f"{CELLS_PER_DEGREE} cells per degree, so one GED cell does not "
+            f"cover a whole number of pixels. The fleet grid is 3600, which "
+            f"gives 36 pixels a cell."
+        )
+        raise GedError(msg)
+    return pixels_per_degree // CELLS_PER_DEGREE
+
+
+def cells_to_pixels(cells, target_shape):
+    """Stretch a cell-grid array onto the tile's pixel grid, nearest neighbour.
+
+    Both grids are EPSG:4326 over the same bbox and differ only in resolution,
+    so this is an index map rather than a warp. At 3,600 pixels per degree the
+    map is exactly `np.repeat` by 36. At a test grid of 360 the ratio is 3.6,
+    and floor division puts each pixel in the cell that contains its own row
+    and column rather than refusing the grid.
+
+    The intermediate is `(height, cell columns)`, not `(height, width)`, so a
+    full tile pays 9 MB on the way to its 324 MB result.
+    """
+    import numpy as np
+
+    n_rows, n_cols = cells.shape
+    height, width = target_shape
+    rows = (np.arange(height) * n_rows) // height
+    cols = (np.arange(width) * n_cols) // width
+    return cells[rows][:, cols]
+
+
+def cell_window_for_bbox(path: Path | str, bbox, *, pad_cells=0, bands=(NUMOBS_BAND,)):
+    """One tile's cells at the GED grid's own resolution, with a margin.
+
+    `window_for_bbox` stretches cells to the tile's pixels on the way out of
+    the file. A rule that grows the gap region by a cell has to see cells, so
+    this reads them unstretched and `cells_per_pixel_block` stretches later.
+
+    `pad_cells` widens the window beyond the tile on every side. A gap cell
+    just outside the tile still buffers into it, and clipping the dilation at
+    the tile edge instead loses those cells. The same margin on the same tile
+    cost the sibling project two cells, or 2,592 pixels.
+
+    The read is boundless, so a margin that runs off the mosaic comes back as
+    zero. A zero count with zero coverage is an unread cell, which is not a
+    gap, so the margin cannot invent one.
+
+    Returns:
+        One uint8 array per band, each `(rows + 2 * pad, cols + 2 * pad)`.
+
+    Raises:
+        GedError: if the artifact is absent, or does not cover the bbox.
+    """
+    import rasterio
+    from rasterio.windows import Window
+
+    path = Path(path)
+    if not path.exists():
+        read_manifest(path)  # raises with the build command
+
+    west, south, east, north = bbox
+    with rasterio.open(path) as ds:
+        _check_bbox_inside(ds.bounds, bbox)
+        row0 = int(round((ds.bounds.top - north) * CELLS_PER_DEGREE)) - pad_cells
+        col0 = int(round((west - ds.bounds.left) * CELLS_PER_DEGREE)) - pad_cells
+        n_rows = int(round((north - south) * CELLS_PER_DEGREE)) + 2 * pad_cells
+        n_cols = int(round((east - west) * CELLS_PER_DEGREE)) + 2 * pad_cells
+        window = Window(col0, row0, n_cols, n_rows)
+        return tuple(
+            ds.read(band, window=window, boundless=True, fill_value=0) for band in bands
+        )
+
+
+def dilate_cells(cells, buffer_cells: int):
+    """Grow a boolean cell mask by `buffer_cells` cells, 8-connected.
+
+    One pass of a 3 by 3 square structuring element per cell of radius. Built
+    from shifted ORs rather than `scipy.ndimage.binary_dilation`, so the fleet
+    runtime keeps its dependency set. Slices, not `np.roll`: rolling wraps the
+    far edge into the near one, and this mask has real edges.
+
+    A cell of radius 1 turns one cell into nine, and a corner cell into four.
+    """
+    if buffer_cells <= 0 or not cells.any():
+        return cells
+    out = cells
+    for _ in range(int(buffer_cells)):
+        grown = out.copy()
+        grown[1:, :] |= out[:-1, :]
+        grown[:-1, :] |= out[1:, :]
+        grown[:, 1:] |= out[:, :-1]
+        grown[:, :-1] |= out[:, 1:]
+        grown[1:, 1:] |= out[:-1, :-1]
+        grown[1:, :-1] |= out[:-1, 1:]
+        grown[:-1, 1:] |= out[1:, :-1]
+        grown[:-1, :-1] |= out[1:, 1:]
+        out = grown
+    return out
 
 
 def numobs_for_bbox(path: Path | str, bbox, target_shape):
@@ -703,9 +860,20 @@ def main(argv=None) -> int:
         print("no granule fetched; nothing to mosaic")
         return 1
 
+    # The manifest names what landed on the grid, not what sat in the cache.
+    # A cache filled by a build at another latitude limit holds cells this
+    # mosaic has no room for, and counting them would put granules in the
+    # manifest that no pixel of the artifact came from.
+    placed = placeable_granules(granules, lat_limit=args.lat_limit)
+    if len(placed) < len(granules):
+        print(
+            f"              {len(granules) - len(placed):,} cached granules "
+            f"fall outside +/-{args.lat_limit} deg and are not placed"
+        )
+
     mosaic, covered = build_mosaic(granules, lat_limit=args.lat_limit)
     manifest = build_manifest(
-        granules,
+        placed,
         lat_limit=args.lat_limit,
         buffer_meters=args.buffer_meters,
         land_geometry_sha256=checksum,

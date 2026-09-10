@@ -27,11 +27,13 @@ cell assignment by up to two cells on each axis and re-counting the agreement
 turns that into a curve: right registration peaks sharply at zero and falls
 away on both sides.
 
-Coverage. Where GED holds no observation, USGS wrote `ST_B10` fill, and
-`lst_qa.not_fill` rejected it before the percentile. So a gap pixel's monthly
-counts must already sum to zero. That share is the artifact checked against the
-archive itself, with no external oracle: the composite was built months before
-this mask existed and knows nothing about it.
+Coverage. A gap cell is not a hole. USGS interpolates GED emissivity from the
+neighbouring cells and retrieves a temperature anyway, so most gap pixels carry
+a value: MEASURED at 89.53% on S30W065. The hard holes are the minority, and
+they are what the registration scan lands on. A share near zero would mean the
+gap really is a hole, and the tile says otherwise. This is the artifact checked
+against the archive itself, with no external oracle: the composite was built
+months before this mask existed and knows nothing about it.
 
 The tile-level claim. If the L2SR product type really follows ASTER coverage,
 the tiles that hold nothing but L2SR should hold little or no land with
@@ -135,10 +137,12 @@ def tier_crosstab(counts, lst, any_observation, land) -> list[dict]:
                 "valid": n_valid,
                 "missing": n - n_valid,
                 "with_any_observation": n_seen,
-                # For the gap tier this is the claim. USGS wrote fill there and
-                # `not_fill` rejected it, so a gap pixel cannot have been
-                # counted in any month. Anything but 0.0 means the mask and the
-                # archive disagree about where the gaps are.
+                # For the gap tier this is the number that killed the
+                # whole-cell rule. USGS interpolates emissivity across a gap
+                # cell rather than leaving it empty, so most gap pixels do
+                # carry a retrieval: 0.8953 on S30W065. Watch it for drift, not
+                # for zero. A share near zero would mean the gap is a hard hole
+                # and the geometry alone would remove almost nothing.
                 "share_with_any_observation": (n_seen / n) if n else 0.0,
             }
         )
@@ -206,9 +210,18 @@ def tile_level_claim(inventory_uri, land_tiles_uri, numobs_uri, land_geometry_ur
     }
 
 
-#: Hot-tail threshold, in Celsius. A P95 of a hot season over land does not
-#: reach it. Every pixel above it is a retrieval that failed upward.
-HOT_C = 70.0
+#: Hot-tail threshold, in Celsius. A screen, not a physical ceiling.
+#:
+#: It marks where this tile's artifact population separates, and one tile is
+#: all that calibrated it. It carries no claim about the hottest land surface,
+#: because it never acts alone: a pixel above it outside the gap region
+#: survives, and 503 such pixels do survive on S30W065. `masks.py` owns the
+#: value the fleet applies, and `nlebovits/landsat-lst` calibrated the same
+#: number the same way in `config.py:193-210`.
+#:
+#: Check the tail against 70 C on the next tile that carries a substantial gap
+#: population.
+HOT_C = masks.GAP_HOT_THRESHOLD_C
 
 
 def temperature_census(counts, covered, lst, land) -> dict:
@@ -271,66 +284,128 @@ def temperature_census(counts, covered, lst, land) -> dict:
     }
 
 
-def dilate_cells(flag, pixels_per_cell: int):
-    """Widen a cell-grid boolean by one cell, then upsample to the tile grid.
+#: The rule `masks.py` applies. Named here so the table marks which row ships
+#: rather than leaving a reader to infer it from the order.
+SHIPPED_RULE = "numobs == 0, 1-cell buffer AND >= 70 C"
 
-    Dilating on the cell grid rather than the pixel grid is what makes "one
-    cell" mean one cell. At 3,600 pixels per degree a cell is 36 pixels, so a
-    pixel-grid dilation of one would widen the mask by a thirty-sixth of what
-    the name says.
+
+def _cell_region(numobs_uri, bbox, pixels_per_degree: int, pad: int):
+    """The GED counts and coverage for a tile, padded, on the cell grid.
+
+    The same reader the mask uses, so the table prices the rule that ships
+    rather than a second implementation of it. The padding matters: a gap cell
+    just outside the tile buffers into it, and an earlier pass that clipped the
+    dilation at the tile edge was two cells short on S30W065.
+    """
+    return aster_ged.cell_window_for_bbox(
+        numobs_uri,
+        bbox,
+        pad_cells=pad,
+        bands=(aster_ged.NUMOBS_BAND, aster_ged.COVERAGE_BAND),
+    )
+
+
+def gap_cell_census(numobs_uri, bbox, lst, land, pixels_per_degree: int) -> dict:
+    """How the hot pixels sit inside the gap cells, cell by cell.
+
+    This is the measurement that chooses the rule. A whole-cell rule is only
+    defensible if a gap cell is bad as a cell. It is not: most gap cells hold
+    no hot pixel at all, and the ones that do hold a thin scatter rather than a
+    bad block. That is why the shipped rule is a pair and not the geometry.
     """
     import numpy as np
 
-    padded = np.pad(flag, 1, mode="edge")
-    out = np.zeros_like(flag)
-    for dy in (0, 1, 2):
-        for dx in (0, 1, 2):
-            out |= padded[dy : dy + flag.shape[0], dx : dx + flag.shape[1]]
-    return np.repeat(np.repeat(out, pixels_per_cell, axis=0), pixels_per_cell, axis=1)
+    from lst_qa import LST_NODATA_DN
+
+    per_cell = aster_ged.cells_per_pixel_block(pixels_per_degree)
+    counts, covered = _cell_region(numobs_uri, bbox, pixels_per_degree, 0)
+    gap = (covered > 0) & (counts == 0)
+
+    hot_px = (lst >= masks.gap_hot_dn()) & (lst != LST_NODATA_DN) & land
+    valid_px = (lst != LST_NODATA_DN) & land
+    rows, cols = gap.shape
+
+    def per_cell_sum(flag):
+        return flag.reshape(rows, per_cell, cols, per_cell).sum(
+            axis=(1, 3), dtype="int64"
+        )
+
+    hot_c = per_cell_sum(hot_px)
+    valid_c = per_cell_sum(valid_px)
+
+    with_hot = gap & (hot_c > 0)
+    n_gap = int(np.count_nonzero(gap))
+    n_with = int(np.count_nonzero(with_hot))
+    valid_in_with = int(valid_c[with_hot].sum())
+    hot_in_with = int(hot_c[with_hot].sum())
+    return {
+        "pixels_per_cell": per_cell * per_cell,
+        "gap_cells": n_gap,
+        "gap_cells_with_a_hot_pixel": n_with,
+        "gap_cells_with_none": n_gap - n_with,
+        "share_of_gap_cells_with_none": (n_gap - n_with) / n_gap if n_gap else 0.0,
+        "valid_pixels_in_gap_cells": int(valid_c[gap].sum()),
+        "hot_pixels_in_gap_cells": int(hot_c[gap].sum()),
+        # Inside a cell that does hold a hot pixel, what share of the cell is
+        # hot. A whole-cell rule removes the other share for nothing.
+        "hot_share_of_cells_with_a_hot_pixel": (
+            hot_in_with / valid_in_with if valid_in_with else 0.0
+        ),
+        "worst_cell_hot_pixels": int(hot_c[gap].max()) if n_gap else 0,
+    }
 
 
 def rule_table(numobs_uri, bbox, shape, lst, land, pixels_per_degree: int) -> list:
-    """Four candidate rules, priced on the same tile.
+    """Six candidate rules, priced on the same tile.
 
     Each row is what the rule costs and what it buys: ordinary pixels removed
-    against hot-tail pixels removed. The shipped rule is the first. The others
-    are here because a threshold nobody priced is a threshold nobody chose.
+    against hot-tail pixels removed. The first four vary the geometry alone.
+    The last two intersect the geometry with the temperature, which is what
+    `masks.py` applies, and `SHIPPED_RULE` marks the one that ships.
+
+    The first four are here because a threshold nobody priced is a threshold
+    nobody chose, and because the geometry alone was shipped once, in this
+    project and in `nlebovits/landsat-lst`, on the strength of the hot column
+    read without the column beside it.
     """
     import numpy as np
 
-    from lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE
+    from lst_qa import LST_NODATA_DN
 
-    cells = aster_ged.CELLS_PER_DEGREE
-    per_cell = pixels_per_degree // cells
-    cell_shape = masks.raster_shape(bbox, cells)
-    cell_counts, cell_covered = aster_ged.window_for_bbox(
-        numobs_uri, bbox, cell_shape, (aster_ged.NUMOBS_BAND, aster_ged.COVERAGE_BAND)
-    )
+    pad = 1
+    cell_counts, cell_covered = _cell_region(numobs_uri, bbox, pixels_per_degree, pad)
     read = cell_covered > 0
 
-    celsius = lst.astype("float64") * LST_SCALE + LST_OFFSET
+    hot_dn = masks.gap_hot_dn()
     valid = (lst != LST_NODATA_DN) & land
-    hot = valid & (celsius >= HOT_C)
+    hot = valid & (lst >= hot_dn)
     n_valid = int(np.count_nonzero(valid))
     n_hot = int(np.count_nonzero(hot))
 
-    rules = [
-        ("numobs == 0", read & (cell_counts == 0), False),
-        ("numobs == 0, 1-cell buffer", read & (cell_counts == 0), True),
-        ("numobs <= 2", read & (cell_counts <= 2), False),
-        ("numobs <= 2, 1-cell buffer", read & (cell_counts <= 2), True),
+    def to_pixels(cells):
+        return aster_ged.cells_to_pixels(cells[pad:-pad, pad:-pad], lst.shape)
+
+    specs = [
+        ("numobs == 0", 0, 0, False),
+        ("numobs == 0, 1-cell buffer", 0, 1, False),
+        ("numobs <= 2", 2, 0, False),
+        ("numobs <= 2, 1-cell buffer", 2, 1, False),
+        ("numobs == 0 AND >= 70 C", 0, 0, True),
+        (SHIPPED_RULE, 0, 1, True),
     ]
     rows = []
-    for name, flag, buffer in rules:
-        if buffer:
-            drop = dilate_cells(flag, per_cell)
-        else:
-            drop = np.repeat(np.repeat(flag, per_cell, axis=0), per_cell, axis=1)
+    for name, tier, buffer_cells, conjoin in specs:
+        cells = read & (cell_counts <= tier)
+        drop = to_pixels(aster_ged.dilate_cells(cells, buffer_cells))
+        if conjoin:
+            drop &= lst >= hot_dn
         removed = int(np.count_nonzero(valid & drop))
         hot_removed = int(np.count_nonzero(hot & drop))
+        del drop
         rows.append(
             {
                 "rule": name,
+                "shipped": name == SHIPPED_RULE,
                 "valid_removed": removed,
                 "valid_removed_share": removed / n_valid if n_valid else 0.0,
                 "hot_removed": hot_removed,
@@ -460,19 +535,38 @@ def main(argv=None) -> int:  # noqa: C901 - one report, one branch per section
             f"{row['share_of_hot_tail']:>6.1%}"
         )
 
+    report["gap_cells"] = gap_cell_census(
+        args.numobs_uri, bbox, lst, land, args.pixels_per_degree
+    )
+    cells = report["gap_cells"]
+    print(
+        f"gap cells     {cells['gap_cells']:,} cells of "
+        f"{cells['pixels_per_cell']:,} px, "
+        f"{cells['gap_cells_with_none']:,} of them "
+        f"({cells['share_of_gap_cells_with_none']:.1%}) hold no hot pixel"
+    )
+    print(
+        f"              in the {cells['gap_cells_with_a_hot_pixel']:,} that do, "
+        f"hot is {cells['hot_share_of_cells_with_a_hot_pixel']:.2%} of the "
+        f"cell; worst holds {cells['worst_cell_hot_pixels']:,}"
+    )
+    print("              the cell is not bad, so the rule is not the cell")
+
     report["rules"] = rule_table(
         args.numobs_uri, bbox, shape, lst, land, args.pixels_per_degree
     )
     print(
-        "rules         rule                          valid removed        "
-        "hot removed   hot left"
+        "rules         rule                                    valid removed  "
+        "      hot removed   hot left"
     )
     for row in report["rules"]:
+        mark = "*" if row["shipped"] else " "
         print(
-            f"              {row['rule']:<28} {row['valid_removed']:>10,} "
+            f"            {mark} {row['rule']:<38} {row['valid_removed']:>10,} "
             f"({row['valid_removed_share']:>7.4%})  {row['hot_removed']:>6,} "
             f"({row['hot_removed_share']:>6.2%})  {row['hot_left']:>8,}"
         )
+    print("              * the rule masks.py applies")
 
     if args.inventory_uri:
         report["tile_level"] = tile_level_claim(

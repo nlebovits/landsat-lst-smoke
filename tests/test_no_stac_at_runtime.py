@@ -171,13 +171,14 @@ class TestTheMaskBuildsOffline:
     def test_the_whole_mask_builds_with_every_socket_blocked(
         self, no_network, numobs_artifact, land_geometry
     ):
-        keep, counts = masks.output_mask(
+        keep, gap, counts = masks.output_mask(
             tile_bounds(TILE),
             100,
             numobs_uri=numobs_artifact,
             land_geometry_uri=land_geometry,
         )
         assert counts["pixels_kept"] == int(keep.sum()) > 0
+        assert counts["pixels_emissivity_gap"] == int(gap.sum())
 
 
 class TestRuntimeWorksOffline:

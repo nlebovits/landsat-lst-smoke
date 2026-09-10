@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import fleet_plan  # noqa: E402
+import masks  # noqa: E402
 from tile_inventory import InventoryError, thermal_rows_for_tile  # noqa: E402
 
 LAND_TILES = ROOT / "artifacts" / "land_tiles.parquet"
@@ -225,26 +226,26 @@ class TestNothingToLaunch:
             fleet_plan.build_plan(LAND_TILES, path)
 
 
-class TestTheEmissivityScreen:
-    """The third reason a tile comes out, and the only one the inventory misses.
+class TestEmissivityCostsNoTile:
+    """No tile comes out for its emissivity, and the plan says what will.
 
-    A tile can hold thousands of L2SP scenes and still publish nothing, because
-    USGS drops the ST band for a whole footprint but writes a within-scene gap
-    as fill. `thermal_rows_for_tile` sees the first kind exactly. Nothing in the
-    inventory sees the second.
+    An earlier build dropped a tile whose every land pixel sat inside a gap.
+    The pixel rule no longer removes a gap pixel for being one, so a tile of
+    nothing but gap cells still publishes every ordinary temperature it holds.
+    What the plan carries instead is the rule itself, so a finished tile can be
+    checked against what was planned.
     """
 
     def test_a_covered_tile_still_launches(self, masked_plan):
         assert [t["tile_id"] for t in masked_plan["tiles"]] == list(LIVE_TILES)
-        assert masked_plan["tiles_without_emissivity"] == []
 
-    def test_a_tile_with_no_emissivity_over_land_is_dropped(
+    def test_a_tile_of_nothing_but_gap_still_launches(
         self, masked_plan_inputs, land_geometry, tmp_path
     ):
         from conftest import write_numobs
 
-        # S30W065 is interior South America and is all land, so removing its
-        # emissivity leaves it with nothing to publish.
+        # S30W065 is interior South America and is all land. Every one of its
+        # cells is a gap here, and under the old rule that dropped the tile.
         gapped = write_numobs(
             tmp_path / "numobs.tif", value=8, gaps=[(-65.0, -35.0, -60.0, -30.0)]
         )
@@ -255,46 +256,26 @@ class TestTheEmissivityScreen:
             numobs_uri=gapped,
             land_geometry_uri=land_geometry,
         )
-        assert plan["tiles_without_emissivity"] == ["S30W065"]
-        assert "S30W065" not in [t["tile_id"] for t in plan["tiles"]]
-        assert plan["tile_count"] == len(LIVE_TILES) - 1
-
-    def test_a_partly_gapped_tile_still_launches(
-        self, masked_plan_inputs, land_geometry, tmp_path
-    ):
-        # Only zero comes out, as with the L2SR share. Half a tile of real
-        # emissivity is half a tile of real temperatures.
-        from conftest import write_numobs
-
-        gapped = write_numobs(
-            tmp_path / "numobs.tif", value=8, gaps=[(-65.0, -35.0, -62.5, -30.0)]
-        )
-        tiles, inventory = masked_plan_inputs
-        plan = fleet_plan.build_plan(
-            tiles,
-            inventory,
-            numobs_uri=gapped,
-            land_geometry_uri=land_geometry,
-        )
-        assert plan["tiles_without_emissivity"] == []
         assert "S30W065" in [t["tile_id"] for t in plan["tiles"]]
+        assert plan["tile_count"] == len(LIVE_TILES)
 
-    def test_the_three_exclusions_stay_separate(self, masked_plan):
-        # No scene in the window, no thermal band, and no emissivity are three
-        # facts with three fixes. A tile in two lists would tell an operator to
-        # widen a window that would not help.
-        keys = (
-            "tiles_without_scenes",
-            "tiles_without_thermal",
-            "tiles_without_emissivity",
-        )
-        for i, first in enumerate(keys):
-            for second in keys[i + 1 :]:
-                assert not set(masked_plan[first]) & set(masked_plan[second])
+    def test_the_two_exclusions_stay_separate(self, masked_plan):
+        # No scene in the window and no thermal band are two facts with two
+        # fixes. A tile in both lists would tell an operator to widen a window
+        # that would not help.
+        first = set(masked_plan["tiles_without_scenes"])
+        second = set(masked_plan["tiles_without_thermal"])
+        assert not first & second
 
-    def test_the_plan_names_the_artifact_behind_the_screen(self, masked_plan):
-        # A tile dropped for emissivity is only reproducible if the mosaic that
-        # dropped it is named.
+    def test_the_plan_records_the_pixel_rule(self, masked_plan):
+        # The rule every launched machine applies, so a finished tile is
+        # checkable against its plan.
+        rule = masked_plan["emissivity_rule"]
+        assert rule["gap_buffer_cells"] == masks.GAP_BUFFER_CELLS
+        assert rule["gap_hot_threshold_c"] == masks.GAP_HOT_THRESHOLD_C
+
+    def test_the_plan_names_the_artifact_behind_the_rule(self, masked_plan):
+        # The rule is only reproducible if the mosaic it reads is named.
         ged = masked_plan["aster_ged"]
         assert ged["short_name"] == "AG1km"
         assert ged["version"] == "003"
@@ -303,7 +284,7 @@ class TestTheEmissivityScreen:
     def test_a_plan_without_the_artifact_says_so(self, plan):
         # `build_plan` runs the inventory checks alone when no mosaic is named,
         # and records that it did. The driver always names one.
-        assert plan["tiles_without_emissivity"] == []
+        assert plan["emissivity_rule"] is None
         assert plan["aster_ged"] is None
         assert plan["numobs_uri"] is None
 

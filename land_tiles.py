@@ -285,6 +285,19 @@ def land_geometry_checksum(
     return digest.hexdigest()
 
 
+def geometry_digest_path(path: Path | str) -> Path:
+    """Where the committed copy of the geometry's digest sits, beside it.
+
+    The geometry is 16 MB and gitignored, so nothing in CI can digest it. The
+    digest itself is 65 bytes and is committed, which lets a test check that
+    the tile list and the ASTER GED manifest still name the same geometry. It
+    cannot catch a corrupted file, and it does catch the failure that happens:
+    one artifact rebuilt without the others.
+    """
+    path = Path(path)
+    return path.with_name(f"{path.stem}_sha256.txt")
+
+
 def write_land_geometry(
     path: Path | str,
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
@@ -322,6 +335,9 @@ def write_land_geometry(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, path)
+    geometry_digest_path(path).write_text(
+        land_geometry_checksum(cache_dir, **kwargs) + "\n"
+    )
     return path
 
 
@@ -549,6 +565,7 @@ def main(argv=None) -> int:
             args.write_geometry, args.cache_dir, buffer_meters=args.buffer_meters
         )
         print(f"              {written} ({written.stat().st_size / 1e6:.1f} MB)")
+        print(f"              {geometry_digest_path(written)}")
     return 0
 
 

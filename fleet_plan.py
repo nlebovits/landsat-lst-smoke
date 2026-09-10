@@ -42,10 +42,9 @@ from tile_inventory import (
     thermal_rows_for_tile,
 )
 
-#: The grid the fleet composites on. Only the tile-emptying re-check reads it,
-#: and only for a tile the coarse screen already emptied, so a plan built at a
-#: different resolution from the run it plans errs toward launching a machine
-#: rather than toward losing a tile.
+#: The grid the fleet composites on. Nothing in the plan rasterises at it. It
+#: is recorded so a finished tile can be checked against the grid its plan
+#: assumed, the way `emissivity_rule` records the pixel rule.
 DEFAULT_PIXELS_PER_DEGREE = 3600
 
 
@@ -120,48 +119,8 @@ def check_mask_artifacts(land_provenance: dict, numobs_uri, land_geometry_uri) -
         raise InventoryError(msg)
 
     manifest = aster_ged.read_manifest(numobs_uri)
-    aster_ged.check_manifest(manifest, land_geometry_sha256=shipped)
+    aster_ged.check_manifest(manifest, land_geometry_sha256=shipped, path=numobs_uri)
     return manifest
-
-
-def tiles_without_emissivity(
-    tiles, *, numobs_uri, land_geometry_uri, pixels_per_degree: int
-) -> list[str]:
-    """Tiles the output mask empties, so no machine is launched on one.
-
-    A tile can hold thermal scenes and still publish nothing: every land pixel
-    can sit inside an ASTER emissivity gap. That is the second kind of ASTER
-    coverage loss and the inventory cannot see it. `thermal_rows_for_tile`
-    catches the first kind, where the whole footprint has no ST band and USGS
-    writes L2SR.
-
-    Two passes, because they trade different mistakes. The screen runs at the
-    GED grid itself, 500 by 500 cells for a 5-degree tile, which is fast enough
-    for 895 tiles. A cell counts as land only when its centre is land, so a
-    coastline thinner than a cell can screen out a tile the real mask would
-    keep. Anything the screen empties is therefore re-checked at the run's own
-    resolution before it costs a tile. Only a handful reach the second pass.
-    """
-    empty = []
-    for name in tiles:
-        bbox = tile_bounds(name)
-        _, coarse = masks.output_mask(
-            bbox,
-            aster_ged.CELLS_PER_DEGREE,
-            numobs_uri=numobs_uri,
-            land_geometry_uri=land_geometry_uri,
-        )
-        if coarse["pixels_kept"]:
-            continue
-        _, fine = masks.output_mask(
-            bbox,
-            pixels_per_degree,
-            numobs_uri=numobs_uri,
-            land_geometry_uri=land_geometry_uri,
-        )
-        if not fine["pixels_kept"]:
-            empty.append(name)
-    return empty
 
 
 def classify_tiles(parquet_file, tiles) -> tuple[dict, dict, list, list]:
@@ -222,9 +181,15 @@ def build_plan(
     """The tiles to launch, with the artifact identities that justify them.
 
     `numobs_uri` is optional here and required by the CLI. A caller that passes
-    nothing gets the inventory checks alone and a plan that says so, which is
-    what the tests of those checks want. The driver always passes it, so a
-    fleet is never launched on tiles the output mask would empty.
+    nothing gets the inventory checks alone and a plan whose `aster_ged` and
+    `emissivity_rule` are null, which says the plan never saw a mosaic. That is
+    what the tests of the inventory checks want. The driver always passes it,
+    so a launched fleet is always tied to one land geometry across the tile
+    list, the inventory, and the two mask artifacts.
+
+    No tile comes out for its emissivity. The pixel rule removes a gap pixel
+    for reading 70 C or hotter, not for being a gap pixel, so a tile of nothing
+    but gap cells still publishes every ordinary temperature it holds.
 
     Raises:
         InventoryError: if the artifacts are missing, stale, or disagree with
@@ -261,21 +226,13 @@ def build_plan(
     pf = pq.ParquetFile(inventory_uri)
     rows_by_tile, thermal_by_tile, empty, no_thermal = classify_tiles(pf, tiles)
 
-    # The third reason a tile comes out, and the only one the inventory cannot
-    # see. Every land pixel can sit inside an ASTER emissivity gap while the
-    # tile still holds thousands of L2SP scenes, because USGS drops the ST band
-    # for a whole footprint but writes a within-scene gap as fill.
-    no_emissivity = []
-    if numobs_uri is not None:
-        no_emissivity = tiles_without_emissivity(
-            [name for name in tiles if name in rows_by_tile],
-            numobs_uri=numobs_uri,
-            land_geometry_uri=land_geometry_uri or masks.DEFAULT_LAND_GEOMETRY_URI,
-            pixels_per_degree=pixels_per_degree,
-        )
-        for name in no_emissivity:
-            rows_by_tile.pop(name, None)
-            thermal_by_tile.pop(name, None)
+    # There is no third drop list. An earlier build dropped a tile whose every
+    # land pixel sat inside an ASTER emissivity gap, on the reading that such a
+    # tile publishes nothing. The mask no longer removes a gap pixel for being
+    # one. It removes it for reading 70 C or hotter inside the gap region, so a
+    # tile of nothing but gap cells still publishes every ordinary temperature
+    # it holds. The screen dropped no tile on the real plan even under the old
+    # rule, and under this one it could not.
 
     runnable = [name for name in tiles if name in rows_by_tile]
     if not runnable:
@@ -283,8 +240,7 @@ def build_plan(
             f"none of the {len(tiles)} land tiles has a scene with a thermal "
             f"band in this inventory. The window {start} to {end} selects "
             f"nothing, every tile holds OLI_TIRS_L2SR products alone, or the "
-            f"artifact was built for a different tile list, or the output "
-            f"mask empties every one of them."
+            f"artifact was built for a different tile list."
         )
         raise InventoryError(msg)
 
@@ -293,10 +249,21 @@ def build_plan(
         "land_tile_count": len(tiles),
         "tiles_without_scenes": empty,
         "tiles_without_thermal": no_thermal,
-        "tiles_without_emissivity": no_emissivity,
         "inventory": provenance(manifest),
         "aster_ged": (
             None if ged_manifest is None else aster_ged.provenance(ged_manifest)
+        ),
+        # The pixel rule every launched machine will apply, recorded so a
+        # finished tile can be checked against what was planned. None when the
+        # caller passed no mosaic, which says the plan never saw one rather
+        # than that no tile needs the rule.
+        "emissivity_rule": (
+            None
+            if ged_manifest is None
+            else {
+                "gap_buffer_cells": masks.GAP_BUFFER_CELLS,
+                "gap_hot_threshold_c": masks.GAP_HOT_THRESHOLD_C,
+            }
         ),
         "land_tiles_uri": str(land_tiles_uri),
         "inventory_uri": str(inventory_uri),
@@ -332,8 +299,9 @@ def main(argv=None) -> int:
         "--numobs-uri",
         type=Path,
         default=aster_ged.DEFAULT_NUMOBS_URI,
-        help="ASTER GED clear-sky observation counts. The driver drops a tile "
-        "whose every land pixel sits in a gap, which the inventory cannot see",
+        help="ASTER GED clear-sky observation counts. The plan checks it "
+        "against the tile list's land geometry and records the pixel rule "
+        "every launched machine will apply",
     )
     p.add_argument(
         "--land-geometry-uri",
@@ -346,8 +314,8 @@ def main(argv=None) -> int:
         "--pixels-per-degree",
         type=int,
         default=DEFAULT_PIXELS_PER_DEGREE,
-        help="the grid the fleet will composite on. Only the re-check of a "
-        "tile the coarse screen emptied reads it",
+        help="the grid the fleet will composite on. Recorded in the plan so a "
+        "finished tile can be checked against it; nothing here rasterises",
     )
     p.add_argument("--out", type=Path, default=Path("artifacts/fleet_plan.json"))
     args = p.parse_args(argv)
@@ -388,13 +356,6 @@ def main(argv=None) -> int:
             f"hold only OLI_TIRS_L2SR and would composite nothing:"
         )
         print(f"              {', '.join(bare[:10])}{' ...' if len(bare) > 10 else ''}")
-    dark = plan["tiles_without_emissivity"]
-    if dark:
-        print(
-            f"              {len(dark)} of {plan['land_tile_count']} land tiles "
-            f"hold no land pixel with ASTER emissivity:"
-        )
-        print(f"              {', '.join(dark[:10])}{' ...' if len(dark) > 10 else ''}")
     thermal = [t["thermal_scenes"] for t in plan["tiles"]]
     thermal.sort()
     print(
@@ -422,6 +383,11 @@ def main(argv=None) -> int:
         )
         print(f"              built {ged['aster_ged_generated_utc']}")
         print(f"              sha256 {(ged['raster_sha256'] or '')[:16]}")
+        rule = plan["emissivity_rule"]
+        print(
+            f"              rule: gap grown {rule['gap_buffer_cells']} cell, "
+            f"removed only at or above {rule['gap_hot_threshold_c']:.0f} C"
+        )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(plan, indent=2) + "\n")
