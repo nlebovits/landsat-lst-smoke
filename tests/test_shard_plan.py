@@ -218,16 +218,19 @@ class TestShardBytes:
         worst = max(shard_bytes(512, n) / m for n, m in self.SWEEP if n >= 400)
         assert worst < 1.25
 
-    def test_it_counts_every_array_that_is_live_at_once(self):
-        """Five arrays, 13 bytes per pixel-scene, not the decoded stack alone.
+    def test_it_counts_more_than_the_five_named_arrays(self):
+        """Five arrays come to 13, and 13 reads low at fleet depth.
 
         dn uint16 and qa uint16 at 2 each, celsius float32 at 4, the valid mask
-        at 1, and the copy `nanpercentile` partitions at 4. The measured slope
-        is 12.7, so the accounting figure sits just above it.
+        at 1, and the copy `nanpercentile` partitions at 4. A staged sweep over
+        real COGs fits 13.68 at 360 px and 14.52 at 512, so the windowed read
+        of a tiled source holds about two bytes the five do not name.
         """
         arrays = shard_bytes(512, 1765) - SHARD_FIXED_GIB
         float32_only = 512 * 512 * 1765 * 4 / 1024**3
-        assert arrays == pytest.approx(float32_only * 13 / 4, rel=1e-6)
+        named_five = float32_only * 13 / 4
+        assert arrays == pytest.approx(float32_only * 15 / 4, rel=1e-6)
+        assert arrays > named_five, "the model has to exceed the named arrays"
 
     def test_the_arrays_scale_with_the_square_of_the_edge(self):
         """The fixed term does not scale, so compare the arrays alone."""
@@ -301,14 +304,14 @@ class TestShardBytes:
         assert shard_bytes(shard_px, scenes) >= measured, name
 
     def test_a_quarter_tile_shard_no_longer_fits_a_small_worker(self):
-        """1,765 scenes at 512 px is 6.3 GB, not the 1.85 GB long quoted.
+        """1,765 scenes at 512 px is 7.2 GB, not the 1.85 GB long quoted.
 
-        6.0 GB of that is array and the rest is per-worker overhead. The
+        6.9 GB of that is array and the rest is per-worker overhead. The
         difference decides how many workers an instance can hold, which is what
         the failed run got wrong.
         """
         gib = shard_bytes(512, 1765)
-        assert round(gib * 1024**3 / 1e9, 1) == 6.3
+        assert round(gib * 1024**3 / 1e9, 1) == 7.2
         assert gib > 1.8, "a 1.8 GiB worker limit cannot hold this shard"
 
 
@@ -324,6 +327,10 @@ class TestWorkerMemoryGuard:
     #: The full tile the fleet writes, at 3600 px per degree over 5 degrees.
     TILE_PX = 18_000
     GIB = 1024**3
+    #: MEASURED: the depths of shards[987:1051] of S30W065 at 360 px, the
+    #: deepest 64-shard slice in the tile. One shard at 820 scenes and a median
+    #: of 401, which is why the worst shard is not what 63 workers hold.
+    DEEP_SLICE = [820] + [401] * 32 + [203] * 31
 
     def test_the_client_holds_fourteen_bytes_an_output_pixel(self):
         """uint16 of p95 plus twelve uint8 monthly counts. 4.2 GiB a tile."""
@@ -338,7 +345,12 @@ class TestWorkerMemoryGuard:
         """
         with pytest.raises(SystemExit) as exc:
             worker_memory_guard(
-                512, 1765, 64, self.TILE_PX, self.TILE_PX, total_bytes=128 * self.GIB
+                512,
+                [1765] * 64,
+                64,
+                self.TILE_PX,
+                self.TILE_PX,
+                total_bytes=128 * self.GIB,
             )
         message = str(exc.value)
         # The operator's next decision is a smaller shard or fewer workers, so
@@ -348,31 +360,86 @@ class TestWorkerMemoryGuard:
         assert "128.0 GiB" in message
 
     def test_the_configuration_that_worked_is_allowed(self):
-        """The m6id.16xlarge run: 64 workers, 360 px, 404 scenes, 247 GiB."""
+        """The m6id.16xlarge run: 64 workers, 360 px, the deep slice, 247 GiB."""
         demand = worker_memory_guard(
-            360, 404, 64, self.TILE_PX, self.TILE_PX, total_bytes=247 * self.GIB
+            360,
+            self.DEEP_SLICE,
+            64,
+            self.TILE_PX,
+            self.TILE_PX,
+            total_bytes=247 * self.GIB,
         )
-        assert demand == pytest.approx(64 * shard_bytes(360, 404) + 4.2, abs=0.05)
+        expected = sum(shard_bytes(360, n) for n in self.DEEP_SLICE)
+        assert demand == pytest.approx(expected + 4.2, abs=0.05)
+
+    def test_it_sums_the_actual_depths_rather_than_the_worst(self):
+        """The correction this guard needed, MEASURED at 2.77x.
+
+        Multiplying the worst shard by the slot count reserved 102.6 GiB for a
+        slice that peaked at 37.0. Summing the depths reserves 64.0, because
+        one shard runs 820 scenes deep and the median runs 401.
+        """
+        summed = worker_memory_guard(
+            360,
+            self.DEEP_SLICE,
+            64,
+            self.TILE_PX,
+            self.TILE_PX,
+            total_bytes=247 * self.GIB,
+        )
+        worst_times_slots = 64 * shard_bytes(360, max(self.DEEP_SLICE))
+        assert summed < worst_times_slots, "summing must reserve less"
+        # Still above the 37.0 GiB the run measured, because a sampler cannot
+        # prove the coincident peak it never caught.
+        assert summed > 37.0
+
+    def test_only_the_deepest_shards_up_to_the_slot_count_are_held(self):
+        """Beyond the slots a slice queues, so shard 65 is not resident."""
+        eight = worker_memory_guard(
+            360, [820] * 64, 8, self.TILE_PX, self.TILE_PX, total_bytes=247 * self.GIB
+        )
+        assert eight == pytest.approx(8 * shard_bytes(360, 820) + 4.2, abs=0.05)
+
+    def test_an_empty_slice_demands_only_the_client_arrays(self):
+        demand = worker_memory_guard(
+            360, [], 64, self.TILE_PX, self.TILE_PX, total_bytes=247 * self.GIB
+        )
+        assert demand == pytest.approx(client_bytes(self.TILE_PX, self.TILE_PX))
 
     def test_the_edge_it_recommends_actually_fits(self):
         """A message that names an unusable escape is worse than none."""
         with pytest.raises(SystemExit) as exc:
             worker_memory_guard(
-                512, 1765, 64, self.TILE_PX, self.TILE_PX, total_bytes=128 * self.GIB
+                512,
+                [1765] * 64,
+                64,
+                self.TILE_PX,
+                self.TILE_PX,
+                total_bytes=128 * self.GIB,
             )
         named = re.search(r"--shard (\d+)", str(exc.value))
         assert named, "the message has to name an edge to try"
         edge = int(named.group(1))
         assert edge > 0
         assert worker_memory_guard(
-            edge, 1765, 64, self.TILE_PX, self.TILE_PX, total_bytes=128 * self.GIB
+            edge,
+            [1765] * 64,
+            64,
+            self.TILE_PX,
+            self.TILE_PX,
+            total_bytes=128 * self.GIB,
         )
 
     def test_a_machine_with_no_room_for_the_client_still_refuses(self):
         """The client's arrays alone can exceed the box. No negative edge."""
         with pytest.raises(SystemExit) as exc:
             worker_memory_guard(
-                512, 1765, 64, self.TILE_PX, self.TILE_PX, total_bytes=2 * self.GIB
+                512,
+                [1765] * 64,
+                64,
+                self.TILE_PX,
+                self.TILE_PX,
+                total_bytes=2 * self.GIB,
             )
         assert "--shard 0" in str(exc.value)
 

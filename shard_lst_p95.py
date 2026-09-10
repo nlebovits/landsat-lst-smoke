@@ -19,13 +19,15 @@ This version splits the *problem* instead of the array. Each shard is a small
 bbox processed entirely inside one worker: load, mask, reduce, encode, return.
 Nothing crosses a worker boundary, so there is no rechunk and no shuffle.
 
-    512 x 512 px x 1765 scenes x 13 bytes = 6.0 GB per shard
+    512 x 512 px x 1765 scenes x 15 bytes = 6.9 GB per shard
 
-Thirteen bytes, not four: the decoded float32 stack is one of five arrays live
-at once. See `shard_bytes`,
-which counted only that one array until a fleet instance ran out of memory. The
-figure stays constant as the area grows. A quarter tile is 324 shards; a full tile is 1,296. Frisky schedules
-250,000-400,000 tasks/s, so the task count is free.
+Fifteen bytes, not four. The decoded float32 stack is one of five arrays live
+at once, which comes to 13, and a windowed read of a tiled COG holds about two
+bytes more that the five do not name. `shard_bytes` counted only the decoded
+stack until a fleet instance ran out of memory, and then counted 13 until a
+staged sweep at fleet depth read 8% above it. The figure stays constant as the
+area grows. A quarter tile is 324 shards and a full tile is 1,296. Frisky
+schedules 250,000-400,000 tasks/s, so the task count is free.
 
     uv run shard_lst_p95.py --bbox=-62.5,-35.0,-60.0,-32.5 \
         --pixels-per-degree 3600 --shard 512 --dry-run
@@ -222,20 +224,34 @@ def items_for_shard(shard: Shard, item_bboxes) -> list[int]:
 #:     valid   bool     1      the mask, kept for the monthly counts
 #:     copy    float32  4      nanpercentile partitions a copy, not in place
 #:
-#: CONFIRMED by `measure_shard_memory.py --mode memory`, which measures a
-#: slope of 12.7 bytes per pixel-scene over six scene counts at 512 px. 13 is
-#: the accounting figure and it sits just above the measurement, so it never
-#: under-predicts. Over-reserving costs worker slots an operator can add back;
-#: under-reserving cost a fleet instance its workers.
+#: Those five sum to 13, and 13 under-predicts. Two bytes are not in the list.
+#:
+#: MEASURED by `measure_shard_memory.py --mode memory --stage-dir` against
+#: 1,615 real staged scenes on an `m6id.16xlarge`, at the depths a fleet shard
+#: carries. Least squares puts the slope at 13.68 bytes per pixel-scene at
+#: 360 px and 14.52 at 512, and a 13-byte model reads low at 600 and 820
+#: scenes on both edges, by up to 8%:
+#:
+#:     512 px, 820 scenes:  measured 3.08 GiB, 13-byte model 2.85
+#:     360 px, 820 scenes:  measured 1.57 GiB, 13-byte model 1.54
+#:
+#: The surplus is the windowed read of a tiled COG: GDAL decodes whole blocks
+#: and `odc.stac` assembles them into the target array, which the five named
+#: arrays do not cover. It is not attributed to a specific allocation, because
+#: nothing here has profiled one. So 15 is the five named arrays plus measured
+#: read overhead, and it bounds every point of all six committed sweeps.
+#:
+#: The synthetic fixture is what made 13 look safe. It writes one untiled
+#: raster at the shard's own edge and read it whole, so it never allocates
+#: that intermediate, and it fits a slope of 12.7 to 13.2. A sweep that stops
+#: below about 280 scenes agrees with 13 as well, because the fixed term still
+#: covers the gap there. Every fleet shard runs deeper: 195 to 820.
 #:
 #: Each point runs in a fresh interpreter, and it has to. glibc does not return
 #: freed arenas promptly, so measuring a second shard in the same process
 #: reports the high-water mark of the first: two contaminated sweeps put the
 #: slope at 17 and 18 and disagreed with each other by 18% at 700 scenes.
-#:
-#: The independent check is frisky. It reported 1.50 GiB per worker on the
-#: full-tile run, against 1.53 from this model at 404 scenes.
-SHARD_BYTES_PER_PIXEL_SCENE = 13
+SHARD_BYTES_PER_PIXEL_SCENE = 15
 
 #: Per-worker overhead outside the arrays, in GiB. From the same measurement.
 SHARD_FIXED_GIB = 0.25
@@ -271,7 +287,7 @@ def client_bytes(width: int, height: int) -> float:
 
 def worker_memory_guard(
     shard_px: int,
-    max_scenes: int,
+    depths,
     workers: int,
     width: int,
     height: int,
@@ -286,9 +302,26 @@ def worker_memory_guard(
     corrected number only ever reached a `print`. The same configuration would
     have launched again with a larger figure on the screen.
 
-    The demand is every worker's worst shard plus the client's two full-tile
-    arrays, because the client gathers into them while the workers are still
-    allocating.
+    `depths` is the scene count of every shard in this slice, and the demand is
+    their sum plus the client's two full-tile arrays, because the client gathers
+    into those while the workers are still allocating. Only the deepest
+    `workers` shards count: beyond that the slice queues rather than running
+    wider.
+
+    Multiplying the worst shard by the slot count is the reading this replaced,
+    and it over-reserved by 2.77x on the one slice that has been measured.
+    MEASURED on an `m6id.16xlarge`, 64 shards of S30W065 at 360 px running 203
+    to 820 scenes deep:
+
+        64 x worst shard        102.6 GiB
+        sum of actual depths     64.0 GiB
+        simultaneous peak        37.0 GiB, sampled at 0.5 s
+
+    The slice held one 820-scene shard and a median of 401, so the worst shard
+    is not what 63 of the workers were holding. The remaining 1.73x is peak
+    non-coincidence: the sum of each worker's own high-water mark came to
+    48.6 GiB against 37.0 ever live at once. That headroom is deliberate,
+    because a sampler cannot prove the coincident peak it never caught.
 
     Returns:
         The demand in GiB, so the caller can report what it checked.
@@ -302,26 +335,31 @@ def worker_memory_guard(
         import psutil
 
         total_bytes = psutil.virtual_memory().total
-    demand = workers * shard_bytes(shard_px, max_scenes) + client_bytes(width, height)
+    ordered = sorted(depths, reverse=True)[:workers]
+    if not ordered:
+        return client_bytes(width, height)
+    arrays = sum(shard_bytes(shard_px, n) for n in ordered)
+    client = client_bytes(width, height)
+    demand = arrays + client
     total = total_bytes / GIB
     if demand <= total:
         return demand
     # Solve for the edge whose arrays leave the fixed terms room. Reported
     # rather than applied, because shard size changes the output layout.
-    room = total - client_bytes(width, height) - workers * SHARD_FIXED_GIB
+    scene_px = sum(ordered)
+    room = total - client - len(ordered) * SHARD_FIXED_GIB
     fits = (
-        int((room * GIB / (workers * max_scenes * SHARD_BYTES_PER_PIXEL_SCENE)) ** 0.5)
+        int((room * GIB / (scene_px * SHARD_BYTES_PER_PIXEL_SCENE)) ** 0.5)
         if room > 0
         else 0
     )
     msg = (
-        f"{workers} workers x {shard_bytes(shard_px, max_scenes):.2f} GiB a shard "
-        f"at {shard_px} px and {max_scenes:,} scenes, plus "
-        f"{client_bytes(width, height):.2f} GiB of client output, needs "
-        f"{demand:.1f} GiB and this machine has {total:.1f} GiB. "
-        f"Use --shard {fits} or smaller, drop --workers, or pass --force to "
-        f"run it anyway. An undersized budget is what killed a c6id.16xlarge "
-        f"mid-run."
+        f"{len(ordered)} shards at {shard_px} px, {ordered[-1]:,} to "
+        f"{ordered[0]:,} scenes deep, need {arrays:.1f} GiB between them, plus "
+        f"{client:.2f} GiB of client output. That is {demand:.1f} GiB and this "
+        f"machine has {total:.1f} GiB. Use --shard {fits} or smaller, drop "
+        f"--workers, or pass --force to run it anyway. An undersized budget is "
+        f"what killed a c6id.16xlarge mid-run."
     )
     raise SystemExit(msg)
 
@@ -685,7 +723,7 @@ def parse_args(argv=None):
     p.add_argument(
         "--sample-interval",
         type=float,
-        default=0.5,
+        default=0.05,
         help="seconds between memory samples. The sampler runs in its own "
         "process and writes memory.csv beside the summary, so a run records "
         "the worker RSS that shard_bytes only predicts",
@@ -886,7 +924,7 @@ def main(argv=None) -> int:  # noqa: C901
                 try:
                     worker_memory_guard(
                         args.shard,
-                        worst,
+                        mine_counts,
                         concurrency,
                         width,
                         height,
@@ -1030,7 +1068,7 @@ def main(argv=None) -> int:  # noqa: C901
     if work_idx and not args.rehearse and not args.force:
         memory_demand = worker_memory_guard(
             args.shard,
-            max(len(idx) for _, idx in work_idx),
+            [len(idx) for _, idx in work_idx],
             concurrency,
             width,
             height,

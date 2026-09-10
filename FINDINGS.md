@@ -716,31 +716,43 @@ to the pipeline:
 | `valid` bool | 1 |
 | the copy `nanpercentile` partitions | 4 |
 | **named total** | **13** |
+| the windowed read of a tiled COG | **~2, measured** |
+| **model** | **15** |
 
-CONFIRMED by `measure_shard_memory.py --mode memory` at 512 px:
+Thirteen is the arithmetic and it under-predicts. MEASURED by
+`measure_shard_memory.py --mode memory --stage-dir` against 1,615 real staged
+scenes on an `m6id.16xlarge`, at the depths a fleet shard runs:
 
-| scenes | 100 | 200 | 300 | 404 | 500 | 700 |
-|---|---|---|---|---|---|---|
-| peak RSS, GiB | 0.49 | 0.78 | 1.11 | 1.42 | 1.74 | 2.33 |
+| scenes | 200 | 400 | 600 | 820 |
+|---|---|---|---|---|
+| 360 px, GiB | 0.54 | 0.87 | 1.20 | 1.57 |
+| 512 px, GiB | 0.88 | 1.52 | 2.21 | **3.08** |
 
-Least squares over those six points gives a slope of **12.67 bytes per
-pixel-scene** with a 0.17 GiB intercept, so the accounting figure of 13 sits
-just above the measurement and never under-predicts.
+Least squares puts the slope at **13.68** bytes per pixel-scene at 360 px and
+**14.52** at 512. A 13-byte model reads low at 600 and 820 scenes on both
+edges, worst by 8% at 512 px and 820 scenes, where it predicts 2.85 GiB against
+3.08 measured.
 
-The same sweep at a 360 px shard measures **13.20**, a ratio of 1.042 against
-the 512 px figure. Bytes per pixel-scene do not depend on the edge, which is
-what makes the working set fall with its square and what lets a 360 px shard
-fit an instance a 512 px shard does not. Asserting that against the formula
-would have been circular, so `tests/test_shard_plan.py` compares the two
-measured slopes. Erring high is the safe direction: over-reserving costs worker
-slots an operator can add back, and under-reserving cost a fleet instance its
-workers.
+The surplus is the read. GDAL decodes whole blocks out of a tiled source and
+`odc.stac` assembles them into the target array, and the five named arrays do
+not cover that intermediate. Which allocation holds it is unverified, because
+this document profiles none. So the model is the five named arrays plus
+measured read overhead, and 15 bounds every point of all six committed sweeps.
 
-Both slopes are least-squares fits, and the earlier figures of 12.73 and 12.89
-were not. They came from averaging consecutive differences, which agreed to
-1.3% while the differences being averaged ran 10.9 to 16.4 bytes. Six points
-do not support three decimal places. They do support the conclusion: the two
-edges agree to within a few percent, and the model bounds every point.
+Erring high is the safe direction: over-reserving costs worker slots an
+operator can add back, and under-reserving cost a fleet instance its workers.
+
+**What made 13 look safe for a week.** Two things, and both are properties of
+how it was measured rather than of the pipeline. The synthetic fixture writes
+one untiled raster at the shard's own edge and reads it whole, so it never
+allocates the intermediate, and it fits 12.67 to 13.20. And a staged sweep that
+stops shallow agrees with 13 as well, because the 0.25 GiB fixed term still
+covers the gap below about 280 scenes. The first staged sweep reached 100
+scenes. Every fleet shard runs 195 to 820.
+
+Both edges' slopes are least-squares fits, and the earlier figures of 12.73 and
+12.89 were not. They came from averaging consecutive differences, which agreed
+to 1.3% while the differences being averaged ran 10.9 to 16.4 bytes.
 
 #### The synthetic fixture is not the read the fleet does
 
@@ -786,11 +798,34 @@ a larger number and launched anyway.
 
 `worker_memory_guard` refuses it, and it runs before the first GET the way
 `staging.disk_guard` does, so a configuration that cannot fit does not buy its
-objects first. The demand is every worker's worst shard plus the client's two
-full-tile arrays, which are `uint16` of p95 and twelve `uint8` monthly counts:
-14 bytes an output pixel, or 4.2 GiB for an 18,000 px tile. The message names
-the demand, the machine, and the shard edge that would fit. `--force` spends
-the margin for an operator who knows the model runs 6 to 14 percent high.
+objects first. The demand is the sum of the slice's shard depths, deepest first
+up to the slot count, plus the client's two full-tile arrays, which are
+`uint16` of p95 and twelve `uint8` monthly counts: 14 bytes an output pixel, or
+4.2 GiB for an 18,000 px tile. The refusal states the demand, the machine's
+total, and the shard edge that would fit. `--force` spends the margin.
+
+It summed nothing at first. It multiplied the worst shard by the slot count,
+and MEASURED on the deep slice of S30W065 that over-reserves by **2.77x**:
+
+| | GiB |
+|---|---|
+| 64 x worst shard | 102.6 |
+| sum of the 64 actual depths | 64.0 |
+| simultaneous peak, sampled at 0.5 s | **37.0** |
+
+The slice runs 203 to 820 scenes deep with a median of 401, so the worst shard
+is not what the other 63 workers hold. Summing removes 38 of the 66 GiB of
+over-reservation and needs no new measurement, because `work_idx` already
+carries every depth.
+
+The remaining 1.73x is peak non-coincidence. The per-process column of
+`memory.csv` puts the sum of each worker's own high-water mark at 48.6 GiB
+against 37.0 ever live at once, so the workers do not peak together. That
+headroom stays, because a sampler reports only the peaks it catches, and this
+one was coarse enough to miss them outright: the interval was
+0.5 s while shards ran 1.40 s, and the busiest worker read 1.15 GiB where the
+20 ms sweep measures 1.57 for the same depth. The default interval is 0.05 s
+now, and the 37.0 GiB figure is a lower bound taken before that change.
 
 That guard reads the host it runs on, which is the right machine only once the
 run is already there. Planning happens somewhere else, so `--dry-run` takes

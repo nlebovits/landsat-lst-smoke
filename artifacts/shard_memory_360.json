@@ -6,59 +6,59 @@
     {
       "scenes": 100,
       "shard_px": 360,
-      "peak_rss_gib": 0.35,
-      "predicted_gib": 0.407,
-      "ratio": 0.861,
-      "seconds": 3.35
+      "peak_rss_gib": 0.337,
+      "predicted_gib": 0.431,
+      "ratio": 0.782,
+      "seconds": 3.18
     },
     {
       "scenes": 200,
       "shard_px": 360,
-      "peak_rss_gib": 0.499,
-      "predicted_gib": 0.564,
-      "ratio": 0.885,
-      "seconds": 3.47
+      "peak_rss_gib": 0.502,
+      "predicted_gib": 0.612,
+      "ratio": 0.82,
+      "seconds": 3.48
     },
     {
       "scenes": 300,
       "shard_px": 360,
-      "peak_rss_gib": 0.668,
-      "predicted_gib": 0.721,
-      "ratio": 0.927,
-      "seconds": 3.74
+      "peak_rss_gib": 0.649,
+      "predicted_gib": 0.793,
+      "ratio": 0.818,
+      "seconds": 3.78
     },
     {
       "scenes": 404,
       "shard_px": 360,
-      "peak_rss_gib": 0.805,
-      "predicted_gib": 0.884,
-      "ratio": 0.91,
-      "seconds": 3.99
+      "peak_rss_gib": 0.809,
+      "predicted_gib": 0.981,
+      "ratio": 0.824,
+      "seconds": 3.94
     },
     {
       "scenes": 500,
       "shard_px": 360,
-      "peak_rss_gib": 0.995,
-      "predicted_gib": 1.035,
-      "ratio": 0.962,
-      "seconds": 4.35
+      "peak_rss_gib": 0.998,
+      "predicted_gib": 1.155,
+      "ratio": 0.864,
+      "seconds": 4.3
     },
     {
       "scenes": 700,
       "shard_px": 360,
-      "peak_rss_gib": 1.301,
-      "predicted_gib": 1.348,
-      "ratio": 0.965,
-      "seconds": 5.11
+      "peak_rss_gib": 1.267,
+      "predicted_gib": 1.517,
+      "ratio": 0.835,
+      "seconds": 4.93
     }
   ],
-  "worst_ratio_error": 0.139,
+  "worst_ratio_error": 0.218,
   "under_predicted": [],
-  "model_bytes_per_pixel_scene": 13,
+  "model_bytes_per_pixel_scene": 15,
   "model_fixed_gib": 0.25,
-  "slope_bytes_per_pixel_scene": 13.2,
-  "intercept_gib": 0.184,
-  "step_slope_min": 10.91,
-  "step_slope_max": 16.4,
+  "slope_bytes_per_pixel_scene": 12.97,
+  "intercept_gib": 0.185,
+  "step_slope_min": 11.14,
+  "step_slope_max": 16.31,
   "ru_maxrss_gib": 0.085
 }
