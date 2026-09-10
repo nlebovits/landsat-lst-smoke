@@ -1,0 +1,48 @@
+{
+  "mode": "memory",
+  "source": "staged",
+  "shard_px": 512,
+  "rows": [
+    {
+      "scenes": 200,
+      "shard_px": 512,
+      "peak_rss_gib": 0.861,
+      "predicted_gib": 0.982,
+      "ratio": 0.876,
+      "seconds": 2.45
+    },
+    {
+      "scenes": 400,
+      "shard_px": 512,
+      "peak_rss_gib": 1.57,
+      "predicted_gib": 1.715,
+      "ratio": 0.915,
+      "seconds": 3.4
+    },
+    {
+      "scenes": 600,
+      "shard_px": 512,
+      "peak_rss_gib": 2.276,
+      "predicted_gib": 2.447,
+      "ratio": 0.93,
+      "seconds": 4.65
+    },
+    {
+      "scenes": 820,
+      "shard_px": 512,
+      "peak_rss_gib": 3.046,
+      "predicted_gib": 3.253,
+      "ratio": 0.936,
+      "seconds": 5.97
+    }
+  ],
+  "worst_ratio_error": 0.124,
+  "under_predicted": [],
+  "model_bytes_per_pixel_scene": 15,
+  "model_fixed_gib": 0.25,
+  "slope_bytes_per_pixel_scene": 14.44,
+  "intercept_gib": 0.158,
+  "step_slope_min": 14.34,
+  "step_slope_max": 14.52,
+  "ru_maxrss_gib": 0.078
+}

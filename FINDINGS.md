@@ -725,13 +725,19 @@ scenes on an `m6id.16xlarge`, at the depths a fleet shard runs:
 
 | scenes | 200 | 400 | 600 | 820 |
 |---|---|---|---|---|
-| 360 px, GiB | 0.54 | 0.87 | 1.20 | 1.57 |
-| 512 px, GiB | 0.88 | 1.52 | 2.21 | **3.08** |
+| 360 px, GiB | 0.53 | 0.87 | 1.20 | 1.62 |
+| 512 px, GiB | 0.86 | 1.57 | 2.28 | **3.05** |
 
-Least squares puts the slope at **13.68** bytes per pixel-scene at 360 px and
-**14.52** at 512. A 13-byte model reads low at 600 and 820 scenes on both
-edges, worst by 8% at 512 px and 820 scenes, where it predicts 2.85 GiB against
-3.08 measured.
+Least squares puts the slope at **14.47** bytes per pixel-scene at 360 px and
+**14.44** at 512, a ratio of 1.002. A 13-byte model reads low at 600 and 820
+scenes on both edges, worst by 7% at 512 px and 820 scenes, where it predicts
+2.85 GiB against 3.05 measured.
+
+The sweep ran on two instances. One fit 13.68 and 14.52, the other 14.47 and
+14.44, so one edge's slope moves about 6% between runs while the pair stays
+near 14.5. On the second run the two edges agree to 0.2%, which measures the
+px-squared scaling on the source a fleet reads. The synthetic fixture could
+only assert it.
 
 The surplus is the read. GDAL decodes whole blocks out of a tiled source and
 `odc.stac` assembles them into the target array, and the five named arrays do
@@ -818,14 +824,46 @@ is not what the other 63 workers hold. Summing removes 38 of the 66 GiB of
 over-reservation and needs no new measurement, because `work_idx` already
 carries every depth.
 
-The remaining 1.73x is peak non-coincidence. The per-process column of
+The remaining 1.9x is peak non-coincidence. The per-process column of
 `memory.csv` puts the sum of each worker's own high-water mark at 48.6 GiB
 against 37.0 ever live at once, so the workers do not peak together. That
-headroom stays, because a sampler reports only the peaks it catches, and this
-one was coarse enough to miss them outright: the interval was
-0.5 s while shards ran 1.40 s, and the busiest worker read 1.15 GiB where the
-20 ms sweep measures 1.57 for the same depth. The default interval is 0.05 s
-now, and the 37.0 GiB figure is a lower bound taken before that change.
+headroom stays.
+
+#### Frisky agrees with the sampler
+
+The whole reason to add `memory_sampler.py` was that nothing measured worker
+RSS. frisky measured it all along. `frisky observe overview` on the spans file
+the run already writes:
+
+```
+perf    wall-clock 92.3s   workers 64   tasks 64   spans 7871
+memory  35.87 GiB / 832.00 GiB (4% peak)   spilled 0 B   unspilled 0 B
+```
+
+35.87 GiB against the sampler's 35.99, a 0.3% difference, from two independent
+instruments. And `spilled 0 B` says the workers never came near the limit,
+which no external sampler can report.
+
+That is the cross-check the model needed, and it was one command away for the
+whole branch. `observe overview`, `workers`, `stragglers` and `prefixes` all
+read a spans file offline, so they work after the instance is gone.
+`observe detail` needs a live dashboard URL and cannot.
+
+#### A shard runs about a minute, not 1.4 s
+
+`compute 87.1s for 64 shards (1.36s each)` reads as a per-shard duration and is
+not one. It is wall clock over shard count, and all 64 shards run at once.
+frisky's `worker.exec.call` spans give the real distribution:
+
+| per-shard seconds | min 39.5 | p50 59.9 | max 86.9 |
+|---|---|---|---|
+
+Worth stating because a 2.2x spread across shards of 203 to 820 scenes is the
+imbalance a fleet driver would want to see, and because the misreading briefly
+justified a change to the sampling interval that the measurement then refuted:
+a shard runs long enough that 0.5 s samples it about 120 times, and 0.05 s
+found the same peak from a file 6.6x larger. The default stays at 0.5 s and the
+progress line now says which figure it prints.
 
 That guard reads the host it runs on, which is the right machine only once the
 run is already there. Planning happens somewhere else, so `--dry-run` takes

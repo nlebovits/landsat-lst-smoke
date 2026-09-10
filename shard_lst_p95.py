@@ -723,10 +723,12 @@ def parse_args(argv=None):
     p.add_argument(
         "--sample-interval",
         type=float,
-        default=0.05,
+        default=0.5,
         help="seconds between memory samples. The sampler runs in its own "
         "process and writes memory.csv beside the summary, so a run records "
-        "the worker RSS that shard_bytes only predicts",
+        "the worker RSS that shard_bytes only predicts. A shard runs 40 to "
+        "87 s, so the default takes about 120 samples of each one, and "
+        "0.05 s produced the same peak from a 6.6x larger file",
     )
     p.add_argument(
         "--dry-run",
@@ -1224,7 +1226,8 @@ def main(argv=None) -> int:  # noqa: C901
         )
     print(
         f"compute       {compute_s:.1f}s for {len(work)} shards "
-        f"({compute_s / max(len(work), 1):.2f}s each)"
+        f"({compute_s / max(len(work), 1):.2f}s/shard of wall clock, not "
+        f"per-shard duration)"
     )
     print(f"client RSS    {peak['rss']:.2f} GiB peak")
     if workers_gib:
