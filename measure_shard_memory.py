@@ -278,6 +278,16 @@ def fit_slope(rows) -> dict:
     sxx = sum(x * x for x in xs)
     sxy = sum(x * y for x, y in zip(xs, ys, strict=True))
     denom = n * sxx - sx * sx
+    if denom == 0:
+        # Every point at the same depth. A sweep against a stage directory
+        # holding fewer scenes than its smallest requested count collapses to
+        # one x, and a line through one x has no slope.
+        return {
+            "slope_bytes_per_pixel_scene": None,
+            "intercept_gib": None,
+            "step_slope_min": None,
+            "step_slope_max": None,
+        }
     slope = (n * sxy - sx * sy) / denom
     intercept = (sy - slope * sx) / n
     pairs = sorted(zip(xs, ys, strict=True))
@@ -313,6 +323,19 @@ def measure_memory(args) -> dict:
     if stage_dir is not None:
         available = len(staged_items(stage_dir, 1 << 30))
         scenes = sorted({min(n, available) for n in args.scenes})
+        if len(scenes) < 2:
+            # Two depths at least, or there is no slope to fit. Caught here
+            # rather than in the fit, because the fix is to stage more scenes
+            # or ask for shallower ones and neither is obvious from a
+            # ZeroDivisionError.
+            msg = (
+                f"{stage_dir} holds {available} scenes and --scenes "
+                f"{' '.join(str(n) for n in args.scenes)} caps to {scenes}. "
+                f"A slope needs at least two depths. Stage more scenes, or "
+                f"sweep below {available}, for example --scenes "
+                f"{available // 4} {available // 2} {available}."
+            )
+            raise SystemExit(msg)
         print(f"  {available} staged scenes, sweeping {scenes}", flush=True)
     else:
         scenes = list(args.scenes)
@@ -492,12 +515,15 @@ def main(argv=None) -> int:
     report = measure_memory(args) if args.mode == "memory" else measure_timing(args)
 
     if args.mode == "memory":
-        print(
-            f"\nslope         {report['slope_bytes_per_pixel_scene']} B/px-scene "
-            f"by least squares, steps {report['step_slope_min']} to "
-            f"{report['step_slope_max']}"
-        )
-        print(f"intercept     {report['intercept_gib']} GiB")
+        if report["slope_bytes_per_pixel_scene"] is None:
+            print("\nslope         not fitted: every point ran at one depth")
+        else:
+            print(
+                f"\nslope         {report['slope_bytes_per_pixel_scene']} "
+                f"B/px-scene by least squares, steps "
+                f"{report['step_slope_min']} to {report['step_slope_max']}"
+            )
+            print(f"intercept     {report['intercept_gib']} GiB")
         under = report["under_predicted"]
         print(
             f"model         {report['model_bytes_per_pixel_scene']} B/px-scene "

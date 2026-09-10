@@ -377,6 +377,58 @@ class TestWorkerMemoryGuard:
         assert "--shard 0" in str(exc.value)
 
 
+class TestFitSlope:
+    """A sweep that ran at one depth has no slope, and must say so.
+
+    A staged sweep caps every requested count at the scenes on disk, so asking
+    for 200 400 600 820 against a directory of 100 collapses to a single depth.
+    Least squares then divides by zero, three minutes into a run on a machine
+    that is being paid for by the hour.
+    """
+
+    def _rows(self, depths, shard_px=360):
+        return [
+            {"scenes": n, "shard_px": shard_px, "peak_rss_gib": 0.2 + n * 0.001}
+            for n in depths
+        ]
+
+    def test_one_depth_yields_no_slope_rather_than_an_exception(self):
+        import measure_shard_memory
+
+        fit = measure_shard_memory.fit_slope(self._rows([100]))
+        assert fit["slope_bytes_per_pixel_scene"] is None
+        assert fit["intercept_gib"] is None
+
+    def test_repeated_depths_yield_no_slope(self):
+        import measure_shard_memory
+
+        fit = measure_shard_memory.fit_slope(self._rows([100, 100, 100]))
+        assert fit["slope_bytes_per_pixel_scene"] is None
+
+    def test_two_depths_are_enough(self):
+        import measure_shard_memory
+
+        fit = measure_shard_memory.fit_slope(self._rows([100, 200]))
+        assert fit["slope_bytes_per_pixel_scene"] > 0
+
+    def test_it_recovers_a_slope_it_was_given(self):
+        # 13 bytes per pixel-scene and a 0.25 GiB intercept, exactly.
+        import measure_shard_memory
+
+        px = 360
+        rows = [
+            {
+                "scenes": n,
+                "shard_px": px,
+                "peak_rss_gib": px * px * n * 13 / 1024**3 + 0.25,
+            }
+            for n in (100, 200, 400, 800)
+        ]
+        fit = measure_shard_memory.fit_slope(rows)
+        assert fit["slope_bytes_per_pixel_scene"] == pytest.approx(13, abs=0.01)
+        assert fit["intercept_gib"] == pytest.approx(0.25, abs=0.01)
+
+
 class TestTheDryRunChecksTheTargetMachine:
     """Planning happens on a laptop. The run happens on an instance.
 
