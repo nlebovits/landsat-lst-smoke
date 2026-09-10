@@ -61,23 +61,58 @@ def fresh_checkout(tmp_path, *, with_mask=False):
 
     Args:
         tmp_path: Where to build the checkout.
-        with_mask: Also write the two artifacts the output mask reads. The
-            buffered geometry is committed and is copied; the ASTER GED
-            observation counts are gitignored and several gigabytes of granules
-            behind, so a synthetic mosaic stands in. What is under test is
-            whether the inline block declares what the mask imports, and a
-            synthetic mosaic exercises the same imports as a real one.
+        with_mask: Also write the artifacts the output mask reads, and restamp
+            the tile list and the inventory so the three agree about the land
+            geometry. The committed geometry slice stands in for the 16 MB
+            artifact and the synthetic mosaic for the 45 MB one. Both are
+            gitignored and neither is what is under test: this asks whether the
+            inline block declares what the mask imports, and a stand-in
+            exercises the same imports as the real thing.
     """
     work = tmp_path / "checkout"
     (work / "artifacts").mkdir(parents=True)
     for script in ROOT.glob("*.py"):
         shutil.copy2(script, work / script.name)
     shutil.copy2(SLICE, work / "artifacts" / SLICE.name)
-    if with_mask:
-        from conftest import LAND_GEOMETRY, write_numobs
+    if not with_mask:
+        return work
 
-        shutil.copy2(LAND_GEOMETRY, work / "artifacts" / LAND_GEOMETRY.name)
-        write_numobs(work / "artifacts" / "aster_numobs.tif")
+    import json
+
+    from conftest import (
+        LAND_GEOMETRY,
+        _restamp_parquet,
+        land_geometry_sha256,
+        write_numobs,
+    )
+
+    # Under the names the scripts default to, not the fixtures' own. A fleet
+    # instance holds the real geometry at `artifacts/land_buffered.gpkg`, and
+    # the point of this checkout is to be that instance.
+    shutil.copy2(LAND_GEOMETRY, work / "artifacts" / "land_buffered.gpkg")
+    write_numobs(work / "artifacts" / "aster_numobs.tif")
+
+    # And internally consistent. `fleet_plan` refuses a plan whose tile list,
+    # inventory and mosaic disagree about the land geometry, so all three name
+    # the digest of the geometry this checkout actually holds.
+    digest = land_geometry_sha256()
+
+    def stamp_tiles(meta):
+        meta[b"land_geometry_sha256"] = digest.encode()
+        return meta
+
+    def stamp_inventory(meta):
+        manifest = json.loads(meta[b"manifest"])
+        manifest["land_geometry_sha256"] = digest
+        meta[b"manifest"] = json.dumps(manifest).encode()
+        return meta
+
+    _restamp_parquet(
+        ROOT / "artifacts" / "land_tiles.parquet",
+        work / "artifacts" / "land_tiles.parquet",
+        stamp_tiles,
+    )
+    _restamp_parquet(SLICE, work / "artifacts" / SLICE.name, stamp_inventory)
     return work
 
 
@@ -169,10 +204,6 @@ class TestTheFleetPlannerResolves:
         # the mask as well. Its inline block was the shortest in the
         # repository before this and is the one a new import gets added around.
         work = fresh_checkout(tmp_path, with_mask=True)
-        shutil.copy2(
-            ROOT / "artifacts" / "land_tiles.parquet",
-            work / "artifacts" / "land_tiles.parquet",
-        )
         proc = run_script(
             work,
             "fleet_plan.py",
