@@ -22,8 +22,13 @@ because numpy allocates it rather than the pipeline:
     copy    float32  4      nanpercentile partitions a copy, not in place
 
 Thirteen bytes per pixel-scene, not four. The old model reported 0.39 GiB for a
-shard this measures at 1.52, so a dry-run budget of 25 GiB across 64 slots
+shard this measures at 1.42, so a dry-run budget of 25 GiB across 64 slots
 described a real demand of 97 on a 128 GiB box.
+
+Thirteen is the accounting figure and it sits above the measurement, which is
+the direction to be wrong in. Least squares over the committed sweeps puts the
+slope at 12.67 bytes at 512 px and 13.20 at 360, and the model bounds all
+twelve points.
 
 `frisky` had the right number the whole time. A full-tile run reported
 `memory 95.93 GiB / 102.40 GiB (94%)` across 64 workers, which is 1.50 GiB
@@ -68,6 +73,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from shard_lst_p95 import (  # noqa: E402
     GIB,
+    SHARD_BYTES_PER_PIXEL_SCENE,
+    SHARD_FIXED_GIB,
     Shard,
     configure_read_env,
     process_shard,
@@ -121,8 +128,16 @@ def item_from_files(scene_id: str, bands: dict[str, str]) -> dict:
     carries the dtype and nodata, and without it `odc.stac` loads both bands as
     float32 and the QA mask fails on a bitwise operation against a float. That
     would also measure the wrong arrays, which is the point of this script.
+
+    Every href is resolved to an absolute path. `odc.stac.parse_item` raises
+    `Can not determine absolute path for asset` on a relative one, and both
+    `--work-dir` and `--stage-dir` default to or accept relative paths, so the
+    regenerate command in the tests failed before this line existed.
+    `staging.stage_scenes` writes absolute hrefs for the same reason.
     """
     import rasterio
+
+    bands = {band: str(Path(href).resolve()) for band, href in bands.items()}
 
     with rasterio.open(bands["lwir11"]) as ds:
         epsg = ds.crs.to_epsg()
@@ -225,17 +240,58 @@ def run_once(shard: Shard, items, read_threads: int) -> tuple[dict, float, float
     return out, elapsed, peak["rss"] / GIB
 
 
-def _one_point(shard_px, n_scenes, work, read_threads, out):
+def _one_point(shard_px, n_scenes, work, read_threads, out, stage_dir=None):
     """One scene count, in a process that has run nothing else.
 
     This has to be a fresh interpreter. glibc does not return freed arenas to
     the kernel promptly, so a second shard measured in the same process reports
     the high-water mark of the first. Two sweeps over the same six points
     disagreed by 18% at 700 scenes until each ran on its own.
+
+    `stage_dir` selects the source. Staged scenes are the production read
+    pattern: real tiled COGs much larger than the shard, read through a window.
+    The synthetic fixture writes one untiled raster at the shard's own edge,
+    which couples shard size to source layout. That coupling is why
+    `--mode timing` refuses the fixture, and the same objection applies here.
     """
-    items = synthetic_items(n_scenes, shard_px, work)
+    items = (
+        staged_items(stage_dir, n_scenes)
+        if stage_dir is not None
+        else synthetic_items(n_scenes, shard_px, work)
+    )
     _, elapsed, rss = run_once(shard_at(shard_px), items, read_threads)
-    out.put((rss, elapsed))
+    out.put((rss, elapsed, len(items)))
+
+
+def fit_slope(rows) -> dict:
+    """Bytes per pixel-scene and the fixed term, by least squares.
+
+    The mean of consecutive differences was the earlier estimator and it hides
+    the scatter it averages: at 360 px those differences run 9.2 to 16.4 bytes
+    while their mean lands within 1.3% of the 512 px mean. Least squares uses
+    every point once and the reported spread says how much to trust it.
+    """
+    xs = [r["scenes"] * r["shard_px"] ** 2 for r in rows]
+    ys = [r["peak_rss_gib"] * GIB for r in rows]
+    n = len(xs)
+    sx, sy = sum(xs), sum(ys)
+    sxx = sum(x * x for x in xs)
+    sxy = sum(x * y for x, y in zip(xs, ys, strict=True))
+    denom = n * sxx - sx * sx
+    slope = (n * sxy - sx * sy) / denom
+    intercept = (sy - slope * sx) / n
+    pairs = sorted(zip(xs, ys, strict=True))
+    steps = [
+        (b[1] - a[1]) / (b[0] - a[0])
+        for a, b in zip(pairs, pairs[1:], strict=False)
+        if b[0] != a[0]
+    ]
+    return {
+        "slope_bytes_per_pixel_scene": round(slope, 2),
+        "intercept_gib": round(intercept / GIB, 3),
+        "step_slope_min": round(min(steps), 2) if steps else None,
+        "step_slope_max": round(max(steps), 2) if steps else None,
+    }
 
 
 def measure_memory(args) -> dict:
@@ -243,25 +299,40 @@ def measure_memory(args) -> dict:
 
     The model has to track the measurement as scenes rise, not just match at
     one point, because the fleet reads shards from 199 to 971 scenes deep.
+
+    `--stage-dir` swaps the synthetic fixture for real staged COGs. Scene
+    counts then cap at what is staged, so a sweep asking for more points than
+    the directory holds collapses to the counts it can serve.
     """
     import multiprocessing as mp
 
     ctx = mp.get_context("spawn")
+    stage_dir = Path(args.stage_dir) if args.stage_dir else None
+    source = "staged" if stage_dir else "synthetic"
     work = Path(args.work_dir) / f"synthetic-{args.shard}"
+    if stage_dir is not None:
+        available = len(staged_items(stage_dir, 1 << 30))
+        scenes = sorted({min(n, available) for n in args.scenes})
+        print(f"  {available} staged scenes, sweeping {scenes}", flush=True)
+    else:
+        scenes = list(args.scenes)
+
     rows = []
-    for n in args.scenes:
-        synthetic_items(n, args.shard, work)  # write the rasters in this process
+    for n in scenes:
+        if stage_dir is None:
+            synthetic_items(n, args.shard, work)  # write the rasters here
         queue = ctx.Queue()
         proc = ctx.Process(
-            target=_one_point, args=(args.shard, n, work, args.read_threads, queue)
+            target=_one_point,
+            args=(args.shard, n, work, args.read_threads, queue, stage_dir),
         )
         proc.start()
-        rss, elapsed = queue.get()
+        rss, elapsed, n_used = queue.get()
         proc.join()
-        predicted = shard_bytes(args.shard, n)
+        predicted = shard_bytes(args.shard, n_used)
         rows.append(
             {
-                "scenes": n,
+                "scenes": n_used,
                 "shard_px": args.shard,
                 "peak_rss_gib": round(rss, 3),
                 "predicted_gib": round(predicted, 3),
@@ -270,17 +341,25 @@ def measure_memory(args) -> dict:
             }
         )
         print(
-            f"  {n:>5} scenes   measured {rss:5.2f} GiB   model {predicted:5.2f} GiB"
+            f"  {n_used:>5} scenes   measured {rss:5.2f} GiB   "
+            f"model {predicted:5.2f} GiB"
             f"   ratio {rss / predicted:5.2f}   {elapsed:6.1f}s",
             flush=True,
         )
     worst = max(abs(r["ratio"] - 1.0) for r in rows)
     return {
         "mode": "memory",
+        "source": source,
         "shard_px": args.shard,
         "rows": rows,
         "worst_ratio_error": round(worst, 3),
-        "model_bytes_per_pixel_scene": 13,
+        "under_predicted": [r["scenes"] for r in rows if r["ratio"] > 1.0],
+        # Written from the imported constants rather than typed here. An
+        # earlier sweep recorded 13 beside a `predicted_gib` column computed at
+        # 18, and no test read that column.
+        "model_bytes_per_pixel_scene": SHARD_BYTES_PER_PIXEL_SCENE,
+        "model_fixed_gib": SHARD_FIXED_GIB,
+        **fit_slope(rows),
         "ru_maxrss_gib": round(
             resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 / GIB, 3
         ),
@@ -371,7 +450,9 @@ def parse_args(argv=None):
         "--scenes",
         type=int,
         nargs="+",
-        default=(100, 200, 404, 600),
+        # The six counts the committed sweeps hold, so the regenerate command
+        # in the tests reproduces the artifact rather than a shorter sweep.
+        default=(100, 200, 300, 404, 500, 700),
         help="scene counts to sweep, for --mode memory",
     )
     p.add_argument(
@@ -381,7 +462,14 @@ def parse_args(argv=None):
         default=DEFAULT_EDGES,
         help="shard edges to sweep, for --mode timing",
     )
-    p.add_argument("--stage-dir", type=Path, default=None)
+    p.add_argument(
+        "--stage-dir",
+        type=Path,
+        default=None,
+        help="staged scenes to read. Required for --mode timing. Optional for "
+        "--mode memory, where it replaces the synthetic fixture with real "
+        "tiled COGs and caps the sweep at the scenes on disk",
+    )
     p.add_argument("--max-scenes", type=int, default=10)
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--read-threads", type=int, default=4)
@@ -405,12 +493,26 @@ def main(argv=None) -> int:
 
     if args.mode == "memory":
         print(
-            f"\nworst ratio error {report['worst_ratio_error']:.1%}. "
-            f"frisky reported 1.50 GiB per worker on the full-tile run."
+            f"\nslope         {report['slope_bytes_per_pixel_scene']} B/px-scene "
+            f"by least squares, steps {report['step_slope_min']} to "
+            f"{report['step_slope_max']}"
         )
+        print(f"intercept     {report['intercept_gib']} GiB")
+        under = report["under_predicted"]
+        print(
+            f"model         {report['model_bytes_per_pixel_scene']} B/px-scene "
+            f"+ {report['model_fixed_gib']} GiB, worst ratio error "
+            f"{report['worst_ratio_error']:.1%}"
+        )
+        print(
+            f"              under-predicts at {under}"
+            if under
+            else "              bounds every point"
+        )
+        print("frisky reported 1.50 GiB per worker on the full-tile run.")
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(report, indent=2))
+        args.out.write_text(json.dumps(report, indent=2) + "\n")
         print(f"written       {args.out}")
     return 0
 

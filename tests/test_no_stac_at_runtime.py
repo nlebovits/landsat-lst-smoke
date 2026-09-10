@@ -42,7 +42,13 @@ from land_tiles import tile_bounds  # noqa: E402
 TILE = "S30W065"
 
 #: The modules a VM imports to turn a tile into a composite.
-RUNTIME_MODULES = ("shard_lst_p95", "tile_inventory", "land_tiles", "staging")
+RUNTIME_MODULES = (
+    "shard_lst_p95",
+    "tile_inventory",
+    "land_tiles",
+    "staging",
+    "memory_sampler",
+)
 
 #: Names that mean a catalogue is in reach.
 STAC_NAMES = ("pystac_client", "stac_reference", "earth-search.aws", "Client.open")
@@ -296,7 +302,7 @@ class TestTheComputePathIsOffline:
             range(len(items)),
             tmp_path / "stage",
             threads=2,
-            client_factory=lambda: fake,
+            client_factory=lambda _n: fake,
         )
 
         # Three scenes, two bands, one GET each. Not one per shard that reads
@@ -334,7 +340,7 @@ class TestTheComputePathIsOffline:
             [0, 1, 2, 0, 1, 2],
             tmp_path / "stage",
             threads=2,
-            client_factory=lambda: fake,
+            client_factory=lambda _n: fake,
         )
 
         assert len(fake.calls) == 6

@@ -1,57 +1,64 @@
 {
   "mode": "memory",
+  "source": "synthetic",
   "shard_px": 360,
   "rows": [
     {
       "scenes": 100,
       "shard_px": 360,
-      "peak_rss_gib": 0.338,
+      "peak_rss_gib": 0.35,
       "predicted_gib": 0.407,
-      "ratio": 0.831,
-      "seconds": 3.16
+      "ratio": 0.861,
+      "seconds": 3.35
     },
     {
       "scenes": 200,
       "shard_px": 360,
-      "peak_rss_gib": 0.49,
+      "peak_rss_gib": 0.499,
       "predicted_gib": 0.564,
-      "ratio": 0.869,
-      "seconds": 3.45
+      "ratio": 0.885,
+      "seconds": 3.47
     },
     {
       "scenes": 300,
       "shard_px": 360,
-      "peak_rss_gib": 0.637,
+      "peak_rss_gib": 0.668,
       "predicted_gib": 0.721,
-      "ratio": 0.884,
-      "seconds": 3.77
+      "ratio": 0.927,
+      "seconds": 3.74
     },
     {
       "scenes": 404,
       "shard_px": 360,
-      "peak_rss_gib": 0.813,
+      "peak_rss_gib": 0.805,
       "predicted_gib": 0.884,
-      "ratio": 0.92,
-      "seconds": 4.03
+      "ratio": 0.91,
+      "seconds": 3.99
     },
     {
       "scenes": 500,
       "shard_px": 360,
-      "peak_rss_gib": 0.92,
+      "peak_rss_gib": 0.995,
       "predicted_gib": 1.035,
-      "ratio": 0.889,
+      "ratio": 0.962,
       "seconds": 4.35
     },
     {
       "scenes": 700,
       "shard_px": 360,
-      "peak_rss_gib": 1.316,
+      "peak_rss_gib": 1.301,
       "predicted_gib": 1.348,
-      "ratio": 0.976,
-      "seconds": 5.03
+      "ratio": 0.965,
+      "seconds": 5.11
     }
   ],
-  "worst_ratio_error": 0.169,
+  "worst_ratio_error": 0.139,
+  "under_predicted": [],
   "model_bytes_per_pixel_scene": 13,
-  "ru_maxrss_gib": 0.074
+  "model_fixed_gib": 0.25,
+  "slope_bytes_per_pixel_scene": 13.2,
+  "intercept_gib": 0.184,
+  "step_slope_min": 10.91,
+  "step_slope_max": 16.4,
+  "ru_maxrss_gib": 0.085
 }

@@ -50,6 +50,7 @@ from lst_qa import (
     masked_celsius,
 )
 from land_tiles import tile_bounds
+from memory_sampler import MemorySampler
 from stac_window import (
     DEFAULT_CLOUD_COVER_LT,
     DEFAULT_END,
@@ -255,6 +256,74 @@ def shard_bytes(shard_px: int, n_scenes: int) -> float:
     """
     arrays = shard_px * shard_px * n_scenes * SHARD_BYTES_PER_PIXEL_SCENE / GIB
     return arrays + SHARD_FIXED_GIB
+
+
+#: Bytes the client holds per output pixel while it gathers. `lst_out` is
+#: uint16 at height by width, and `qa_out` is uint8 at 12 by height by width.
+#: A full tile at 18,000 px square is 4.2 GiB of it.
+CLIENT_BYTES_PER_OUTPUT_PIXEL = 2 + 12
+
+
+def client_bytes(width: int, height: int) -> float:
+    """The two full-tile arrays the client holds while it gathers, in GiB."""
+    return width * height * CLIENT_BYTES_PER_OUTPUT_PIXEL / GIB
+
+
+def worker_memory_guard(
+    shard_px: int,
+    max_scenes: int,
+    workers: int,
+    width: int,
+    height: int,
+    *,
+    total_bytes: int | None = None,
+) -> float:
+    """Refuse a configuration that cannot fit, before the cluster starts.
+
+    `staging.disk_guard` refuses a fetch that cannot finish. This is the same
+    guard on the other resource, and it was missing. `shard_bytes` was
+    corrected after a `c6id.16xlarge` lost ten workers to coredumps, but the
+    corrected number only ever reached a `print`. The same configuration would
+    have launched again with a larger figure on the screen.
+
+    The demand is every worker's worst shard plus the client's two full-tile
+    arrays, because the client gathers into them while the workers are still
+    allocating.
+
+    Returns:
+        The demand in GiB, so the caller can report what it checked.
+
+    Raises:
+        SystemExit: naming the demand, the machine, and both escapes. The
+            operator's next decision is a smaller shard or fewer workers, and
+            the message carries the edge that would fit.
+    """
+    if total_bytes is None:
+        import psutil
+
+        total_bytes = psutil.virtual_memory().total
+    demand = workers * shard_bytes(shard_px, max_scenes) + client_bytes(width, height)
+    total = total_bytes / GIB
+    if demand <= total:
+        return demand
+    # Solve for the edge whose arrays leave the fixed terms room. Reported
+    # rather than applied, because shard size changes the output layout.
+    room = total - client_bytes(width, height) - workers * SHARD_FIXED_GIB
+    fits = (
+        int((room * GIB / (workers * max_scenes * SHARD_BYTES_PER_PIXEL_SCENE)) ** 0.5)
+        if room > 0
+        else 0
+    )
+    msg = (
+        f"{workers} workers x {shard_bytes(shard_px, max_scenes):.2f} GiB a shard "
+        f"at {shard_px} px and {max_scenes:,} scenes, plus "
+        f"{client_bytes(width, height):.2f} GiB of client output, needs "
+        f"{demand:.1f} GiB and this machine has {total:.1f} GiB. "
+        f"Use --shard {fits} or smaller, drop --workers, or pass --force to "
+        f"run it anyway. An undersized budget is what killed a c6id.16xlarge "
+        f"mid-run."
+    )
+    raise SystemExit(msg)
 
 
 # --------------------------------------------------------------------------
@@ -594,7 +663,18 @@ def parse_args(argv=None):
     p.add_argument(
         "--force",
         action="store_true",
-        help="run even if slots x read-threads oversubscribes the cores",
+        help="run even if slots x read-threads oversubscribes the cores, or "
+        "if the worker memory budget exceeds the machine. The memory model "
+        "over-predicts by 6 to 14 percent, so an operator who knows that can "
+        "spend the margin",
+    )
+    p.add_argument(
+        "--sample-interval",
+        type=float,
+        default=0.5,
+        help="seconds between memory samples. The sampler runs in its own "
+        "process and writes memory.csv beside the summary, so a run records "
+        "the worker RSS that shard_bytes only predicts",
     )
     p.add_argument(
         "--dry-run",
@@ -882,6 +962,23 @@ def main(argv=None) -> int:  # noqa: C901
     if args.max_shards:
         work_idx = work_idx[: args.max_shards]
 
+    # Before the first GET, like the disk guard, because a configuration that
+    # cannot fit should not buy its objects first. --force is the escape, and
+    # the rehearsal skips it: rehearse_shard allocates nothing.
+    memory_demand = None
+    if work_idx and not args.rehearse and not args.force:
+        memory_demand = worker_memory_guard(
+            args.shard,
+            max(len(idx) for _, idx in work_idx),
+            concurrency,
+            width,
+            height,
+        )
+        print(
+            f"memory        {memory_demand:.1f} GiB demanded across "
+            f"{concurrency} slots, fits"
+        )
+
     # Staging runs after --max-shards, so a smoke run over two shards fetches
     # the objects those two shards need and not the whole slice.
     stage_report = stage_scenes_for(args, item_dicts, work_idx)
@@ -901,6 +998,14 @@ def main(argv=None) -> int:  # noqa: C901
 
     proc = psutil.Process()
     peak = {"rss": 0.0}
+
+    # What the workers actually hold, sampled from outside them. `shard_bytes`
+    # predicts this and nothing on a production run had ever measured it, so
+    # the model was checked against its own output. The sampler starts before
+    # the cluster, because worker RSS peaks while they are all allocating.
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    sampler = MemorySampler(args.out_dir / "memory.csv", args.sample_interval)
+    sampler.start()
 
     cluster = frisky.LocalCluster(
         n_workers=args.workers,
@@ -957,6 +1062,10 @@ def main(argv=None) -> int:  # noqa: C901
                 f"{el / done:5.2f}s/shard  client RSS {peak['rss']:.1f} GiB"
             )
     compute_s = time.perf_counter() - t_compute
+    sampler.stop()
+    memory_peak = sampler.peak_between(0.0, time.monotonic())
+    workers_gib = memory_peak.get("workers_rss_peak_mb", 0.0) / 1024
+    tree_gib = memory_peak.get("tree_rss_peak_mb", 0.0) / 1024
 
     # Every shard has been gathered, so nothing reads the staged files again.
     # A failed run keeps them, which is what a rerun and a post-mortem both
@@ -977,11 +1086,20 @@ def main(argv=None) -> int:  # noqa: C901
         "raster": [height, width],
         "shard_px": args.shard,
         "n_shards": len(work),
-        "n_scenes": len(items),
+        # What the run composited, after the L2SR filter. The inventory total
+        # sits beside it, because the two differ by `scenes_dropped_no_thermal`
+        # and a reader cannot tell which one a single figure means.
+        "n_scenes": len(item_dicts),
+        "n_scenes_inventory": len(items),
         "search_s": t_search,
         "compute_s": compute_s,
         "s_per_shard": compute_s / max(len(work), 1),
         "client_rss_peak_gib": peak["rss"],
+        # MEASURED across the worker processes, not predicted. `shard_bytes`
+        # models the same quantity, so a run now says whether the model held.
+        "workers_rss_peak_gib": workers_gib,
+        "tree_rss_peak_gib": tree_gib,
+        "memory_demand_gib": memory_demand,
         "valid_fraction": float(valid.mean()),
         "shard_stats": stats,
         # Which inventory answered this run. A composite is only reproducible
@@ -1010,6 +1128,14 @@ def main(argv=None) -> int:  # noqa: C901
         f"({compute_s / max(len(work), 1):.2f}s each)"
     )
     print(f"client RSS    {peak['rss']:.2f} GiB peak")
+    if workers_gib:
+        # The model against the measurement, on every run. This is the check
+        # that was missing when a MEASURED table carried `shard_bytes` output.
+        against = ""
+        if memory_demand:
+            share = workers_gib / memory_demand
+            against = f" against {memory_demand:.1f} GiB modelled ({share:.0%})"
+        print(f"worker RSS    {workers_gib:.2f} GiB peak{against}")
     qa_mean = {MONTHS[i]: float(qa_out[i].mean()) for i in range(12)}
     summary["qa_count_per_month"] = qa_mean
     print("qa_count      " + "  ".join(f"{m} {v:.1f}" for m, v in qa_mean.items()))

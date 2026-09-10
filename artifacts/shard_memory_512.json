@@ -1,57 +1,64 @@
 {
   "mode": "memory",
+  "source": "synthetic",
   "shard_px": 512,
   "rows": [
     {
       "scenes": 100,
       "shard_px": 512,
-      "peak_rss_gib": 0.486,
-      "predicted_gib": 0.689,
-      "ratio": 0.705,
-      "seconds": 11.03
+      "peak_rss_gib": 0.491,
+      "predicted_gib": 0.567,
+      "ratio": 0.865,
+      "seconds": 11.59
     },
     {
       "scenes": 200,
       "shard_px": 512,
-      "peak_rss_gib": 0.781,
-      "predicted_gib": 1.129,
-      "ratio": 0.692,
-      "seconds": 17.67
+      "peak_rss_gib": 0.776,
+      "predicted_gib": 0.885,
+      "ratio": 0.877,
+      "seconds": 16.27
     },
     {
       "scenes": 300,
       "shard_px": 512,
-      "peak_rss_gib": 1.069,
-      "predicted_gib": 1.568,
-      "ratio": 0.682,
-      "seconds": 24.71
+      "peak_rss_gib": 1.108,
+      "predicted_gib": 1.202,
+      "ratio": 0.921,
+      "seconds": 23.42
     },
     {
       "scenes": 404,
       "shard_px": 512,
-      "peak_rss_gib": 1.391,
-      "predicted_gib": 2.025,
-      "ratio": 0.687,
-      "seconds": 31.56
+      "peak_rss_gib": 1.416,
+      "predicted_gib": 1.532,
+      "ratio": 0.924,
+      "seconds": 28.72
     },
     {
       "scenes": 500,
       "shard_px": 512,
-      "peak_rss_gib": 1.75,
-      "predicted_gib": 2.447,
-      "ratio": 0.715,
-      "seconds": 40.35
+      "peak_rss_gib": 1.739,
+      "predicted_gib": 1.837,
+      "ratio": 0.947,
+      "seconds": 29.12
     },
     {
       "scenes": 700,
       "shard_px": 512,
-      "peak_rss_gib": 2.324,
-      "predicted_gib": 3.326,
-      "ratio": 0.699,
-      "seconds": 51.58
+      "peak_rss_gib": 2.332,
+      "predicted_gib": 2.472,
+      "ratio": 0.943,
+      "seconds": 35.09
     }
   ],
-  "worst_ratio_error": 0.318,
+  "worst_ratio_error": 0.135,
+  "under_predicted": [],
   "model_bytes_per_pixel_scene": 13,
-  "ru_maxrss_gib": 0.072
+  "model_fixed_gib": 0.25,
+  "slope_bytes_per_pixel_scene": 12.67,
+  "intercept_gib": 0.174,
+  "step_slope_min": 11.67,
+  "step_slope_max": 13.78,
+  "ru_maxrss_gib": 0.085
 }

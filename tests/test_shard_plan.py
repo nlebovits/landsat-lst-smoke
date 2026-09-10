@@ -7,6 +7,7 @@ four-instance run before rehearsal mode caught them, so each number is a test.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -14,15 +15,27 @@ import pytest
 
 ARTIFACTS = Path(__file__).resolve().parent.parent / "artifacts"
 
+#: The committed memory sweeps, keyed by filename. The shard edge and the
+#: source come from inside each file rather than from its name, which used to
+#: be parsed on the last underscore segment and made collection fail on any
+#: suffix that is not a number.
+SWEEPS_BY_NAME = {
+    path.stem: json.loads(path.read_text())
+    for path in sorted(ARTIFACTS.glob("shard_memory_*.json"))
+}
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shard_lst_p95 import (  # noqa: E402
+    SHARD_BYTES_PER_PIXEL_SCENE,
+    SHARD_FIXED_GIB,
     Shard,
+    client_bytes,
     configure_read_env,
     items_for_shard,
     plan_shards,
-    SHARD_FIXED_GIB,
     shard_bytes,
+    worker_memory_guard,
 )
 
 # S30W065, the tile the full run built.
@@ -154,26 +167,33 @@ class TestShardBytes:
     """The budget a fleet instance is sized from.
 
     These assertions used to encode a float32-only model that reported 0.39 GiB
-    for a shard measured at 1.52. Reading the low number put 64 workers wanting
+    for a shard measured at 1.42. Reading the low number put 64 workers wanting
     97 GiB on a 128 GiB box, and they died at cluster start. So the anchor is
     now a measurement rather than a figure quoted from the document.
     """
 
-    #: MEASURED by `measure_shard_memory.py --mode memory` at 512 px.
-    #: The committed sweeps, read rather than copied, so the tests and the
-    #: artifacts cannot drift. Two shard sizes, because the model claims the
-    #: working set scales with the square of the edge and one size cannot show
-    #: that. Regenerate with
-    #: `measure_shard_memory.py --mode memory --shard N --out artifacts/shard_memory_N.json`.
-    SWEEPS = {
-        int(path.stem.rsplit("_", 1)[1]): json.loads(path.read_text())["rows"]
-        for path in sorted(ARTIFACTS.glob("shard_memory_*.json"))
+    #: MEASURED by `measure_shard_memory.py --mode memory`, read rather than
+    #: copied, so the tests and the artifacts cannot drift.
+    #:
+    #: Four shard edges, because the model claims the working set scales with
+    #: the square of the edge and one edge cannot show that. Two sources,
+    #: because the synthetic fixture writes one untiled raster at the shard's
+    #: own edge and the fleet reads tiled COGs far larger than the shard.
+    #: Regenerate the synthetic pair with
+    #: `measure_shard_memory.py --mode memory --shard N --out artifacts/shard_memory_N.json`,
+    #: and a staged sweep by adding `--stage-dir` pointing at staged scenes.
+    SWEEPS_BY_NAME = SWEEPS_BY_NAME
+    SYNTHETIC = {
+        s["shard_px"]: s["rows"]
+        for s in SWEEPS_BY_NAME.values()
+        if s["source"] == "synthetic"
     }
-    SWEEP = [(r["scenes"], r["peak_rss_gib"]) for r in SWEEPS[512]]
+    SWEEP = [(r["scenes"], r["peak_rss_gib"]) for r in SYNTHETIC[512]]
+    #: Every point of every sweep. The model has to bound all of them.
     POINTS = [
-        (px, r["scenes"], r["peak_rss_gib"])
-        for px, rows in SWEEPS.items()
-        for r in rows
+        (name, r["shard_px"], r["scenes"], r["peak_rss_gib"])
+        for name, sweep in SWEEPS_BY_NAME.items()
+        for r in sweep["rows"]
     ]
 
     @pytest.mark.parametrize(("scenes", "measured"), SWEEP)
@@ -222,23 +242,63 @@ class TestShardBytes:
         multiplies. If bytes per pixel-scene differed by edge, the whole reason
         a 360 px shard needs less memory than a 512 px one would be wrong, and
         that is what picks the instance.
+
+        The slopes are the least-squares fits the sweeps record. The earlier
+        estimator averaged consecutive differences, which agreed to 1.3% while
+        the differences it averaged ran 10.9 to 16.4 bytes. Least squares uses
+        every point once and puts the two synthetic edges 4.2% apart.
+
+        Only the synthetic pair is compared. The staged sweeps read real
+        scenes, so shard size and how much data falls in the shard move
+        together, and their slopes range 11.2 to 14.8 across four edges. That
+        scatter is a property of the fixture, not of the working set, which is
+        why the staged sweeps are held to bounding the model rather than to
+        agreeing with each other.
         """
-        slopes = {}
-        for px, rows in self.SWEEPS.items():
-            v = sorted((r["scenes"], r["peak_rss_gib"]) for r in rows)
-            steps = [
-                (v[i + 1][1] - v[i][1]) * 1024**3 / ((v[i + 1][0] - v[i][0]) * px * px)
-                for i in range(len(v) - 1)
-            ]
-            slopes[px] = sum(steps) / len(steps)
-        assert len(slopes) >= 2, "need sweeps at two shard sizes"
+        slopes = {
+            s["shard_px"]: s["slope_bytes_per_pixel_scene"]
+            for s in self.SWEEPS_BY_NAME.values()
+            if s["source"] == "synthetic"
+        }
+        assert len(slopes) >= 2, "need synthetic sweeps at two shard sizes"
         assert max(slopes.values()) / min(slopes.values()) < 1.10, slopes
 
-    @pytest.mark.parametrize(("shard_px", "scenes", "measured"), POINTS)
-    def test_it_never_under_predicts_at_either_shard_size(
-        self, shard_px, scenes, measured
+    @pytest.mark.parametrize("name", sorted(SWEEPS_BY_NAME))
+    def test_the_committed_sweep_was_written_by_this_model(self, name):
+        """An artifact cannot carry a prediction from a superseded model.
+
+        `shard_memory_512.json` once declared 13 bytes per pixel-scene beside a
+        `predicted_gib` column computed at 18, and it survived because no test
+        read that column. The point of committing a sweep is that a
+        re-measurement cannot leave the tests behind, and that only holds if
+        every field in it is checked.
+        """
+        sweep = self.SWEEPS_BY_NAME[name]
+        assert sweep["model_bytes_per_pixel_scene"] == SHARD_BYTES_PER_PIXEL_SCENE
+        assert sweep["model_fixed_gib"] == SHARD_FIXED_GIB
+        for row in sweep["rows"]:
+            expected = round(shard_bytes(row["shard_px"], row["scenes"]), 3)
+            assert row["predicted_gib"] == expected, row
+            # The stored ratio comes from the unrounded pair. Both columns are
+            # rounded to three places, so recomputing from them carries about
+            # 0.001 of error on each at the smallest shard measured.
+            assert row["ratio"] == pytest.approx(
+                row["peak_rss_gib"] / expected, abs=0.005
+            ), row
+
+    @pytest.mark.parametrize(("name", "shard_px", "scenes", "measured"), POINTS)
+    def test_it_never_under_predicts_any_measured_point(
+        self, name, shard_px, scenes, measured
     ):
-        assert shard_bytes(shard_px, scenes) >= measured
+        """Every point of every sweep, synthetic and staged.
+
+        The staged sweeps are the reason this is not the synthetic pair alone.
+        A synthetic raster is written at the shard's own edge and read whole,
+        which allocates no intermediate for a windowed read of a tiled COG. If
+        the model only bounded that fixture it would be bounding the wrong
+        read, and under-predicting is what cost a fleet instance its workers.
+        """
+        assert shard_bytes(shard_px, scenes) >= measured, name
 
     def test_a_quarter_tile_shard_no_longer_fits_a_small_worker(self):
         """1,765 scenes at 512 px is 6.3 GB, not the 1.85 GB long quoted.
@@ -250,6 +310,71 @@ class TestShardBytes:
         gib = shard_bytes(512, 1765)
         assert round(gib * 1024**3 / 1e9, 1) == 6.3
         assert gib > 1.8, "a 1.8 GiB worker limit cannot hold this shard"
+
+
+class TestWorkerMemoryGuard:
+    """The gate `shard_bytes` never had.
+
+    Correcting the model did not stop the configuration that killed a
+    `c6id.16xlarge`. It only printed a larger number on the way past.
+    `staging.disk_guard` refuses a fetch that cannot finish, and this refuses a
+    cluster that cannot fit, before either one spends anything.
+    """
+
+    #: The full tile the fleet writes, at 3600 px per degree over 5 degrees.
+    TILE_PX = 18_000
+    GIB = 1024**3
+
+    def test_the_client_holds_fourteen_bytes_an_output_pixel(self):
+        """uint16 of p95 plus twelve uint8 monthly counts. 4.2 GiB a tile."""
+        assert client_bytes(self.TILE_PX, self.TILE_PX) == pytest.approx(4.2, abs=0.05)
+
+    def test_the_configuration_that_killed_an_instance_is_refused(self):
+        """64 workers, 512 px, a quarter tile of scenes, on 128 GiB.
+
+        The demand is about 97 GiB of workers on a box that also carries the
+        client's arrays and 78 GB of staged page cache. The old model called
+        the same shard 0.39 GiB and nothing objected.
+        """
+        with pytest.raises(SystemExit) as exc:
+            worker_memory_guard(
+                512, 1765, 64, self.TILE_PX, self.TILE_PX, total_bytes=128 * self.GIB
+            )
+        message = str(exc.value)
+        # The operator's next decision is a smaller shard or fewer workers, so
+        # the message has to carry the edge that fits and both escapes.
+        assert "--shard" in message
+        assert "--force" in message
+        assert "128.0 GiB" in message
+
+    def test_the_configuration_that_worked_is_allowed(self):
+        """The m6id.16xlarge run: 64 workers, 360 px, 404 scenes, 247 GiB."""
+        demand = worker_memory_guard(
+            360, 404, 64, self.TILE_PX, self.TILE_PX, total_bytes=247 * self.GIB
+        )
+        assert demand == pytest.approx(64 * shard_bytes(360, 404) + 4.2, abs=0.05)
+
+    def test_the_edge_it_recommends_actually_fits(self):
+        """A message that names an unusable escape is worse than none."""
+        with pytest.raises(SystemExit) as exc:
+            worker_memory_guard(
+                512, 1765, 64, self.TILE_PX, self.TILE_PX, total_bytes=128 * self.GIB
+            )
+        named = re.search(r"--shard (\d+)", str(exc.value))
+        assert named, "the message has to name an edge to try"
+        edge = int(named.group(1))
+        assert edge > 0
+        assert worker_memory_guard(
+            edge, 1765, 64, self.TILE_PX, self.TILE_PX, total_bytes=128 * self.GIB
+        )
+
+    def test_a_machine_with_no_room_for_the_client_still_refuses(self):
+        """The client's arrays alone can exceed the box. No negative edge."""
+        with pytest.raises(SystemExit) as exc:
+            worker_memory_guard(
+                512, 1765, 64, self.TILE_PX, self.TILE_PX, total_bytes=2 * self.GIB
+            )
+        assert "--shard 0" in str(exc.value)
 
 
 class TestConfigureReadEnv:

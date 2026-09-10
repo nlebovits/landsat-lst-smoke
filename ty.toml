@@ -18,6 +18,7 @@ include = [
   "measure_s3_requests.py",
   "measure_scene_centre.py",
   "measure_shard_memory.py",
+  "memory_sampler.py",
   "profile_lst_p95.py",
   "shard_lst_p95.py",
   "staging.py",
