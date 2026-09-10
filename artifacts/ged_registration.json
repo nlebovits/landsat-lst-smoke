@@ -1,0 +1,395 @@
+{
+  "tile": "S30W065",
+  "bbox": [
+    -65.0,
+    -35.0,
+    -60.0,
+    -30.0
+  ],
+  "raster": [
+    18000,
+    18000
+  ],
+  "pixels_per_degree": 3600,
+  "source_raster": "fulltile/tile/lst_p95_dn.npy",
+  "aster_ged": {
+    "aster_ged_schema_version": 1,
+    "aster_ged_generated_utc": "2026-09-10T10:38:04+00:00",
+    "aster_ged_generator_commit": "60bcd3e7ca12e8b6db9ff0693a38b364b82a5832",
+    "short_name": "AG1km",
+    "version": "003",
+    "doi": "10.5067/COMMUNITY/ASTER_GED/AG1KM.003",
+    "granule_count": 14128,
+    "land_geometry_sha256": "35170d2371beacac96c858f71b048de9c4065433c44637e98c71b0a7ab0c9339",
+    "raster_sha256": "6c3b0f845242bdf54bbb2a8674286105009f834f5547b8e2d4ca56712b4dae4b"
+  },
+  "land_pixels": 324000000,
+  "valid_pixels": 323917519,
+  "missing_pixels": 82481,
+  "registration": {
+    "missing_pixels": 82481,
+    "share_by_shift": {
+      "-2,-2": 0.1310726106618494,
+      "-2,-1": 0.20163431578181643,
+      "-2,0": 0.3305367296710758,
+      "-2,1": 0.3029061238345801,
+      "-2,2": 0.1576726761314727,
+      "-1,-2": 0.19736666626253319,
+      "-1,-1": 0.34914707629635916,
+      "-1,0": 0.5823401753131024,
+      "-1,1": 0.3868284817109395,
+      "-1,2": 0.18763109079666832,
+      "0,-2": 0.2583989039900098,
+      "0,-1": 0.5667729537711715,
+      "0,0": 0.9970902389641251,
+      "0,1": 0.5493265115602382,
+      "0,2": 0.2556710030188771,
+      "1,-2": 0.20827827014706418,
+      "1,-1": 0.41673840035887055,
+      "1,0": 0.5856257804827778,
+      "1,1": 0.3365138637989355,
+      "1,2": 0.25114874940895476,
+      "2,-2": 0.19922163892290345,
+      "2,-1": 0.3022999236187728,
+      "2,0": 0.3003600829281895,
+      "2,1": 0.17987172803433518,
+      "2,2": 0.1640377783974491
+    },
+    "best_shift": "0,0",
+    "share_at_zero": 0.9970902389641251,
+    "registered": true
+  },
+  "tiers": [
+    {
+      "numobs": 0,
+      "land_pixels": 784080,
+      "valid": 701839,
+      "missing": 82241,
+      "with_any_observation": 701958,
+      "share_with_any_observation": 0.8952632384450566
+    },
+    {
+      "numobs": 1,
+      "land_pixels": 4446576,
+      "valid": 4446458,
+      "missing": 118,
+      "with_any_observation": 4446486,
+      "share_with_any_observation": 0.9999797597072444
+    },
+    {
+      "numobs": 2,
+      "land_pixels": 17160336,
+      "valid": 17160273,
+      "missing": 63,
+      "with_any_observation": 17160287,
+      "share_with_any_observation": 0.9999971445780549
+    },
+    {
+      "numobs": 3,
+      "land_pixels": 33749136,
+      "valid": 33749092,
+      "missing": 44,
+      "with_any_observation": 33749136,
+      "share_with_any_observation": 1.0
+    },
+    {
+      "numobs": ">3",
+      "land_pixels": 267859872,
+      "valid": 267859857,
+      "missing": 15,
+      "with_any_observation": 267859857,
+      "share_with_any_observation": 0.9999999440005706
+    }
+  ],
+  "temperatures": {
+    "hot_threshold_c": 70.0,
+    "valid": 323917519,
+    "hot": 5935,
+    "hot_rate": 1.8322565628196233e-05,
+    "p50": 46.41,
+    "p99": 53.32000000000001,
+    "p999": 55.61,
+    "max": 90.57,
+    "tiers": [
+      {
+        "numobs": 0,
+        "valid": 701839,
+        "p50": 48.129999999999995,
+        "p95": 53.650000000000006,
+        "p99": 65.4,
+        "p999": 80.62,
+        "max": 90.57,
+        "hot": 4588,
+        "hot_rate": 0.006537111787746193,
+        "hot_enrichment": 356.7792808277003,
+        "share_of_hot_tail": 0.7730412805391744
+      },
+      {
+        "numobs": 1,
+        "valid": 4446458,
+        "p50": 44.94,
+        "p95": 51.58,
+        "p99": 53.34,
+        "p999": 55.22543000000529,
+        "max": 84.50999999999999,
+        "hot": 68,
+        "hot_rate": 1.529307147396872e-05,
+        "hot_enrichment": 0.834657753957476,
+        "share_of_hot_tail": 0.011457455770850885
+      },
+      {
+        "numobs": 2,
+        "valid": 17160273,
+        "p50": 46.0,
+        "p95": 51.790000000000006,
+        "p99": 53.49000000000001,
+        "p999": 55.61,
+        "max": 84.31,
+        "hot": 572,
+        "hot_rate": 3.3332803038739535e-05,
+        "hot_enrichment": 1.8192213751683524,
+        "share_of_hot_tail": 0.09637742207245156
+      },
+      {
+        "numobs": 3,
+        "valid": 33749092,
+        "p50": 46.19,
+        "p95": 51.900000000000006,
+        "p99": 53.67,
+        "p999": 56.0,
+        "max": 86.78999999999999,
+        "hot": 610,
+        "hot_rate": 1.8074560346690215e-05,
+        "hot_enrichment": 0.9864644893876452,
+        "share_of_hot_tail": 0.10278011794439765
+      },
+      {
+        "numobs": ">3",
+        "valid": 267859857,
+        "p50": 46.46000000000001,
+        "p95": 51.34,
+        "p99": 53.230000000000004,
+        "p999": 55.5,
+        "max": 73.53,
+        "hot": 97,
+        "hot_rate": 3.621296639458745e-07,
+        "hot_enrichment": 0.01976413518140715,
+        "share_of_hot_tail": 0.016343723673125525
+      }
+    ]
+  },
+  "gap_cells": {
+    "pixels_per_cell": 1296,
+    "gap_cells": 605,
+    "gap_cells_with_a_hot_pixel": 81,
+    "gap_cells_with_none": 524,
+    "share_of_gap_cells_with_none": 0.8661157024793389,
+    "valid_pixels_in_gap_cells": 701839,
+    "hot_pixels_in_gap_cells": 4588,
+    "hot_share_of_cells_with_a_hot_pixel": 0.04769280345949542,
+    "worst_cell_hot_pixels": 195
+  },
+  "rules": [
+    {
+      "rule": "numobs == 0",
+      "shipped": false,
+      "valid_removed": 701839,
+      "valid_removed_share": 0.002166721337477273,
+      "hot_removed": 4588,
+      "hot_removed_share": 0.7730412805391744,
+      "hot_left": 1347
+    },
+    {
+      "rule": "numobs == 0, 1-cell buffer",
+      "shipped": false,
+      "valid_removed": 2799906,
+      "valid_removed_share": 0.008643885667696782,
+      "hot_removed": 5432,
+      "hot_removed_share": 0.9152485256950295,
+      "hot_left": 503
+    },
+    {
+      "rule": "numobs <= 2",
+      "shipped": false,
+      "valid_removed": 22308570,
+      "valid_removed_share": 0.06887114370618527,
+      "hot_removed": 5228,
+      "hot_removed_share": 0.8808761583824768,
+      "hot_left": 707
+    },
+    {
+      "rule": "numobs <= 2, 1-cell buffer",
+      "shipped": false,
+      "valid_removed": 36914431,
+      "valid_removed_share": 0.1139624405433903,
+      "hot_removed": 5834,
+      "hot_removed_share": 0.9829823083403538,
+      "hot_left": 101
+    },
+    {
+      "rule": "numobs == 0 AND >= 70 C",
+      "shipped": false,
+      "valid_removed": 4588,
+      "valid_removed_share": 1.4164099595983877e-05,
+      "hot_removed": 4588,
+      "hot_removed_share": 0.7730412805391744,
+      "hot_left": 1347
+    },
+    {
+      "rule": "numobs == 0, 1-cell buffer AND >= 70 C",
+      "shipped": true,
+      "valid_removed": 5432,
+      "valid_removed_share": 1.6769701178157025e-05,
+      "hot_removed": 5432,
+      "hot_removed_share": 0.9152485256950295,
+      "hot_left": 503
+    }
+  ],
+  "tile_level": {
+    "tiles_without_thermal": 126,
+    "tiles_over_1pct_emissivity": 0,
+    "tiles_with_no_granule": 126,
+    "worst_twenty": [
+      {
+        "tile_id": "N00E070",
+        "land_cells": 4164,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00E165",
+        "land_cells": 3819,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00E170",
+        "land_cells": 6662,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00E175",
+        "land_cells": 11610,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W155",
+        "land_cells": 1203,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W160",
+        "land_cells": 1681,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W165",
+        "land_cells": 945,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W175",
+        "land_cells": 9690,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N00W180",
+        "land_cells": 52,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E070",
+        "land_cells": 42648,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E150",
+        "land_cells": 3995,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E155",
+        "land_cells": 423,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E165",
+        "land_cells": 2062,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05E170",
+        "land_cells": 17308,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05W030",
+        "land_cells": 2116,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05W160",
+        "land_cells": 7514,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05W165",
+        "land_cells": 1782,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N05W180",
+        "land_cells": 3394,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N10E150",
+        "land_cells": 10646,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      },
+      {
+        "tile_id": "N10E155",
+        "land_cells": 5931,
+        "land_cells_with_granule": 0,
+        "land_cells_with_emissivity": 0,
+        "share_with_emissivity": 0.0
+      }
+    ]
+  }
+}

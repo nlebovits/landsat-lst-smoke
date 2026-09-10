@@ -68,10 +68,13 @@ hooks = [
     # one list but not the other gets no dead-code check on the path that
     # matters.
     args = [
+      "aster_ged.py",
       "compare_qa_masks.py",
       "cost_report.py",
       "fleet_plan.py",
       "land_tiles.py",
+      "masks.py",
+      "measure_ged_registration.py",
       "measure_land_defects.py",
       "measure_s3_requests.py",
       "measure_scene_centre.py",

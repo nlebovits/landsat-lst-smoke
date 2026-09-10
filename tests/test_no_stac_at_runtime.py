@@ -33,6 +33,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import masks  # noqa: E402
 import shard_lst_p95  # noqa: E402
 import staging  # noqa: E402
 import tile_inventory  # noqa: E402
@@ -46,9 +47,16 @@ RUNTIME_MODULES = (
     "shard_lst_p95",
     "tile_inventory",
     "land_tiles",
+    "masks",
+    "aster_ged",
     "staging",
     "memory_sampler",
 )
+
+#: Modules that mean the mask is about to fetch its own inputs. `land_tiles`
+#: and `aster_ged` reach these on purpose, at build time, and `masks` reads the
+#: artifacts they write instead.
+FETCH_NAMES = ("earthaccess", "requests", "urllib")
 
 #: Names that mean a catalogue is in reach.
 STAC_NAMES = ("pystac_client", "stac_reference", "earth-search.aws", "Client.open")
@@ -101,6 +109,76 @@ class TestNoCatalogueInTheRuntime:
         import stac_reference
 
         assert hasattr(stac_reference, "search_items")
+
+    def test_the_mask_never_calls_its_own_download(self):
+        """`masks` reads two artifacts. It fetches neither of them.
+
+        `load_land_polygons` downloads Natural Earth on a cold cache, and
+        `aster_ged.fetch_granules` needs a NASA Earthdata Login. Both belong to
+        the build, which runs once on a laptop. A mask that reached either
+        would put a download inside every one of 895 runs.
+
+        The check walks the syntax tree rather than the text, because the
+        module explains in prose why it does not call these, and a substring
+        search cannot tell an explanation from a call.
+        """
+        import ast
+
+        forbidden = {"load_land_polygons", "fetch_granules", *FETCH_NAMES}
+        tree = ast.parse((ROOT / "masks.py").read_text())
+        used = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                used.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                used.add(node.attr)
+            elif isinstance(node, ast.Import):
+                used.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                used.add((node.module or "").split(".")[0])
+                used.update(alias.name for alias in node.names)
+        offenders = sorted(used & forbidden)
+        assert not offenders, (
+            f"masks.py calls {offenders!r}. The pixel mask reads artifacts, "
+            f"so that a run needs no credentials and no network."
+        )
+
+    def test_the_runtime_does_not_import_the_earthdata_client(self):
+        """`earthaccess` belongs to `aster_ged`'s build half, behind a call."""
+        assert "earthaccess" not in sys.modules
+
+
+class TestTheMaskBuildsOffline:
+    """The mask runs between the gather and the summary, inside the run.
+
+    This module's docstring claims the run is offline from the manifest gate
+    through `process_shard`. The mask sits inside that span and reads two files
+    that both have network-fetching builders behind them.
+    """
+
+    def test_the_land_rule_rasterises_with_every_socket_blocked(
+        self, no_network, land_geometry
+    ):
+        land = masks.land_mask(tile_bounds(TILE), 100, land_geometry)
+        assert land.any()
+
+    def test_the_emissivity_rule_reads_with_every_socket_blocked(
+        self, no_network, numobs_artifact
+    ):
+        gap = masks.emissivity_gap(tile_bounds(TILE), 100, numobs_artifact)
+        assert not gap.any()
+
+    def test_the_whole_mask_builds_with_every_socket_blocked(
+        self, no_network, numobs_artifact, land_geometry
+    ):
+        keep, gap, counts = masks.output_mask(
+            tile_bounds(TILE),
+            100,
+            numobs_uri=numobs_artifact,
+            land_geometry_uri=land_geometry,
+        )
+        assert counts["pixels_kept"] == int(keep.sum()) > 0
+        assert counts["pixels_emissivity_gap"] == int(gap.sum())
 
 
 class TestRuntimeWorksOffline:

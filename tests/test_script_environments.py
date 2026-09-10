@@ -53,17 +53,66 @@ TILE = "S30W065"
 pytestmark = [pytest.mark.packaging, pytest.mark.timeout(900)]
 
 
-def fresh_checkout(tmp_path):
+def fresh_checkout(tmp_path, *, with_mask=False):
     """The repository's scripts at a path `uv` has never resolved before.
 
     Mirrors what a fleet instance holds after `git clone`: the modules, the
     committed artifacts, and no `.venv`.
+
+    Args:
+        tmp_path: Where to build the checkout.
+        with_mask: Also write the artifacts the output mask reads, and restamp
+            the tile list and the inventory so the three agree about the land
+            geometry. The committed geometry slice stands in for the 16 MB
+            artifact and the synthetic mosaic for the 45 MB one. Both are
+            gitignored and neither is what is under test: this asks whether the
+            inline block declares what the mask imports, and a stand-in
+            exercises the same imports as the real thing.
     """
     work = tmp_path / "checkout"
     (work / "artifacts").mkdir(parents=True)
     for script in ROOT.glob("*.py"):
         shutil.copy2(script, work / script.name)
     shutil.copy2(SLICE, work / "artifacts" / SLICE.name)
+    if not with_mask:
+        return work
+
+    import json
+
+    from conftest import (
+        LAND_GEOMETRY,
+        _restamp_parquet,
+        land_geometry_sha256,
+        write_numobs,
+    )
+
+    # Under the names the scripts default to, not the fixtures' own. A fleet
+    # instance holds the real geometry at `artifacts/land_buffered.gpkg`, and
+    # the point of this checkout is to be that instance.
+    shutil.copy2(LAND_GEOMETRY, work / "artifacts" / "land_buffered.gpkg")
+    write_numobs(work / "artifacts" / "aster_numobs.tif")
+
+    # And internally consistent. `fleet_plan` refuses a plan whose tile list,
+    # inventory and mosaic disagree about the land geometry, so all three name
+    # the digest of the geometry this checkout actually holds.
+    digest = land_geometry_sha256()
+
+    def stamp_tiles(meta):
+        meta[b"land_geometry_sha256"] = digest.encode()
+        return meta
+
+    def stamp_inventory(meta):
+        manifest = json.loads(meta[b"manifest"])
+        manifest["land_geometry_sha256"] = digest
+        meta[b"manifest"] = json.dumps(manifest).encode()
+        return meta
+
+    _restamp_parquet(
+        ROOT / "artifacts" / "land_tiles.parquet",
+        work / "artifacts" / "land_tiles.parquet",
+        stamp_tiles,
+    )
+    _restamp_parquet(SLICE, work / "artifacts" / SLICE.name, stamp_inventory)
     return work
 
 
@@ -108,8 +157,15 @@ class TestShardRuntimeResolves:
         assert "total shard-scene reads" in proc.stdout
 
     def test_the_rehearsal_runs_on_the_inline_block_alone(self, tmp_path):
-        """The rehearsal starts a real cluster, so it covers the submit path."""
-        work = fresh_checkout(tmp_path)
+        """The rehearsal starts a real cluster, so it covers the submit path.
+
+        It builds the output mask too, which is the newest reason this test
+        exists. The mask reads a GeoPackage and a GeoTIFF, so the fleet's
+        inline block has to declare rasterio, geopandas, shapely and pyogrio.
+        A block that forgot one would pass every other test in the suite,
+        because the suite runs inside the union of every block.
+        """
+        work = fresh_checkout(tmp_path, with_mask=True)
         proc = run_script(
             work,
             "shard_lst_p95.py",
@@ -144,11 +200,10 @@ class TestTheFleetPlannerResolves:
     """
 
     def test_it_builds_a_plan_on_the_inline_block_alone(self, tmp_path):
-        work = fresh_checkout(tmp_path)
-        shutil.copy2(
-            ROOT / "artifacts" / "land_tiles.parquet",
-            work / "artifacts" / "land_tiles.parquet",
-        )
+        # The planner screens every tile for ASTER emissivity, so it imports
+        # the mask as well. Its inline block was the shortest in the
+        # repository before this and is the one a new import gets added around.
+        work = fresh_checkout(tmp_path, with_mask=True)
         proc = run_script(
             work,
             "fleet_plan.py",

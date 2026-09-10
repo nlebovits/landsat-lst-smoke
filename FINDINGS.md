@@ -46,17 +46,39 @@ has yet completed on an instance. See `Cost` and `What is not settled`.
 Build the artifacts once, on a laptop, before any instance starts:
 
 ```bash
-# the authoritative tile list, from the pixel mask's own land geometry
-uv run land_tiles.py --out artifacts/land_tiles.parquet
+# the authoritative tile list, and the geometry the pixel mask rasterises
+uv run land_tiles.py --out artifacts/land_tiles.parquet \
+    --write-geometry artifacts/land_buffered.gpkg
 
 # the scene inventory, from the USGS bulk metadata Parquet
 uv run usgs_inventory.py \
     --land-tiles artifacts/land_tiles.parquet \
     --out artifacts/tile_scene_inventory.parquet
 
+# ASTER GED observation counts, for the emissivity half of the mask
+uv run python -c \
+    "import earthaccess; earthaccess.login(persist=True)"
+uv run aster_ged.py --out artifacts/aster_numobs.tif
+
 # what the fleet will launch, and the checks that gate it
 uv run fleet_plan.py --out artifacts/fleet_plan.json
 ```
+
+`land_tiles.py --write-geometry` copies the buffered polygons out of the cache
+byte for byte, so their digest is the `land_geometry_sha256` the tile list
+already records. The tile list, the inventory, and the ASTER GED mosaic each
+record that same digest, and every gate compares them.
+
+At 16 MB the geometry is gitignored, like the inventory before it, and
+`tests/make_land_slice.py` cuts the committed fixture: the same polygons
+clipped to the four tiles `tests/make_slice.py` covers, 148 KB.
+`masks.land_mask` rasterises only inside one tile's bbox, so the clip gives the
+same mask there, and `test_masks.py` asserts that pixel for pixel rather than
+assuming it. The checksum tie and the sweep over all 895 tiles both read the
+full file, and both skip without it.
+
+`aster_ged.py` is the only step that needs a NASA Earthdata Login, and it needs
+it once. The fleet reads the GeoTIFF it writes and opens no connection.
 
 `usgs_inventory.py` reuses an unchanged USGS download. Pass `--refresh` to
 discard the cache and fetch the file the service is serving now.
@@ -67,6 +89,11 @@ come from measurement scripts, which no build runs:
 ```bash
 # what each defect in the shared land method selects
 uv run measure_land_defects.py --out artifacts/land_defects.json
+
+# the ASTER GED mask against a composite built before it existed
+uv run measure_ged_registration.py \
+    --raster fulltile/tile/lst_p95_dn.npy --tile S30W065 \
+    --out artifacts/ged_registration.json
 
 # how far the computed scene centre sits from the published one
 uv run measure_scene_centre.py --all-years \
@@ -162,6 +189,30 @@ true -50.00 C would encode to digital number 0 and look identical to nodata,
 which never occurs here. `qa_count` has no nodata value by design. A zero means
 that masking removed every observation for that month, which differs from a
 masked pixel. Keeping the two apart is the point of the band.
+
+A `lst_p95` nodata now carries three meanings, and the product does not
+distinguish them:
+
+| meaning | rule | can a wider window fix it |
+|---|---|---|
+| no usable observation | every scene was cloudy, or the pixel is off every footprint | yes |
+| water | outside the buffered land geometry | no |
+| failed emissivity retrieval | 70 C or hotter inside an ASTER GED gap cell | no |
+
+The last two are the output mask, and `masks.py` applies both. Both remove
+values the composite held, and they treat `qa_count` differently.
+
+The water rule zeroes `qa_count` with the temperature, so the two bands cannot
+disagree. A count above zero beside a nodata pixel would say the pixel had
+observations and lost them to the reduction, and over sea it was never this
+product's subject at all.
+
+The emissivity rule leaves `qa_count` alone. Zero observations is data, the
+count is the evidence behind every surviving p95, and it remains correct
+whatever the retrieval did with the observations it counted.
+
+A consumer that needs the three apart has the tile's `summary.json`, which
+counts each of them, and the mask's own inputs, which are named in it.
 
 ## Architecture: shard, do not tune
 
@@ -990,10 +1041,25 @@ The Collection 2 algorithm for surface temperature reads land emissivity from
 ASTER GED, which covers no ocean. A footprint with too little usable emissivity
 gets no ST band, and USGS writes the product as L2SR instead.
 
-This is inference from the algorithm's inputs. A check against the ASTER GED
-tile index is the step that would make it MEASURED, and this document does not
-make that check. The footprint determinism, the flat rate over time, and the
-geography below are all consistent with it.
+#### Measured against ASTER GED
+
+MEASURED. `measure_ged_registration.py` cross-tabs the 126 zero-thermal tiles
+against ASTER GED coverage, using the artifact `aster_ged.py` builds from
+14,128 granules.
+
+| statement | tiles |
+|---|---|
+| L2SR-only tiles | 126 |
+| more than 1% of their land has ASTER emissivity | **0** |
+| ASTER GED publishes no granule over their land | **126** |
+
+Not one of them. LP DAAC publishes an AG1km granule only where ASTER GED has
+data, and for all 126 tiles it publishes none. The product type follows ASTER
+coverage, and that is no longer inference.
+
+The mechanism remains DERIVED. USGS reads emissivity from ASTER GED and
+produces no surface temperature without it, which explains the correlation, and
+this document has not read the algorithm.
 
 #### Severity across the land tiles
 
@@ -1035,13 +1101,16 @@ only one:
 product is already excluded before the percentile. Those pixels are not wrong.
 Their time axis is thin.
 
-`qa_count` is the instrument for the second kind and every run already writes
-it: 12 by height by width, the count of valid observations per pixel per month.
-Summed over the month axis it is a per-pixel observation count for the whole
-window. One limitation, and it is small. `masked_celsius` returns
-`not_fill & qa_clear`, so `qa_count` merges the ASTER gap with cloud.
-Separating them needs a second count of `not_fill` alone, which `process_shard`
-computes already and discards.
+The output mask is what handles the second kind, and it reads ASTER GED's own
+observation count rather than inferring the gap from the composite. See "The
+output mask" below.
+
+`qa_count` cannot do that job alone, and the reason is worth stating.
+`masked_celsius` returns `not_fill & qa_clear`, so a zero there merges the
+ASTER gap with cloud. A pixel that was cloudy on every pass and a pixel that
+never had emissivity look identical, and they call for opposite advice: widen
+the window, or stop. The mask tells them apart by reading a static dataset
+rather than by reading the composite.
 
 What that is worth depends on which path runs. Unstaged, each dropped row saves
 739 requests, and the global line falls by **$105**. Staged, it saves one GET
@@ -1340,6 +1409,266 @@ over 2021-01-01 to 2025-12-31T23:59:59Z returns **1,984 scenes** against the
 P95 797, max 798, which puts the worst 512 px shard at 0.78 GiB and 24.9 GiB
 across 32 slots. Do not compare that run's output with a 2020-2024 run as
 though only the mask had changed.
+
+### The output mask
+
+A pixel over the sea, and a pixel where ASTER GED records no emissivity, are
+pixels this product has nothing to say about. Both stay that way at any window
+length, because the sea is the sea and the emissivity dataset is fixed.
+`masks.py` applies the two rules and `shard_lst_p95.main` runs it once, over
+the assembled tile.
+
+Water came first. `land_tiles.py` opens with the contract: one geometry answers
+both "which tiles does the fleet run" and "which pixels hold a temperature".
+Only the first half existed. That docstring described the pixel rule, nothing
+built it, and every coastal tile published sea as temperature.
+
+Emissivity is the second rule. Collection 2 Level-2 Surface Temperature reads
+an emissivity value for each pixel from ASTER GED, which USGS built from
+clear-sky ASTER scenes acquired 2000 to 2008. Where ASTER never caught clear
+sky, GED records no emissivity. `aster_ged.py` mosaics GED's own
+observation-count layer, where a count of zero marks that by definition rather
+than by a guess at a fill value.
+
+What USGS does there is the whole difficulty. Rather than leave the pixel
+empty, it interpolates emissivity from the neighbouring cells and retrieves a
+temperature anyway, and some of those retrievals fail upward. So the rule is a
+pair. A pixel comes out where its cell reports zero observations, or lies one
+cell from such a cell, AND the pixel reads 70 C or hotter.
+
+#### The gap region and the damage are different sets
+
+A gap cell records where ASTER missed the ground. It says nothing about the
+retrieval that consumed the interpolated emissivity, so the geometry alone
+removes far more than it should.
+
+MEASURED on the published S30W065 composite, which predates this mask by months
+and records nothing about it:
+
+| statement | value |
+|---|---|
+| gap cells on the tile | 605 |
+| of those, with no pixel at or above 70 C | 524, or 86.6% |
+| in the 81 that do, the hot share of the cell | 4.77% |
+| `NumObs == 0` land pixels holding a temperature | 89.53% |
+| valid pixels the geometry alone removes | 701,839, or 0.2167% |
+| bad pixels it removes | 4,588 |
+
+153 ordinary pixels lost for each bad one. The failures are a thin scatter
+inside a minority of cells, and the mask was applied at the resolution of the
+cell.
+
+I looked for a static predictor of the 81 bad cells and found none. 602 of the
+605 gap cells are partly holed, so hole geometry selects everything, and the
+cells with no hot pixel average more missing pixels (140) than the cells with
+one (108). Temperature is the only thing that separates them.
+
+DERIVED, for the 89.53%: USGS resamples ASTER GED from 1 km to the 30 m product
+grid, so a 30 m pixel inside a zero cell can still take emissivity from its
+neighbours. A zero cell becomes a hole only where the zero region is wider than
+that neighbourhood. This document has not checked either step against the
+algorithm.
+
+The registration scan counts the hard holes, which are the minority of a gap
+cell. So the scan measures precision and not recall. `NumObs == 0` explains
+where 99.71% of the tile's missing pixels are, and predicts nothing about
+whether one pixel is missing.
+
+#### An earlier build applied this rule, and withdrew it
+
+`nlebovits/landsat-lst`, the project this repository took its land rule from,
+shipped the geometry alone in its #116. It measured 2,799,286 pixels removed on
+S30W065 to catch 2,582 artifacts, and replaced it with the pair. Its
+`config.py` carries the same threshold and the same one-cell buffer, with a
+hard floor at 50 C so no configuration can turn the threshold into a plain
+ceiling.
+
+An earlier version of this document made the same mistake for the same reason.
+It read the hot column without the column beside it. The table below prints
+both, and marks the row `masks.py` applies.
+
+#### Six rules, priced on one tile
+
+MEASURED on S30W065 by `measure_ged_registration.py`, which writes the same
+rows to `artifacts/ged_registration.json`:
+
+| rule | valid removed | share | hot removed | hot left |
+|---|---|---|---|---|
+| `numobs == 0` | 701,839 | 0.2167% | 4,588, 77.30% | 1,347 |
+| `numobs == 0`, 1-cell buffer | 2,799,906 | 0.8644% | 5,432, 91.52% | 503 |
+| `numobs <= 2` | 22,308,570 | 6.8871% | 5,228, 88.09% | 707 |
+| `numobs <= 2`, 1-cell buffer | 36,914,431 | 11.3962% | 5,834, 98.30% | 101 |
+| `numobs == 0` AND `>= 70 C` | 4,588 | 0.0014% | 4,588, 77.30% | 1,347 |
+| **`numobs == 0`, 1-cell buffer AND `>= 70 C`** | **5,432** | **0.0017%** | **5,432, 91.52%** | **503** |
+
+Read the last row against the second. Identical hot tails, 2,794,474 ordinary
+pixels apart. The buffer costs almost nothing once the temperature test bounds
+what it can reach. It stays at one cell because it takes 844 more artifacts
+and no ordinary pixels.
+
+The `numobs <= 2` rows are the reason the thin tiers stay. One and two
+observations are low confidence, not absence, and buying the last of the tail
+there costs 11.4% of the raster unconditionally.
+
+The water rule removes values the composite held, because Landsat retrieves a
+real temperature over water.
+
+The emissivity rule removes values too. 5,432 of them on S30W065, every one at
+70 C or hotter inside the gap region. An earlier version of this document said
+the rule removed only pixels that were already nodata, on the reading that USGS
+wrote `ST_B10` fill across a gap. It writes fill across the hard holes alone,
+which are 10.5% of a gap cell's pixels.
+
+`qa_count` follows the water rule alone. Zero observations is data, and the
+count layer stays the evidence behind every surviving p95. Over water the pixel
+was never this product's subject, so both bands go.
+
+#### The mask goes on once, in the client
+
+The run builds it before staging and applies it after the gather. It depends on
+the tile's bbox and two artifacts, and on nothing the run computes, so a tile it
+empties costs no staged object and no cluster. It goes on before the summary
+statistics, the part file, and any merge, so a `--shard-slice` machine masks its
+own slice and `merge_parts` needs no rule of its own. Masking at merge instead
+would leave a single-machine run unmasked and would let two machines' parts
+disagree.
+
+Not per shard. Rasterising the geometry inside `process_shard` would repeat the
+same work in each of 1,296 shards, inside the processes with the least memory
+to spare.
+
+Both masks are resident for the whole run, so the client budget accounts for
+them. `CLIENT_BYTES_PER_OUTPUT_PIXEL` moves from 14 to 16: `lst_out` at uint16,
+`qa_out` at 12 uint8, one bool of water rule, and one bool of gap region. On
+the largest tile that is 0.6 GiB the model used to omit, and a fleet instance
+is sized from that model.
+
+The memory sampler stops after the mask, not before it. A sampler stopped
+earlier never observed the arrays the mask allocates while the two full-tile
+outputs are live, which is the peak `--target-memory-gib` is checked against.
+`apply_output_mask` also reduces `qa_out` with `np.any` rather than a sum in
+int64. The sum built a 2.6 GiB array on the largest tile, beside a 4.8 GiB
+budget, for a question with a boolean answer.
+
+#### A coarse land test is not a safe proxy for a fine one
+
+MEASURED, over all 895 land tiles against the committed geometry. At the GED
+grid of 0.01 degree, one tile comes back with no land cell:
+
+| tile | land at 0.01 deg | land at 1/3600 deg |
+|---|---|---|
+| `N00E050` | 0 cells | 1,852 px |
+
+A cell counts as land when land covers its centre, and `N00E050` contains land
+thinner than a cell. An earlier `fleet_plan` screened tiles at the GED grid and
+had to re-check anything it emptied at the run's own resolution, or it would
+have lost a real tile silently on the first fleet it planned.
+
+That screen is gone with the drop list it fed. The measurement stays here
+because the trap does not: any future test that asks a coarse grid a question
+about a fine one meets `N00E050` again.
+
+#### The download the build makes
+
+MEASURED against `ne_10m_land` buffered by 25 km: the geometry meets **14,941**
+of the 43,200 one-degree cells inside +/-60 degrees. AG1km v003 holds 24,873
+granules globally, so restricting the fetch to land avoids most of it.
+
+AG1km, not AG100. The ASTER GED User Guide V3 gives AG100 as 1000 by 1000 cells
+per degree and AG1km as 100 by 100, so AG1km's cell measures 0.01 degree exactly
+and its granule is already the grid this mask reads. AG100 is about a hundred
+times the download and would then need decimating to the same answer.
+
+Reading a granule converts it twice, and the manifest records both conversions,
+because a reader of the raster alone cannot recover either. The source count is
+int16 and the artifact is uint8, so the read clips at 255. The rule tests
+`== 0`, and clipping a large count cannot move a pixel. The source fill of -9999
+becomes 0, so a cell with no observation reads as gap.
+
+#### An absent granule is not a gap
+
+MEASURED against CMR: ASTER GED AG1km v003 publishes no granule for **813** of
+the 14,941 land cells, and a search returns nothing for them rather than an
+empty granule. LP DAAC publishes only where the dataset has data.
+
+That is tempting to read as a gap, and it is wrong. Landsat holds surface
+temperature over most of that land:
+
+| tile | scenes | with a thermal band | L2SR share |
+|---|---|---|---|
+| `N05W095` | 617 | 615 | 0.3% |
+| `N00E050` | 1,034 | 1,031 | 0.3% |
+| `N55W175` | 2,129 | 1,793 | 15.8% |
+
+The first build treated an absent granule and a zero count as the same value,
+and `fleet_plan` dropped **34 tiles** on it, among them the Solomons at 41
+million land pixels, the Aleutians at 31 million, and the Maldives at 30
+million. Every one of those tiles has thermal scenes and a real composite.
+
+So the artifact gained a second band. Band 1 is the count, band 2 is 1 exactly
+where the build read a granule, and `masks.emissivity_gap` needs both: a pixel
+is a gap when its cell was read AND its count is zero. A cell with no granule
+keeps its pixels, and `output_mask` counts them as `pixels_land_unread` so a
+tile resting on absent granules says so.
+
+With that rule the emissivity screen drops no tile at all, and the fleet plan
+returns to 895 land tiles minus the 126 L2SR-only ones: **769 to launch**.
+
+#### Registration
+
+The granule filename specifies its NORTHWEST corner, per the user guide:
+`AG1km.v003.33.-115.0010.h5` covers latitude [32, 33] and longitude
+[-115, -114]. Reading it as the southwest corner moves the mask 100 cells.
+
+MEASURED in `tests/test_aster_ged.py`: one 0.01 degree cell written alone comes
+back at rows 0 to 35 and columns 0 to 35 of the tile, 1,296 pixels, at 3,600
+pixels per degree. Exact block replication, no half-pixel shift. A
+centre-registered read would put it at rows 18 to 53, which no tile-wide
+statistic would show.
+
+MEASURED against the real artifact and the published S30W065 composite. Shifting
+the cell assignment and re-counting how many of the tile's missing pixels land
+on a zero cell:
+
+| shift, cells | agreement |
+|---|---|
+| 0, 0 | **99.71%** |
+| 1, 0 | 58.56% |
+| -1, 0 | 58.23% |
+| 0, 1 | 54.93% |
+| 0, -1 | 56.68% |
+| 2, 2 | 16.40% |
+
+The peak at zero settles the placement. An external analysis of the same tile,
+built on AG100 rather than AG1km and by different code, reported 99.65% at zero
+against 57.7% and 58.8% one cell either way. Different products, different
+code, agreement to within 0.1 points.
+
+The granule's `Geolocation/Latitude` array is a linspace of 100 samples from
+33.0 to 32.0 inclusive, so its spacing is 1/99 degree rather than 0.01. Read as
+cell centres it would put the grid half a cell outside latitude 32 to 33. The
+scan resolves that in favour of 100 equal 0.01 degree cells, because a
+half-cell error is 18 output pixels and a whole-cell scan cannot see it.
+
+#### Two reasons a tile is not launched
+
+`fleet_plan` names two, and they are different facts with different fixes.
+
+| list | what it means | does a wider window help |
+|---|---|---|
+| `tiles_without_scenes` | no row group in this window | yes |
+| `tiles_without_thermal` | every scene is `OLI_TIRS_L2SR` | no |
+
+There was a third, `tiles_without_emissivity`, for a tile whose every land
+pixel sat inside a gap. It is gone. The pixel rule removes a gap pixel for
+reading 70 C or hotter, not for being a gap pixel, so such a tile still
+publishes every ordinary temperature in it. The list had dropped no tile on
+the real plan.
+
+`fleet_plan` still reads the mosaic. It checks that the tile list, the
+inventory, and the two mask artifacts refer to one land geometry, and it
+records the pixel rule in `emissivity_rule` so a finished tile is checkable
+against the plan that launched it.
 
 ### The land mask selected open ocean, twice
 
@@ -1665,11 +1994,26 @@ records the same count for one that would rather read a file.
   both.
 - **This pipeline does not destripe.** The QA and nodata rules match
   `nlebovits/landsat-lst` at the pixel level. They are not the destriping
-  algorithm. Scene-offset correction, the monthly climatology it fits, the
-  ASTER GED gap handling, and the temporal sampling rule are all absent here,
-  and the P95 itself is unchanged. A tighter mask removes some of what feeds
-  scene-edge artifacts. It does not make this composite equal to the production
-  one.
+  algorithm. Scene-offset correction, the monthly climatology it fits, and the
+  temporal sampling rule are all absent here, and the P95 itself is unchanged.
+  A tighter mask removes some of what feeds scene-edge artifacts. It does not
+  make this composite equal to the production one.
+- **The mask has been measured on one tile.** S30W065 is interior South
+  America, entirely land, with no coastline for the water rule to cut and a
+  0.24% gap share. A coastal or tropical tile would exercise both rules
+  harder, and none has been checked.
+- **The rule leaves 503 hot pixels on S30W065.** Each is in a cell with
+  observations, so the gap test excludes it. Extending the geometry to
+  `numobs <= 2` would take the tail to 98.30% and remove 11.4% of the tile, at
+  which point the rule stops being a screen. The 503 stay.
+- **The 70 C threshold rests on one tile.** It marks where this tile's artifact
+  population separates, and nothing published bounds it. It never acts alone,
+  so it makes no claim about the hottest land surface: a pixel above it outside
+  a gap cell is kept. Check the tail against 70 C on the next tile with a
+  substantial gap population.
+- **No composite has been built with the mask on.** Every masked run so far is
+  a rehearsal, which fills its shards with synthetic pixels. The mask covers
+  real ground in those runs, and the temperatures under it are not real.
 - **The QA comparison covers one 512 px shard at 120 scenes.** That shard sits
   inside a WRS footprint, so it measures the interior case and not the boundary
   case.
@@ -1679,6 +2023,26 @@ records the same count for one that would rather read a file.
 
 Every entry is a claim an earlier version stated as fact. Each shares one
 mistake: it presented an estimate as a measurement.
+
+**Masking never changes a temperature.** The claim was that USGS wrote a gap
+pixel as `ST_B10` fill, `lst_qa.not_fill` rejected it, and `qa_count` already
+stood at zero, so the emissivity rule only recorded what the raster already
+knew. USGS interpolates emissivity across a gap cell instead, and 89.53% of gap
+pixels carry a retrieval. The rule removed 701,839 real temperatures on
+S30W065. The measurement that disproves this was in the same document, twelve
+lines below the claim.
+
+**`numobs == 0` is the rule.** It was priced on its hot column alone: 77.30% of
+the tile's pixels at or above 70 C, for 0.2167% of the valid ones. The column
+beside it says 701,839 pixels, and 524 of the 605 gap cells contain nothing
+wrong.
+The rule is now the conjunction of the grown gap region and 70 C, which reaches
+more of the tail for 5,432 pixels.
+
+**A tile whose land is all gap publishes nothing.** `fleet_plan` carried a
+third drop list on that reading. Such a tile publishes every ordinary
+temperature it holds, so the list is gone. It had dropped no tile on the real
+plan.
 
 **S3 GET requests cost $2,067 across 895 tiles.** That multiplied 895 by the
 $2.31 measured on `S30W065`, which carries 4,776 scenes against a mean of 3,445.
@@ -1805,16 +2169,21 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 
 | path | contents |
 |---|---|
+| `README.md` | the known issues a consumer of the output has to know |
+| `tests/make_land_slice.py` | cuts the committed geometry fixture from the full artifact |
 | `shard_lst_p95.py` | the sharded pipeline, the slicer, and the merge |
 | `profile_lst_p95.py` | the array-graph profiling harness |
 | `lst_qa.py` | the QA, fill, range, and nodata rules both P95 paths call |
 | `stac_window.py` | the composite window, and the cache identity it fixes |
 | `land_tiles.py` | the buffered land geometry and the generated tile list |
+| `masks.py` | the pixel rules: water, and the ASTER emissivity gap |
+| `aster_ged.py` | the ASTER GED observation counts, built once and read per tile |
+| `measure_ged_registration.py` | the mask against a composite built before it |
 | `usgs_inventory.py` | the precompute stage: USGS bulk metadata to one artifact |
 | `tile_inventory.py` | the runtime read of one tile, from one row group |
 | `fleet_plan.py` | the driver, and the checks that run before the fleet does |
 | `stac_reference.py` | Earth Search, kept only as a parity oracle |
-| `artifacts/` | `land_tiles.parquet`, the inventory, and their manifests |
+| `artifacts/` | `land_tiles.parquet`, the inventory, the buffered geometry, the ASTER GED counts, their manifests, and the committed slices of the three that are gitignored |
 | `compare_qa_masks.py` | one shard, run under both masks, in one process |
 | `qa-parity/` | that comparison, with both rasters and the difference image |
 | `sweep_throughput.py` | configuration sweep driver |

@@ -4,6 +4,7 @@
 #   "frisky>=0.7.2", "dask", "odc-stac", "pystac-client",
 #   "planetary-computer", "xarray", "numpy", "geopandas",
 #   "psutil", "rich", "boto3", "pyarrow>=16",
+#   "rasterio", "shapely", "pyogrio",
 # ]
 # ///
 """Sharded p95 LST composite. One shard, one task, no shuffle.
@@ -43,7 +44,10 @@ import tempfile
 import time
 from pathlib import Path
 
+import aster_ged
+import masks
 import staging
+from aster_ged import DEFAULT_NUMOBS_URI
 from lst_qa import (
     LST_NODATA_DN,
     LST_OFFSET,
@@ -275,13 +279,19 @@ def shard_bytes(shard_px: int, n_scenes: int) -> float:
 
 
 #: Bytes the client holds per output pixel while it gathers. `lst_out` is
-#: uint16 at height by width, and `qa_out` is uint8 at 12 by height by width.
-#: A full tile at 18,000 px square is 4.2 GiB of it.
-CLIENT_BYTES_PER_OUTPUT_PIXEL = 2 + 12
+#: uint16 at height by width, `qa_out` is uint8 at 12 by height by width, and
+#: the output mask is two bools at height by width. A full tile at 18,000 px
+#: square is 4.8 GiB of it.
+#:
+#: Both masks are built before staging, not after the gather, so that a tile
+#: the water rule empties costs nothing. They are therefore live for the whole
+#: run and the budget has to name them. Fourteen bytes here put 0.6 GiB of
+#: array outside the model on the largest tile the fleet runs.
+CLIENT_BYTES_PER_OUTPUT_PIXEL = 2 + 12 + 2
 
 
 def client_bytes(width: int, height: int) -> float:
-    """The two full-tile arrays the client holds while it gathers, in GiB."""
+    """The full-tile arrays the client holds while it gathers, in GiB."""
     return width * height * CLIENT_BYTES_PER_OUTPUT_PIXEL / GIB
 
 
@@ -610,6 +620,97 @@ def no_thermal_coverage(args, tile_id, bbox, n_scenes, dropped, run_provenance) 
     return 0
 
 
+def check_mask_inputs(args) -> dict | None:
+    """Refuse a run whose output mask cannot be built, before it costs anything.
+
+    Same reason the inventory manifest is checked before any read. A tile that
+    composites for three hours and then cannot be masked has already bought the
+    machine, and a tile written without the mask looks finished while carrying
+    sea and ASTER emissivity gaps as temperatures.
+
+    The two artifacts have to agree about the land. The NumObs mosaic was built
+    over the cells one land geometry touches; rasterising a different geometry
+    against it masks different ground on the two rules.
+
+    The rehearsal is masked like any other run. Its pixels are synthetic but
+    its bbox is not: `--tile` fixes it on the production grid, so the mask
+    covers real ground and a rehearsal proves the assembly path the fleet uses
+    rather than a shorter one. A laptop with no artifacts stops here with the
+    command that writes them, which is the same answer a real run gets.
+
+    Returns:
+        The ASTER GED provenance for the run summary, or None under
+        `--no-output-mask`.
+
+    Raises:
+        MaskError: if the land geometry is absent.
+        GedError: if the NumObs artifact is absent, or was built from a
+            different land geometry.
+    """
+    if args.no_output_mask:
+        print("mask          skipped: --no-output-mask. Sea and ASTER gaps stay")
+        return None
+    if not args.land_geometry_uri.exists():
+        msg = (
+            f"no buffered land geometry at {args.land_geometry_uri}. Write it "
+            f"with:\n  uv run land_tiles.py --out artifacts/land_tiles.parquet "
+            f"--write-geometry {args.land_geometry_uri}"
+        )
+        raise masks.MaskError(msg)
+    manifest = aster_ged.read_manifest(args.numobs_uri)
+    aster_ged.check_manifest(
+        manifest,
+        land_geometry_sha256=masks.geometry_checksum(args.land_geometry_uri),
+        path=args.numobs_uri,
+    )
+    print(
+        f"mask          {manifest['granule_count']:,} ASTER GED granules, "
+        f"{manifest['collection']['short_name']} v"
+        f"{manifest['collection']['version']}"
+    )
+    return aster_ged.provenance(manifest)
+
+
+def no_unmasked_pixels(args, tile_id, bbox, counts, ged_provenance) -> int:
+    """Record a tile the water rule empties, and succeed.
+
+    A tile whose bbox holds no land inside the buffered geometry has nothing to
+    publish. `land_tiles.py` selects tiles from that same geometry, so a tile
+    on the fleet's list never reaches here. An operator naming a bbox by hand
+    does, and gets the artifact a driver already keys on, the way
+    `no_thermal_coverage` does.
+
+    The emissivity rule cannot reach this path. It removes a pixel only where
+    the gap region and 70 C coincide, so a tile of nothing but gap cells still
+    publishes every pixel that reads an ordinary temperature.
+
+    `n_scenes` is null rather than 0. This runs before the search, so the count
+    is unknown here, and writing zero would state a fact about the archive that
+    nothing measured. `no_thermal_coverage` runs after the search and does
+    write the real number.
+    """
+    summary = {
+        "status": "no-unmasked-pixels",
+        "tile": tile_id,
+        "bbox": bbox,
+        "n_scenes": None,
+        "mask": counts
+        | {
+            "numobs_uri": str(args.numobs_uri),
+            "land_geometry_uri": str(args.land_geometry_uri),
+            "aster_ged": ged_provenance,
+        },
+    }
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    (args.out_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, default=str)
+    )
+    print(f"no coverage   {tile_id} holds no land inside the buffered geometry")
+    print("              nothing to publish; summary written, no parts")
+    print(f"artifacts     {args.out_dir.resolve()}")
+    return 0
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Sharded p95 LST composite: one shard, one task, no shuffle.",
@@ -639,6 +740,29 @@ def parse_args(argv=None):
         type=Path,
         default=Path("artifacts/land_tiles.parquet"),
         help="the authoritative land-tile list, for the driver",
+    )
+    p.add_argument(
+        "--numobs-uri",
+        type=Path,
+        default=DEFAULT_NUMOBS_URI,
+        help="ASTER GED clear-sky observation counts. A pixel whose count is "
+        "zero has no emissivity, so Collection 2 never produced a surface "
+        "temperature for it and no window ever will",
+    )
+    p.add_argument(
+        "--land-geometry-uri",
+        type=Path,
+        default=masks.DEFAULT_LAND_GEOMETRY_URI,
+        help="the buffered land geometry the pixel mask rasterises. The same "
+        "geometry chose the tile list, and it travels as an artifact so that "
+        "a run needs no network",
+    )
+    p.add_argument(
+        "--no-output-mask",
+        action="store_true",
+        help="write every pixel the composite produced, including sea and "
+        "ASTER emissivity gaps. Kept for measuring the mask against its "
+        "absence; a published tile always carries it",
     )
     p.add_argument("--pixels-per-degree", type=int, default=3600)
     p.add_argument("--crs", default="EPSG:4326")
@@ -759,15 +883,52 @@ def parse_args(argv=None):
     return args
 
 
+def mask_rule(args, counts) -> dict | None:
+    """The rule a part was masked under, for a merge to compare across parts.
+
+    None under `--no-output-mask`, which is itself a rule a merge has to see:
+    one unmasked part beside three masked ones is a raster no single rule
+    describes.
+    """
+    if counts is None:
+        return None
+    return {
+        "numobs_uri": str(args.numobs_uri),
+        "land_geometry_uri": str(args.land_geometry_uri),
+        "gap_buffer_cells": counts.get("gap_buffer_cells"),
+        "gap_hot_threshold_c": counts.get("gap_hot_threshold_c"),
+    }
+
+
 def merge_parts(dirs, out_dir: Path) -> int:
-    """Assemble one tile from the parts written by --shard-slice runs."""
+    """Assemble one tile from the parts written by --shard-slice runs.
+
+    The merge applies no mask. Every part was masked by the machine that wrote
+    it, over that machine's own slice, so the pixels arrive already screened.
+    What the merge does check is that they were screened the same way: it reads
+    every part's meta rather than the first, and stops when two disagree.
+    """
     import numpy as np
 
     parts = sorted(f for d in dirs for f in Path(d).glob("part-*.npz"))
     if not parts:
         raise SystemExit(f"no part-*.npz under {dirs}")
 
-    meta = json.loads((Path(parts[0]).parent / "part-meta.json").read_text())
+    metas = {}
+    for f in parts:
+        meta_path = Path(f).parent / "part-meta.json"
+        metas[meta_path] = json.loads(meta_path.read_text())
+    rules = {json.dumps(m.get("mask_rule"), sort_keys=True) for m in metas.values()}
+    if len(rules) > 1:
+        joined = "\n  ".join(sorted(rules))
+        raise SystemExit(
+            f"the parts were masked under {len(rules)} different rules, so no "
+            f"one rule describes the merged tile:\n  {joined}\n"
+            f"Rerun the disagreeing slices with the same --numobs-uri, "
+            f"--land-geometry-uri, and --no-output-mask setting."
+        )
+
+    meta = next(iter(metas.values()))
     h, w = meta["raster"]
     lst = np.zeros((h, w), dtype="uint16")
     qa = np.zeros((12, h, w), dtype="uint8")
@@ -812,6 +973,9 @@ def merge_parts(dirs, out_dir: Path) -> int:
                 "coverage": covered,
                 "raster": [h, w],
                 "meta": meta,
+                # The rule every part agreed on, hoisted so a reader of the
+                # merged tile does not have to open a part to find it.
+                "mask_rule": meta.get("mask_rule"),
             },
             indent=2,
             default=str,
@@ -982,6 +1146,31 @@ def main(argv=None) -> int:  # noqa: C901
 
     configure_read_env(args.source)
     os.environ.setdefault("FRISKY_TRACING_CAPACITY", "2000000")
+
+    # Before the inventory read and before the first GET. The mask depends on
+    # the tile's bbox and on two artifacts, and on nothing this run computes,
+    # so a tile it empties can be recorded without staging a single object.
+    ged_provenance = check_mask_inputs(args)
+    keep = gap = mask_counts = None
+    if ged_provenance is not None:
+        keep, gap, mask_counts = masks.output_mask(
+            bbox,
+            args.pixels_per_degree,
+            numobs_uri=args.numobs_uri,
+            land_geometry_uri=args.land_geometry_uri,
+        )
+        print(
+            f"              {mask_counts['pixels_kept'] / mask_counts['pixels_total']:.1%} "
+            f"of the tile is land: {mask_counts['pixels_water']:,} px sea, "
+            f"{mask_counts['pixels_emissivity_gap_on_land']:,} px inside the "
+            f"ASTER gap region over land"
+        )
+        print(
+            f"              the gap region removes only what reads "
+            f"{masks.GAP_HOT_THRESHOLD_C:.0f} C or hotter, after the gather"
+        )
+        if not mask_counts["pixels_kept"]:
+            return no_unmasked_pixels(args, tile_id, bbox, mask_counts, ged_provenance)
 
     t_search = time.perf_counter()
     if args.rehearse:
@@ -1163,16 +1352,39 @@ def main(argv=None) -> int:  # noqa: C901
                 f"{el / done:5.2f}s/shard  client RSS {peak['rss']:.1f} GiB"
             )
     compute_s = time.perf_counter() - t_compute
-    sampler.stop()
-    memory_peak = sampler.peak_between(0.0, time.monotonic())
-    workers_gib = memory_peak.get("workers_rss_peak_mb", 0.0) / 1024
-    tree_gib = memory_peak.get("tree_rss_peak_mb", 0.0) / 1024
 
     # Every shard has been gathered, so nothing reads the staged files again.
     # A failed run keeps them, which is what a rerun and a post-mortem both
     # want; the disk guard on the next run says so rather than filling up.
     if stage_report is not None and not args.keep_staged:
         staging.cleanup(args.stage_dir, owned=stage_report.get("owns_stage_dir", True))
+
+    # The mask goes on before anything is measured or written, so the summary
+    # statistics, the part file, and a merge of parts from several machines all
+    # describe the same product. `merge_parts` needs no mask of its own, and a
+    # `--shard-slice` machine masks only its own slice: every pixel outside the
+    # slice is already nodata and the mask only ever removes.
+    if keep is not None and mask_counts is not None:
+        mask_counts |= masks.apply_output_mask(
+            lst_out,
+            qa_out,
+            keep,
+            gap,
+            scope="tile" if not args.shard_slice else f"shards[{args.shard_slice}]",
+        )
+        print(
+            f"masked        {mask_counts['valid_removed_by_water']:,} px sea, "
+            f"{mask_counts['valid_removed_by_emissivity']:,} px hot inside the "
+            f"ASTER gap region"
+        )
+
+    # After the mask, not before. The mask allocates while the two full-tile
+    # output arrays are live, and a sampler stopped above never sees the peak
+    # that `--target-memory-gib` is checked against.
+    sampler.stop()
+    memory_peak = sampler.peak_between(0.0, time.monotonic())
+    workers_gib = memory_peak.get("workers_rss_peak_mb", 0.0) / 1024
+    tree_gib = memory_peak.get("tree_rss_peak_mb", 0.0) / 1024
 
     valid = lst_out != LST_NODATA_DN
     cel = (
@@ -1217,6 +1429,19 @@ def main(argv=None) -> int:  # noqa: C901
         # requests-per-read sampled on one laptop against three shards.
         "staging": stage_report,
         "scenes_dropped_no_thermal": dropped_no_thermal,
+        # Which pixels the product describes at all, and what it cost to say
+        # so. None under --no-output-mask, which writes a raster the mask never
+        # touched.
+        "mask": (
+            None
+            if mask_counts is None
+            else mask_counts
+            | {
+                "numobs_uri": str(args.numobs_uri),
+                "land_geometry_uri": str(args.land_geometry_uri),
+                "aster_ged": ged_provenance,
+            }
+        ),
     }
     if cel is not None:
         summary |= {
@@ -1288,6 +1513,11 @@ def main(argv=None) -> int:  # noqa: C901
                     "pixels_per_degree": args.pixels_per_degree,
                     "shard_px": args.shard,
                     "n_shards": len(work),
+                    # What the mask did to this part. `merge_parts` compares
+                    # it across parts, because two machines that masked the
+                    # same tile differently produce one raster that no single
+                    # rule describes.
+                    "mask_rule": mask_rule(args, mask_counts),
                 },
                 indent=2,
             )
