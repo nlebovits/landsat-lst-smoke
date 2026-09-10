@@ -126,6 +126,67 @@ class TestS3RemainsUnknownWithoutAMeasurement:
         assert "lower bound" in stdout.lower()
 
 
+class TestACountedRunPricesItselfDirectly:
+    """A staged run fetches each object once and counts every attempt.
+
+    So its S3 line is the wire total, not `reads x bands x a sampled rate`.
+    The derivation exists because the unstaged path cannot count itself; a run
+    that can must not be pushed back through it.
+    """
+
+    #: Three scenes, two bands, one GET each, as `staging.json` records it.
+    STAGED_GETS = 7_820
+
+    def test_a_counted_total_prices_s3_without_a_sample(self, tmp_path):
+        report, stdout = run_report(
+            "--s3-get-requests", str(self.STAGED_GETS), tmp_path=tmp_path
+        )
+        assert report["measured"]["s3_get_requests"] == self.STAGED_GETS
+        assert report["derived"]["s3_usd"] == pytest.approx(
+            self.STAGED_GETS / 1000 * 0.0004
+        )
+        assert "counted on the wire" in stdout
+        assert report["unknown"] == []
+
+    def test_it_needs_neither_reads_nor_a_rate(self, tmp_path):
+        # The point of staging is that neither figure exists any more. If the
+        # refusal still fired here, a staged run could not be priced at all.
+        _, stdout = run_report(
+            "--s3-get-requests", str(self.STAGED_GETS), tmp_path=tmp_path
+        )
+        assert "UNKNOWN" not in stdout
+        assert "lower bound" not in stdout.lower()
+
+    def test_a_counted_total_wins_over_the_derivation(self, tmp_path):
+        report, _ = run_report(
+            "--s3-get-requests",
+            str(self.STAGED_GETS),
+            "--shard-scene-reads",
+            str(SHARD_SCENE_READS),
+            "--requests-per-read",
+            str(REQUESTS_PER_READ),
+            tmp_path=tmp_path,
+        )
+        assert report["derived"]["s3_usd"] == pytest.approx(
+            self.STAGED_GETS / 1000 * 0.0004
+        )
+
+    def test_staging_moves_the_s3_line_below_the_compute(self, tmp_path):
+        """The headline of the change, as arithmetic the report agrees with."""
+        staged, _ = run_report(
+            "--s3-get-requests", str(self.STAGED_GETS), tmp_path=tmp_path
+        )
+        unstaged, _ = run_report(
+            "--shard-scene-reads",
+            str(SHARD_SCENE_READS),
+            "--requests-per-read",
+            str(REQUESTS_PER_READ),
+            tmp_path=tmp_path,
+        )
+        assert unstaged["derived"]["s3_usd"] > unstaged["derived"]["ec2_usd"]
+        assert staged["derived"]["s3_usd"] < unstaged["derived"]["ec2_usd"] / 100
+
+
 class TestRecordedParsing:
     def test_a_malformed_fleet_spec_is_rejected(self, tmp_path):
         proc = subprocess.run(

@@ -212,6 +212,51 @@ def row_groups_for_tile(parquet_file, tile_id: str) -> list[int]:
     return groups
 
 
+def thermal_rows_for_tile(parquet_file, tile_id: str) -> int:
+    """How many of this tile's scenes carry a thermal band.
+
+    126 of the 895 land tiles answer zero, and a run there stages every scene
+    and composites nothing. S15W180 alone holds 4,274 such scenes, about
+    350 GB of staging for an all-nodata output. `fleet_plan` asks this before
+    it puts a machine on a tile.
+
+    `thermal_href` is null exactly when `data_type` is `OLI_TIRS_L2SR`, over
+    all 3,083,129 rows of the full artifact with no exceptions. USGS emits
+    that product where the Collection 2 surface temperature algorithm has no
+    usable emissivity, which is why every zero-thermal tile is an ocean tile
+    holding a small island.
+
+    The answer comes from the null-count statistics when a row group holds one
+    tile, which is how `usgs_inventory` writes it. That reads no column data at
+    all. A group without statistics, or one spanning more than this tile, falls
+    back to reading the two columns it needs.
+    """
+    meta = parquet_file.metadata
+    names = parquet_file.schema_arrow.names
+    tile_col = names.index("tile_id")
+    thermal_col = names.index("thermal_href")
+    total = 0
+    for i in row_groups_for_tile(parquet_file, tile_id):
+        group = meta.row_group(i)
+        tile_stats = group.column(tile_col).statistics
+        stats = group.column(thermal_col).statistics
+        exclusive = (
+            tile_stats is not None and tile_stats.min == tile_stats.max == tile_id
+        )
+        if exclusive and stats is not None and stats.has_null_count:
+            total += group.num_rows - stats.null_count
+            continue
+        table = parquet_file.read_row_groups([i], columns=["tile_id", "thermal_href"])
+        tiles = table.column("tile_id").to_pylist()
+        hrefs = table.column("thermal_href").to_pylist()
+        total += sum(
+            1
+            for name, href in zip(tiles, hrefs, strict=True)
+            if name == tile_id and href is not None
+        )
+    return total
+
+
 def _tile_local_bbox(west, south, east, north, crossing, bounds):
     """A scene bbox trimmed to the tile's own longitude span.
 

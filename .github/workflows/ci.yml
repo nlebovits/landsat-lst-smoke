@@ -44,8 +44,10 @@ jobs:
           uvx vulture@2.14 \
             compare_qa_masks.py cost_report.py fleet_plan.py \
             land_tiles.py measure_land_defects.py measure_s3_requests.py \
-            measure_scene_centre.py profile_lst_p95.py shard_lst_p95.py \
-            stac_reference.py stac_window.py sweep_throughput.py \
+            measure_scene_centre.py measure_shard_memory.py \
+            memory_sampler.py \
+            profile_lst_p95.py shard_lst_p95.py \
+            stac_reference.py stac_window.py staging.py sweep_throughput.py \
             tile_inventory.py usgs_inventory.py dryrun \
             vulture_whitelist.py --min-confidence 80
 
@@ -94,3 +96,12 @@ jobs:
 
       - name: pytest
         run: uv run pytest
+
+      # A script has to run on the dependencies its own PEP 723 block declares,
+      # not on the dev group, which is the union of every script's. The suite
+      # above runs inside that union and cannot tell the two apart. This step
+      # can: it copies the scripts to a fresh path and runs them there, which
+      # is what a fleet instance holds after git clone. A missing line here
+      # once cost a live c6id.16xlarge.
+      - name: Script environments resolve on their own metadata
+        run: uv run pytest -m packaging

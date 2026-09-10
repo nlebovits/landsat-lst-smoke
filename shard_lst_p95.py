@@ -3,7 +3,7 @@
 # dependencies = [
 #   "frisky>=0.7.2", "dask", "odc-stac", "pystac-client",
 #   "planetary-computer", "xarray", "numpy", "geopandas",
-#   "psutil", "rich",
+#   "psutil", "rich", "boto3", "pyarrow>=16",
 # ]
 # ///
 """Sharded p95 LST composite. One shard, one task, no shuffle.
@@ -19,11 +19,15 @@ This version splits the *problem* instead of the array. Each shard is a small
 bbox processed entirely inside one worker: load, mask, reduce, encode, return.
 Nothing crosses a worker boundary, so there is no rechunk and no shuffle.
 
-    512 x 512 px x 1765 scenes x 4 bytes = 1.85 GB per shard
+    512 x 512 px x 1765 scenes x 15 bytes = 6.9 GB per shard
 
-That fits in one worker with room to spare, and it stays constant as the area
-grows. A quarter tile is 324 shards; a full tile is 1,296. Frisky schedules
-250,000-400,000 tasks/s, so the task count is free.
+Fifteen bytes, not four. The decoded float32 stack is one of five arrays live
+at once, which comes to 13, and a windowed read of a tiled COG holds about two
+bytes more that the five do not name. `shard_bytes` counted only the decoded
+stack until a fleet instance ran out of memory, and then counted 13 until a
+staged sweep at fleet depth read 8% above it. The figure stays constant as the
+area grows. A quarter tile is 324 shards and a full tile is 1,296. Frisky
+schedules 250,000-400,000 tasks/s, so the task count is free.
 
     uv run shard_lst_p95.py --bbox=-62.5,-35.0,-60.0,-32.5 \
         --pixels-per-degree 3600 --shard 512 --dry-run
@@ -35,9 +39,11 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
+import staging
 from lst_qa import (
     LST_NODATA_DN,
     LST_OFFSET,
@@ -46,6 +52,7 @@ from lst_qa import (
     masked_celsius,
 )
 from land_tiles import tile_bounds
+from memory_sampler import MemorySampler
 from stac_window import (
     DEFAULT_CLOUD_COVER_LT,
     DEFAULT_END,
@@ -62,6 +69,12 @@ from tile_inventory import (
 
 #: Where the staged artifacts live on a VM unless the driver says otherwise.
 DEFAULT_INVENTORY_URI = Path("artifacts/tile_scene_inventory.parquet")
+
+#: Where scene objects are fetched to before the cluster starts. Overridden by
+#: `LST_STAGE_DIR` and then by `--stage-dir`. The system temp directory is the
+#: default because it is the one path that exists on every machine; a fleet
+#: instance should point this at its NVMe mount instead.
+DEFAULT_STAGE_DIR = Path(tempfile.gettempdir()) / "landsat-lst-stage"
 
 #: The read environment still has a source, because requester-pays and the
 #: region belong to the bucket the hrefs point at. It no longer selects a
@@ -201,9 +214,154 @@ def items_for_shard(shard: Shard, item_bboxes) -> list[int]:
     ]
 
 
+#: Bytes per pixel-scene that one shard holds at its peak. `process_shard` has
+#: five arrays live at once, not the one an earlier version of this function
+#: counted:
+#:
+#:     dn      uint16   2      the raw thermal stack
+#:     qa      uint16   2      the QA stack
+#:     celsius float32  4      the decoded stack
+#:     valid   bool     1      the mask, kept for the monthly counts
+#:     copy    float32  4      nanpercentile partitions a copy, not in place
+#:
+#: Those five sum to 13, and 13 under-predicts. Two bytes are not in the list.
+#:
+#: MEASURED by `measure_shard_memory.py --mode memory --stage-dir` against
+#: 1,615 real staged scenes on an `m6id.16xlarge`, at the depths a fleet shard
+#: carries. Least squares puts the slope at 13.68 bytes per pixel-scene at
+#: 360 px and 14.52 at 512, and a 13-byte model reads low at 600 and 820
+#: scenes on both edges, by up to 8%:
+#:
+#:     512 px, 820 scenes:  measured 3.08 GiB, 13-byte model 2.85
+#:     360 px, 820 scenes:  measured 1.57 GiB, 13-byte model 1.54
+#:
+#: The surplus is the windowed read of a tiled COG: GDAL decodes whole blocks
+#: and `odc.stac` assembles them into the target array, which the five named
+#: arrays do not cover. It is not attributed to a specific allocation, because
+#: nothing here has profiled one. So 15 is the five named arrays plus measured
+#: read overhead, and it bounds every point of all six committed sweeps.
+#:
+#: The synthetic fixture is what made 13 look safe. It writes one untiled
+#: raster at the shard's own edge and read it whole, so it never allocates
+#: that intermediate, and it fits a slope of 12.7 to 13.2. A sweep that stops
+#: below about 280 scenes agrees with 13 as well, because the fixed term still
+#: covers the gap there. Every fleet shard runs deeper: 195 to 820.
+#:
+#: Each point runs in a fresh interpreter, and it has to. glibc does not return
+#: freed arenas promptly, so measuring a second shard in the same process
+#: reports the high-water mark of the first: two contaminated sweeps put the
+#: slope at 17 and 18 and disagreed with each other by 18% at 700 scenes.
+SHARD_BYTES_PER_PIXEL_SCENE = 15
+
+#: Per-worker overhead outside the arrays, in GiB. From the same measurement.
+SHARD_FIXED_GIB = 0.25
+
+
 def shard_bytes(shard_px: int, n_scenes: int) -> float:
-    """Peak float32 working set for one shard's complete time stack, in GiB."""
-    return shard_px * shard_px * n_scenes * 4 / GIB
+    """Peak working set for one shard, in GiB.
+
+    Counting only the float32 stack understated this by 3.9x, and every memory
+    decision in the pipeline read the low number: the dry-run budget, the shard
+    size, and the worker count a fleet instance is launched with. A run
+    configured from it put 64 workers wanting 97 GiB on a 128 GiB box that had
+    just written 78 GB of staged scenes into page cache, and the workers died
+    at cluster start.
+
+    `FINDINGS.md` recorded the symptom before the model was fixed: memory ran
+    at 94% of a 1.6 GiB limit that this function called 0.39 GiB.
+    """
+    arrays = shard_px * shard_px * n_scenes * SHARD_BYTES_PER_PIXEL_SCENE / GIB
+    return arrays + SHARD_FIXED_GIB
+
+
+#: Bytes the client holds per output pixel while it gathers. `lst_out` is
+#: uint16 at height by width, and `qa_out` is uint8 at 12 by height by width.
+#: A full tile at 18,000 px square is 4.2 GiB of it.
+CLIENT_BYTES_PER_OUTPUT_PIXEL = 2 + 12
+
+
+def client_bytes(width: int, height: int) -> float:
+    """The two full-tile arrays the client holds while it gathers, in GiB."""
+    return width * height * CLIENT_BYTES_PER_OUTPUT_PIXEL / GIB
+
+
+def worker_memory_guard(
+    shard_px: int,
+    depths,
+    workers: int,
+    width: int,
+    height: int,
+    *,
+    total_bytes: int | None = None,
+) -> float:
+    """Refuse a configuration that cannot fit, before the cluster starts.
+
+    `staging.disk_guard` refuses a fetch that cannot finish. This is the same
+    guard on the other resource, and it was missing. `shard_bytes` was
+    corrected after a `c6id.16xlarge` lost ten workers to coredumps, but the
+    corrected number only ever reached a `print`. The same configuration would
+    have launched again with a larger figure on the screen.
+
+    `depths` is the scene count of every shard in this slice, and the demand is
+    their sum plus the client's two full-tile arrays, because the client gathers
+    into those while the workers are still allocating. Only the deepest
+    `workers` shards count: beyond that the slice queues rather than running
+    wider.
+
+    Multiplying the worst shard by the slot count is the reading this replaced,
+    and it over-reserved by 2.77x on the one slice that has been measured.
+    MEASURED on an `m6id.16xlarge`, 64 shards of S30W065 at 360 px running 203
+    to 820 scenes deep:
+
+        64 x worst shard        102.6 GiB
+        sum of actual depths     64.0 GiB
+        simultaneous peak        37.0 GiB, sampled at 0.5 s
+
+    The slice held one 820-scene shard and a median of 401, so the worst shard
+    is not what 63 of the workers were holding. The remaining 1.73x is peak
+    non-coincidence: the sum of each worker's own high-water mark came to
+    48.6 GiB against 37.0 ever live at once. That headroom is deliberate,
+    because a sampler cannot prove the coincident peak it never caught.
+
+    Returns:
+        The demand in GiB, so the caller can report what it checked.
+
+    Raises:
+        SystemExit: naming the demand, the machine, and both escapes. The
+            operator's next decision is a smaller shard or fewer workers, and
+            the message carries the edge that would fit.
+    """
+    if total_bytes is None:
+        import psutil
+
+        total_bytes = psutil.virtual_memory().total
+    ordered = sorted(depths, reverse=True)[:workers]
+    if not ordered:
+        return client_bytes(width, height)
+    arrays = sum(shard_bytes(shard_px, n) for n in ordered)
+    client = client_bytes(width, height)
+    demand = arrays + client
+    total = total_bytes / GIB
+    if demand <= total:
+        return demand
+    # Solve for the edge whose arrays leave the fixed terms room. Reported
+    # rather than applied, because shard size changes the output layout.
+    scene_px = sum(ordered)
+    room = total - client - len(ordered) * SHARD_FIXED_GIB
+    fits = (
+        int((room * GIB / (scene_px * SHARD_BYTES_PER_PIXEL_SCENE)) ** 0.5)
+        if room > 0
+        else 0
+    )
+    msg = (
+        f"{len(ordered)} shards at {shard_px} px, {ordered[-1]:,} to "
+        f"{ordered[0]:,} scenes deep, need {arrays:.1f} GiB between them, plus "
+        f"{client:.2f} GiB of client output. That is {demand:.1f} GiB and this "
+        f"machine has {total:.1f} GiB. Use --shard {fits} or smaller, drop "
+        f"--workers, or pass --force to run it anyway. An undersized budget is "
+        f"what killed a c6id.16xlarge mid-run."
+    )
+    raise SystemExit(msg)
 
 
 # --------------------------------------------------------------------------
@@ -364,6 +522,94 @@ def load_tile_items(args, tile_id: str):
     return items, boxes, provenance(manifest)
 
 
+def stage_scenes_for(args, item_dicts, work_idx):
+    """Fetch this slice's scene objects to local disk, or say why it did not.
+
+    Runs after `--max-shards`, so a two-shard smoke run fetches what those two
+    shards need rather than the whole slice.
+
+    Returns:
+        The staging report, or None when the run reads from S3. The report is
+        this run's S3 line, counted rather than derived from a sampled
+        requests-per-read.
+    """
+    if args.rehearse:
+        print("stage         skipped: the rehearsal reads no objects")
+        return None
+    if args.no_stage:
+        print(
+            "stage         skipped: --no-stage. Every shard reads from S3, and "
+            "about 155 shards touch each scene"
+        )
+        return None
+    report = staging.stage_scenes(
+        item_dicts,
+        sorted({i for _, idx in work_idx for i in idx}),
+        args.stage_dir,
+    )
+    print(
+        f"stage         {report['objects']:,} objects, "
+        f"{report['bytes'] / GIB:.1f} GiB in {report['seconds']:.1f}s "
+        f"-> {report['stage_dir']}"
+    )
+    print(
+        f"              {report['get_requests']:,} billable GETs, "
+        f"{report['retries']} retries"
+    )
+    return report
+
+
+def _target_verdict(args, per_shard_gib, slots, client_gib) -> str:
+    """`  fits` or `  OVER by N GiB` against `--target-memory-gib`.
+
+    A dry run plans for a machine that has not been launched, so the figure it
+    checks against has to be named rather than read from the host. Without the
+    flag there is nothing to compare and this adds nothing to the line.
+    """
+    if not args.target_memory_gib:
+        return ""
+    demand = per_shard_gib * slots + client_gib
+    over = demand - args.target_memory_gib
+    return f"   OVER by {over:.1f} GiB" if over > 0 else "   fits"
+
+
+def no_thermal_coverage(args, tile_id, bbox, n_scenes, dropped, run_provenance) -> int:
+    """Record a tile that holds no thermal scene, and succeed.
+
+    126 of the 895 land tiles are like this, and every one is an ocean tile
+    holding a small island. `thermal_href IS NULL` is exactly `OLI_TIRS_L2SR`
+    across all 3,083,129 inventory rows, and USGS emits that product where the
+    surface temperature algorithm has no usable emissivity. Compositing there
+    is not a failure. There is nothing to composite.
+
+    `fleet_plan.py` drops these tiles from the launch list, so a fleet never
+    reaches this path. An operator naming the tile by hand does, and gets the
+    same artifact a driver keys on. Writing nothing and exiting non-zero would
+    make a correct outcome read as a dead machine, which is the distinction
+    the barren-shard records exist to preserve.
+    """
+    summary = {
+        "status": "no-thermal-coverage",
+        "tile": tile_id,
+        "bbox": bbox,
+        "n_scenes_inventory": n_scenes,
+        "n_scenes": 0,
+        "scenes_dropped_no_thermal": dropped,
+        "inventory": run_provenance,
+    }
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    (args.out_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, default=str)
+    )
+    print(
+        f"no thermal    all {n_scenes:,} scenes of {tile_id} are OLI_TIRS_L2SR "
+        f"and carry no thermal band"
+    )
+    print("              nothing to composite; summary written, no parts")
+    print(f"artifacts     {args.out_dir.resolve()}")
+    return 0
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Sharded p95 LST composite: one shard, one task, no shuffle.",
@@ -438,14 +684,66 @@ def parse_args(argv=None):
     )
     p.add_argument("--out-dir", type=Path, default=Path("./shard-run"))
     p.add_argument(
+        "--stage-dir",
+        type=Path,
+        default=Path(os.environ.get("LST_STAGE_DIR", DEFAULT_STAGE_DIR)),
+        help="local directory the scene objects are fetched into before the "
+        "cluster starts. Wants throughput as well as capacity: the compute "
+        "phase already reads about 358 MB/s and staging writes on top of it",
+    )
+    p.add_argument(
+        "--no-stage",
+        action="store_true",
+        help="read every shard straight from S3, as the pipeline did before "
+        "staging existed. About 155 shards touch each scene and each open "
+        "costs 4.77 requests, so this is the expensive path and it is kept "
+        "for measuring against",
+    )
+    p.add_argument(
+        "--keep-staged",
+        action="store_true",
+        help="leave the staged files behind. Steady state runs one tile per "
+        "instance back to back, so the default removes them",
+    )
+    p.add_argument(
+        "--keep-scenes-without-thermal",
+        action="store_true",
+        help="keep the L2SR products that carry no lwir11 band. They load as "
+        "fill and reach neither the percentile nor the monthly counts, so "
+        "the default drops them",
+    )
+    p.add_argument(
         "--force",
         action="store_true",
-        help="run even if slots x read-threads oversubscribes the cores",
+        help="run even if slots x read-threads oversubscribes the cores, or "
+        "if the worker memory budget exceeds the machine. The memory model "
+        "over-predicts by 6 to 14 percent, so an operator who knows that can "
+        "spend the margin",
+    )
+    p.add_argument(
+        "--sample-interval",
+        type=float,
+        default=0.5,
+        help="seconds between memory samples. The sampler runs in its own "
+        "process and writes memory.csv beside the summary, so a run records "
+        "the worker RSS that shard_bytes only predicts. A shard runs 40 to "
+        "87 s, so the default takes about 120 samples of each one, and "
+        "0.05 s produced the same peak from a 6.6x larger file",
     )
     p.add_argument(
         "--dry-run",
         action="store_true",
         help="plan shards and print the budget; no cluster, no reads",
+    )
+    p.add_argument(
+        "--target-memory-gib",
+        type=float,
+        default=None,
+        help="RAM of the machine this run is planned for, in GiB. The dry run "
+        "checks the worker budget against it and exits 2 if the run would be "
+        "refused, so a configuration can be priced before an instance is "
+        "launched. Without it the dry run reads no machine at all, because the "
+        "host planning a fleet run is not the host doing it",
     )
     p.add_argument(
         "--search-in-dry-run",
@@ -552,14 +850,15 @@ def main(argv=None) -> int:  # noqa: C901
     )
 
     if args.dry_run:
+        lo, hi_slice = 0, len(shards)
         if args.shard_slice:
             a, _, b = args.shard_slice.partition(":")
             lo = int(a) if a else 0
-            hi = int(b) if b else len(shards)
-            mine = shards[lo:hi]
+            hi_slice = int(b) if b else len(shards)
+            mine = shards[lo:hi_slice]
             px = sum(sh.ny * sh.nx for sh in mine)
             print(
-                f"slice         shards[{lo}:{hi}] -> {len(mine)} shards, "
+                f"slice         shards[{lo}:{hi_slice}] -> {len(mine)} shards, "
                 f"{px:,} px ({100 * px / (width * height):.1f}% of the tile)"
             )
             ys = [sh.y0 for sh in mine]
@@ -573,36 +872,70 @@ def main(argv=None) -> int:  # noqa: C901
         )
         print(f"coverage      {cover:,} px == raster, no gaps or overlap")
 
-        print("\nnaive budget, assuming every shard sees every scene:")
+        client_gib = client_bytes(width, height)
+        print(
+            f"\nnaive budget, assuming every shard sees every scene "
+            f"(+{client_gib:.1f} GiB of client output):"
+        )
         for n in (711, 1765, 3910):
             per = shard_bytes(args.shard, n)
             print(
                 f"  at {n:>5} scenes: {per:5.2f} GiB per shard, "
-                f"{per * concurrency:6.1f} GiB across {concurrency} slots"
+                f"{per * concurrency + client_gib:6.1f} GiB across "
+                f"{concurrency} slots{_target_verdict(args, per, concurrency, client_gib)}"
             )
 
+        refused = False
         if args.search_in_dry_run:
             if tile_id is None:
                 raise SystemExit("--search-in-dry-run needs --tile")
             items, item_bboxes, _ = load_tile_items(args, tile_id)
             counts = [len(items_for_shard(sh, item_bboxes)) for sh in shards]
+            # The slice is what one machine runs, and its worst shard is what
+            # that machine's memory has to hold. Reporting the tile's worst
+            # instead understates a light slice and overstates a heavy one: at
+            # 360 px, S30W065 runs 404 scenes deep at shards[0:64] and 820 at
+            # shards[987:1051].
+            mine_counts = counts[lo:hi_slice] if args.shard_slice else counts
             counts.sort()
-            hi = counts[-1]
             print(f"\nactual scenes per shard (from {len(items)} total):")
             print(
-                f"  min {counts[0]}  p50 {counts[len(counts) // 2]}  "
-                f"p95 {counts[int(len(counts) * 0.95)]}  max {hi}"
+                f"  tile:  min {counts[0]}  p50 {counts[len(counts) // 2]}  "
+                f"p95 {counts[int(len(counts) * 0.95)]}  max {counts[-1]}"
             )
-            per = shard_bytes(args.shard, hi)
+            worst = max(mine_counts) if mine_counts else 0
+            if args.shard_slice:
+                ordered = sorted(mine_counts)
+                print(
+                    f"  slice: min {ordered[0]}  p50 {ordered[len(ordered) // 2]}  "
+                    f"max {worst}   <- what this machine holds"
+                )
+            per = shard_bytes(args.shard, worst)
             print(
                 f"  worst shard: {per:.2f} GiB, "
-                f"{per * concurrency:.1f} GiB across {concurrency} slots"
+                f"{per * concurrency + client_gib:.1f} GiB across "
+                f"{concurrency} slots"
+                f"{_target_verdict(args, per, concurrency, client_gib)}"
             )
             print(
                 f"  total shard-scene reads: {sum(counts):,} "
                 f"vs {len(items) * len(shards):,} unfiltered "
                 f"({len(items) * len(shards) / max(sum(counts), 1):.0f}x saved)"
             )
+            if args.target_memory_gib:
+                try:
+                    worker_memory_guard(
+                        args.shard,
+                        mine_counts,
+                        concurrency,
+                        width,
+                        height,
+                        total_bytes=int(args.target_memory_gib * GIB),
+                    )
+                except SystemExit as exc:
+                    print(f"\nREFUSED on a {args.target_memory_gib:g} GiB machine:")
+                    print(f"  {exc}")
+                    refused = True
 
         (args.out_dir / "shards.json").write_text(
             json.dumps(
@@ -622,7 +955,9 @@ def main(argv=None) -> int:  # noqa: C901
             )
         )
         print(f"\nplan written  {args.out_dir / 'shards.json'}")
-        return 0
+        # 2, not 1, so a driver can tell "this configuration does not fit" from
+        # a plan that failed to build at all.
+        return 2 if refused else 0
 
     # ---------------- execute ----------------
     # Checked here, not before the dry run: planning a slice must never be
@@ -678,6 +1013,26 @@ def main(argv=None) -> int:  # noqa: C901
     # rehearsal fakes them, so nothing here converts a pystac object.
     item_dicts = items
 
+    # L2SR products carry no thermal band, load as fill, and reach neither the
+    # percentile nor the monthly counts. Dropping them is output-neutral and
+    # buys back a layer on the time axis of every shard they touch, which is
+    # what caps shard size at 94% of the worker memory limit. Skipped under
+    # --rehearse, where the synthetic items carry no assets at all.
+    dropped_no_thermal = 0
+    if not args.rehearse and not args.keep_scenes_without_thermal:
+        item_dicts, item_bboxes, dropped_no_thermal = (
+            staging.drop_scenes_without_thermal(item_dicts, item_bboxes)
+        )
+        if dropped_no_thermal:
+            print(
+                f"              {dropped_no_thermal} of {len(items)} carry no "
+                f"thermal band; dropped"
+            )
+        if not item_dicts:
+            return no_thermal_coverage(
+                args, tile_id, bbox, len(items), dropped_no_thermal, run_provenance
+            )
+
     # Slice the PLAN, never the filtered list. Shards with no overlapping
     # scenes drop out of `work`, so slicing after filtering shifts every index
     # and machines silently leave gaps. The rehearsal caught exactly that:
@@ -693,20 +1048,43 @@ def main(argv=None) -> int:  # noqa: C901
             f"slice         shards[{lo}:{hi}] -> {len(mine)} of {len(shards)} planned"
         )
 
-    work = []
-    for sh in mine:
-        idx = items_for_shard(sh, item_bboxes)
-        if idx:
-            work.append((sh, [item_dicts[i] for i in idx]))
+    # One pass over the plan, read twice. `work` and `barren` partition this
+    # slice, and staging needs the union of the indices in `work`, so all three
+    # come from the same list rather than from three sweeps of the same test.
+    per_shard = [items_for_shard(sh, item_bboxes) for sh in mine]
+    work_idx = [(sh, idx) for sh, idx in zip(mine, per_shard, strict=True) if idx]
     # Shards with no overlapping scene are still this slice's responsibility.
     # Recording them as all-nodata keeps coverage complete, so the merge can
     # tell "no Landsat here" (ocean, edge) from "a machine died", which it
     # cannot do if they are simply absent.
-    barren = [sh for sh in mine if not items_for_shard(sh, item_bboxes)]
+    barren = [sh for sh, idx in zip(mine, per_shard, strict=True) if not idx]
     if barren:
         print(f"              {len(barren)} shards have no scenes; written as nodata")
     if args.max_shards:
-        work = work[: args.max_shards]
+        work_idx = work_idx[: args.max_shards]
+
+    # Before the first GET, like the disk guard, because a configuration that
+    # cannot fit should not buy its objects first. --force is the escape, and
+    # the rehearsal skips it: rehearse_shard allocates nothing.
+    memory_demand = None
+    if work_idx and not args.rehearse and not args.force:
+        memory_demand = worker_memory_guard(
+            args.shard,
+            [len(idx) for _, idx in work_idx],
+            concurrency,
+            width,
+            height,
+        )
+        print(
+            f"memory        {memory_demand:.1f} GiB demanded across "
+            f"{concurrency} slots, fits"
+        )
+
+    # Staging runs after --max-shards, so a smoke run over two shards fetches
+    # the objects those two shards need and not the whole slice.
+    stage_report = stage_scenes_for(args, item_dicts, work_idx)
+
+    work = [(sh, [item_dicts[i] for i in idx]) for sh, idx in work_idx]
     counts = [len(d) for _, d in work]
     print(
         f"shards        {len(work)} with data, "
@@ -721,6 +1099,14 @@ def main(argv=None) -> int:  # noqa: C901
 
     proc = psutil.Process()
     peak = {"rss": 0.0}
+
+    # What the workers actually hold, sampled from outside them. `shard_bytes`
+    # predicts this and nothing on a production run had ever measured it, so
+    # the model was checked against its own output. The sampler starts before
+    # the cluster, because worker RSS peaks while they are all allocating.
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    sampler = MemorySampler(args.out_dir / "memory.csv", args.sample_interval)
+    sampler.start()
 
     cluster = frisky.LocalCluster(
         n_workers=args.workers,
@@ -777,6 +1163,16 @@ def main(argv=None) -> int:  # noqa: C901
                 f"{el / done:5.2f}s/shard  client RSS {peak['rss']:.1f} GiB"
             )
     compute_s = time.perf_counter() - t_compute
+    sampler.stop()
+    memory_peak = sampler.peak_between(0.0, time.monotonic())
+    workers_gib = memory_peak.get("workers_rss_peak_mb", 0.0) / 1024
+    tree_gib = memory_peak.get("tree_rss_peak_mb", 0.0) / 1024
+
+    # Every shard has been gathered, so nothing reads the staged files again.
+    # A failed run keeps them, which is what a rerun and a post-mortem both
+    # want; the disk guard on the next run says so rather than filling up.
+    if stage_report is not None and not args.keep_staged:
+        staging.cleanup(args.stage_dir, owned=stage_report.get("owns_stage_dir", True))
 
     valid = lst_out != LST_NODATA_DN
     cel = (
@@ -791,18 +1187,36 @@ def main(argv=None) -> int:  # noqa: C901
         "raster": [height, width],
         "shard_px": args.shard,
         "n_shards": len(work),
-        "n_scenes": len(items),
+        # What the run composited, after the L2SR filter. The inventory total
+        # sits beside it, because the two differ by `scenes_dropped_no_thermal`
+        # and a reader cannot tell which one a single figure means.
+        "n_scenes": len(item_dicts),
+        "n_scenes_inventory": len(items),
         "search_s": t_search,
         "compute_s": compute_s,
         "s_per_shard": compute_s / max(len(work), 1),
         "client_rss_peak_gib": peak["rss"],
+        # MEASURED across the worker processes, not predicted. `shard_bytes`
+        # models the same quantity, so a run now says whether the model held.
+        "workers_rss_peak_gib": workers_gib,
+        "tree_rss_peak_gib": tree_gib,
+        "memory_demand_gib": memory_demand,
         "valid_fraction": float(valid.mean()),
+        # A driver needs one number, not a walk over shard_stats. A run that
+        # loses shards still writes a summary and still writes its parts, so
+        # without this the artifact of a half-finished tile looks finished.
+        "n_shards_errored": sum(1 for s in stats if "error" in s),
         "shard_stats": stats,
         # Which inventory answered this run. A composite is only reproducible
         # if the scene list behind it is named, so this travels with the
         # numbers rather than beside them.
         "inventory": run_provenance,
         "tile": tile_id,
+        # What this run actually put on the wire. `cost_report.py --s3-get-requests`
+        # prices it directly, so the S3 line stops being derived from a
+        # requests-per-read sampled on one laptop against three shards.
+        "staging": stage_report,
+        "scenes_dropped_no_thermal": dropped_no_thermal,
     }
     if cel is not None:
         summary |= {
@@ -816,9 +1230,24 @@ def main(argv=None) -> int:  # noqa: C901
         )
     print(
         f"compute       {compute_s:.1f}s for {len(work)} shards "
-        f"({compute_s / max(len(work), 1):.2f}s each)"
+        f"({compute_s / max(len(work), 1):.2f}s/shard of wall clock, not "
+        f"per-shard duration)"
     )
+    n_errored = sum(1 for s in stats if "error" in s)
+    if n_errored:
+        print(
+            f"FAILED        {n_errored} of {len(work)} shards errored; this "
+            f"tile is incomplete"
+        )
     print(f"client RSS    {peak['rss']:.2f} GiB peak")
+    if workers_gib:
+        # The model against the measurement, on every run. This is the check
+        # that was missing when a MEASURED table carried `shard_bytes` output.
+        against = ""
+        if memory_demand:
+            share = workers_gib / memory_demand
+            against = f" against {memory_demand:.1f} GiB modelled ({share:.0%})"
+        print(f"worker RSS    {workers_gib:.2f} GiB peak{against}")
     qa_mean = {MONTHS[i]: float(qa_out[i].mean()) for i in range(12)}
     summary["qa_count_per_month"] = qa_mean
     print("qa_count      " + "  ".join(f"{m} {v:.1f}" for m, v in qa_mean.items()))
@@ -870,8 +1299,26 @@ def main(argv=None) -> int:  # noqa: C901
     (args.out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, default=str)
     )
+    # Beside the summary as well as inside it, because pricing a run reads only
+    # this and `cost_report.py` should not have to know the summary's shape.
+    if stage_report is not None:
+        (args.out_dir / "staging.json").write_text(
+            json.dumps(
+                stage_report | {"scenes_dropped_no_thermal": dropped_no_thermal},
+                indent=2,
+            )
+        )
     print(f"artifacts     {args.out_dir.resolve()}")
-    return 0
+    # 3 for a tile that lost shards, 0 for one that did not. It used to return
+    # 0 either way, so a run that gathered 1 shard of 64 reported success and
+    # wrote a part file and a summary to match.
+    #
+    # This is the signal a fleet driver needs, and the panic that prompted
+    # looking is not it. MEASURED: SIGABRT on four of eight workers mid-run,
+    # which is what a non-unwinding panic does to a worker, and all 200 shards
+    # still completed with no errors and exit 0. frisky reschedules the work.
+    # What loses a tile quietly is a shard that raises.
+    return 3 if n_errored else 0
 
 
 if __name__ == "__main__":

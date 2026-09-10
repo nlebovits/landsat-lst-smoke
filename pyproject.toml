@@ -22,6 +22,7 @@ dev = [
   # The union of the inline blocks in profile_lst_p95.py, shard_lst_p95.py,
   # measure_s3_requests.py and compare_qa_masks.py. cost_report.py and
   # sweep_throughput.py are standard library only.
+  "rasterio",
   "frisky>=0.7.2",
   "dask",
   "odc-stac",
@@ -31,6 +32,8 @@ dev = [
   "numpy",
   "geopandas",
   "rioxarray",
+  # Staging fetches each scene object once, with one get_object per object.
+  "boto3",
   # The precompute stage: land_tiles.py and usgs_inventory.py. DuckDB and
   # pyarrow do the column projection, filtering and Parquet writing; the bulk
   # metadata table never becomes a pandas frame.
@@ -67,8 +70,10 @@ testpaths = ["tests"]
 #
 #     uv run pytest -m "network and not s3"     # free, Earth Search only
 #     AWS_PROFILE=... uv run pytest -m s3       # costs money
-addopts = "-q --timeout=60 -m 'not network and not s3'"
+#     uv run pytest -m packaging                # resolves the script env
+addopts = "-q --timeout=60 -m 'not network and not s3 and not packaging'"
 markers = [
   "network: reaches Earth Search or the USGS bulk metadata service",
   "s3: reads s3://usgs-landsat, which is requester-pays and costs money",
+  "packaging: runs a script in its own PEP 723 environment, which resolves against PyPI",
 ]

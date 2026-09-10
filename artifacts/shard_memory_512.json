@@ -1,0 +1,64 @@
+{
+  "mode": "memory",
+  "source": "synthetic",
+  "shard_px": 512,
+  "rows": [
+    {
+      "scenes": 100,
+      "shard_px": 512,
+      "peak_rss_gib": 0.473,
+      "predicted_gib": 0.616,
+      "ratio": 0.768,
+      "seconds": 11.43
+    },
+    {
+      "scenes": 200,
+      "shard_px": 512,
+      "peak_rss_gib": 0.783,
+      "predicted_gib": 0.982,
+      "ratio": 0.797,
+      "seconds": 18.18
+    },
+    {
+      "scenes": 300,
+      "shard_px": 512,
+      "peak_rss_gib": 0.993,
+      "predicted_gib": 1.349,
+      "ratio": 0.736,
+      "seconds": 25.13
+    },
+    {
+      "scenes": 404,
+      "shard_px": 512,
+      "peak_rss_gib": 1.486,
+      "predicted_gib": 1.729,
+      "ratio": 0.859,
+      "seconds": 32.69
+    },
+    {
+      "scenes": 500,
+      "shard_px": 512,
+      "peak_rss_gib": 1.721,
+      "predicted_gib": 2.081,
+      "ratio": 0.827,
+      "seconds": 39.21
+    },
+    {
+      "scenes": 700,
+      "shard_px": 512,
+      "peak_rss_gib": 2.298,
+      "predicted_gib": 2.813,
+      "ratio": 0.817,
+      "seconds": 53.53
+    }
+  ],
+  "worst_ratio_error": 0.264,
+  "under_predicted": [],
+  "model_bytes_per_pixel_scene": 15,
+  "model_fixed_gib": 0.25,
+  "slope_bytes_per_pixel_scene": 12.68,
+  "intercept_gib": 0.156,
+  "step_slope_min": 8.6,
+  "step_slope_max": 19.42,
+  "ru_maxrss_gib": 0.085
+}

@@ -35,6 +35,7 @@ from tile_inventory import (
     provenance,
     read_manifest,
     row_groups_for_tile,
+    thermal_rows_for_tile,
 )
 
 
@@ -105,22 +106,41 @@ def build_plan(
     # the launch list and is named in the plan, rather than stopping the other
     # 894 machines. The land and manifest checks above are what catch a real
     # mismatch, and they have already run.
+    # A tile with no thermal scene comes out for a second reason, and it is
+    # not about the window. Every scene there is an `OLI_TIRS_L2SR` product,
+    # which carries no `ST_B10`, so the run would stage every object and write
+    # an all-nodata composite. 126 of the 895 land tiles are like this and each
+    # one is an ocean tile holding a small island. Reading the null-count
+    # statistics costs no column data, so this is free at plan time and about
+    # $189 and three hours of fleet time if it is skipped.
+    #
+    # Only a tile at zero comes out. A tile that is 90% L2SR still composites
+    # real temperatures from the other 10%, so the share is reported and the
+    # machine still launches.
     pf = pq.ParquetFile(inventory_uri)
     meta = pf.metadata
     rows_by_tile = {}
+    thermal_by_tile = {}
     empty = []
+    no_thermal = []
     for name in tiles:
         groups = row_groups_for_tile(pf, name)
         if not groups:
             empty.append(name)
             continue
+        thermal = thermal_rows_for_tile(pf, name)
+        if not thermal:
+            no_thermal.append(name)
+            continue
         rows_by_tile[name] = sum(meta.row_group(g).num_rows for g in groups)
+        thermal_by_tile[name] = thermal
 
     runnable = [name for name in tiles if name in rows_by_tile]
     if not runnable:
         msg = (
-            f"none of the {len(tiles)} land tiles has a scene in this "
-            f"inventory. The window {start} to {end} selects nothing, or the "
+            f"none of the {len(tiles)} land tiles has a scene with a thermal "
+            f"band in this inventory. The window {start} to {end} selects "
+            f"nothing, every tile holds OLI_TIRS_L2SR products alone, or the "
             f"artifact was built for a different tile list."
         )
         raise InventoryError(msg)
@@ -129,6 +149,7 @@ def build_plan(
         "tile_count": len(runnable),
         "land_tile_count": len(tiles),
         "tiles_without_scenes": empty,
+        "tiles_without_thermal": no_thermal,
         "inventory": provenance(manifest),
         "land_tiles_uri": str(land_tiles_uri),
         "inventory_uri": str(inventory_uri),
@@ -137,6 +158,7 @@ def build_plan(
                 "tile_id": name,
                 "bbox": list(tile_bounds(name)),
                 "scenes": rows_by_tile[name],
+                "thermal_scenes": thermal_by_tile[name],
             }
             for name in runnable
         ],
@@ -186,9 +208,22 @@ def main(argv=None) -> int:
         print(
             f"              {', '.join(empty[:10])}{' ...' if len(empty) > 10 else ''}"
         )
+    bare = plan["tiles_without_thermal"]
+    if bare:
+        print(
+            f"              {len(bare)} of {plan['land_tile_count']} land tiles "
+            f"hold only OLI_TIRS_L2SR and would composite nothing:"
+        )
+        print(f"              {', '.join(bare[:10])}{' ...' if len(bare) > 10 else ''}")
+    thermal = [t["thermal_scenes"] for t in plan["tiles"]]
+    thermal.sort()
     print(
         f"scenes/tile   min {scenes[0]:,}  p50 {scenes[len(scenes) // 2]:,}  "
         f"max {scenes[-1]:,}"
+    )
+    print(
+        f"thermal/tile  min {thermal[0]:,}  p50 {thermal[len(thermal) // 2]:,}  "
+        f"max {thermal[-1]:,}"
     )
     print(
         f"land          ne_10m_land, {inv['buffer_meters']} m buffer, "
