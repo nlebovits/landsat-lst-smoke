@@ -669,6 +669,7 @@ def build_item(
     end: str,
     crs: str,
     mask_rule: dict[str, Any] | None = None,
+    correction_rule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The tile item: one footprint, one acquisition window, two COGs.
 
@@ -679,9 +680,19 @@ def build_item(
 
     The mask lineage is on the item for the same reason. The rules ran over
     this tile's pixels, and a tile masked against a different ASTER GED build
-    says so itself rather than inheriting a collection-wide claim.
+    says so itself rather than inheriting a collection-wide claim. The seam
+    correction joins it there, and for a stronger version of the same reason:
+    it decides what every value means, not which pixels survive.
+
+    The two lineages share one `processing:lineage`. The correction goes first,
+    because it says what the number is and the mask says which pixels survived.
+    Both of the mask's own paragraphs locate themselves against the percentile,
+    so nothing depends on reading them in the order the pipeline ran them.
     """
     lineage = mask_lineage(mask_rule)
+    lineage["processing:lineage"] = " ".join(
+        [correction_lineage(correction_rule), lineage["processing:lineage"]]
+    )
     extensions = [
         FILE_EXTENSION,
         PROJECTION_EXTENSION,
@@ -1020,6 +1031,16 @@ def _collection_readme(
         "Only the first would improve with a wider window. Each item's "
         "`processing:lineage` states the rules that produced its pixels and "
         "names the artifacts they read by checksum.\n\n"
+        "### Two tiles are not always comparable\n\n"
+        "A tile may be built with a WRS seam correction, which shifts every "
+        "scene to its own calendar-month median before the percentile. That "
+        "value answers how hot a surface gets against its own monthly normal. "
+        "An uncorrected tile answers what the hottest observed value was. "
+        "Nothing in either raster separates the two, so differencing a "
+        "corrected tile against an uncorrected one measures the correction "
+        "rather than the ground. Read each item's `processing:lineage` before "
+        "comparing tiles: it states which rule produced the pixels, and names "
+        "the scene set the offsets were fitted over.\n\n"
         "Where ASTER GED caught no clear sky between 2000 and 2008, the USGS "
         "interpolates emissivity from neighbouring cells and retrieves a "
         "temperature anyway, and some of those retrievals fail upward. A pixel "
@@ -1086,6 +1107,14 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
         "calendar month, pooled across every year in the window. The count "
         "saturates at 255. A zero is a real count, not a gap, which is why "
         "the band declares no nodata value.\n\n"
+        "## Comparing two tiles\n\n"
+        "Check each item's `processing:lineage` first. A tile built with the "
+        "WRS seam correction carries a percentile taken against each scene's "
+        "own calendar-month median, and an uncorrected tile carries the "
+        "hottest observed value. The rasters look alike and the numbers answer "
+        "different questions, so a difference between two tiles built under "
+        "different rules measures the rule. The lineage names the rule and the "
+        "scene set the offsets were fitted over.\n\n"
         "## Cross-referencing\n\n"
         "Read `items.parquet` in the collection root to get every item's "
         "metadata in one range request, instead of fetching each item JSON.\n"
@@ -1106,6 +1135,72 @@ _QA_LINEAGE = (
     "out-of-range pixels before the percentile. A pixel with no surviving "
     "observation is nodata."
 )
+
+
+#: What a pixel means with no seam correction applied. Named separately because
+#: it is the claim a consumer makes by default, and because a part written
+#: before `destripe.py` existed carries no `correction_rule` at all.
+_POOLED_LINEAGE = (
+    "No seam correction ran. Each pixel is the pooled 95th percentile of every "
+    "scene that observed it, at each scene's own atmospheric baseline. WRS-2 "
+    "footprint edges may show as steps in the raster, because the set of "
+    "scenes behind a pixel changes across them."
+)
+
+
+def correction_lineage(correction_rule: dict[str, Any] | None) -> str:
+    """What produced each value, for a consumer who cannot see it in the pixels.
+
+    Two composites of the same ground under different corrections are not
+    comparable, and nothing in a raster says which one it is. The de-striped
+    percentile answers "how hot does this surface get against its own monthly
+    normal", where the pooled one answers "what is the hottest value observed
+    here". A reader differencing the two without knowing that reads the
+    correction as climate.
+
+    `merge_parts` already refuses to assemble parts built under two rules, so
+    one tile carries one rule and the item can state it. Nothing enforces one
+    rule across a collection, which is why this belongs on the item beside the
+    mask lineage rather than in the collection description.
+
+    Returns one paragraph. An absent rule means the pooled percentile, which is
+    itself a claim about the pixels and is stated rather than omitted.
+    """
+    if not correction_rule:
+        return _POOLED_LINEAGE
+
+    sentences = []
+    if correction_rule.get("destripe"):
+        sentences.append(
+            "Scene offsets: each scene was compared against a per-pixel median "
+            "for its own calendar month, pooled across every year in the "
+            "window, and shifted by its bulk deviation. A value is relative to "
+            "that month's normal, not an absolute maximum, and is not "
+            "comparable with a composite built without this step. A scene "
+            f"whose offset exceeded {correction_rule.get('max_offset_c')} C "
+            "was discarded rather than clamped, so qa_count counts the "
+            "evidence behind the percentile rather than what was available."
+        )
+    if correction_rule.get("feather"):
+        paths = ", ".join(str(p) for p in correction_rule.get("paths") or ())
+        share = correction_rule.get("swath_quad_share")
+        sentences.append(
+            "Per-path percentiles: the percentile was taken once per WRS path "
+            f"({paths}) and blended on distance to each swath edge, which "
+            "removes the step where one path's coverage stops. A swath is the "
+            f"ground where at least {share} of a (path, row) quad's scenes "
+            "produced a valid observation. A pixel outside every swath takes "
+            "the pooled percentile of whatever observed it."
+        )
+    if not sentences:
+        return _POOLED_LINEAGE
+
+    window = correction_rule.get("prep_window") or {}
+    fitted = f"Fitted over scene set {correction_rule.get('prep_scene_digest')}"
+    if window.get("start") and window.get("end"):
+        fitted += f", {window['start']} to {window['end']}"
+    sentences.append(f"{fitted}.")
+    return " ".join(sentences)
 
 
 def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
@@ -1197,6 +1292,10 @@ def catalog_provenance(meta: dict[str, Any], *, collection_id: str) -> dict[str,
         "lst_scale": LST_SCALE,
         "lst_offset": LST_OFFSET,
         "lst_nodata": LST_NODATA_DN,
+        # The seam correction the pixels were built under, or None for the
+        # pooled percentile. Absent from a part written before `destripe.py`,
+        # and None is the right reading of that: those pixels are pooled.
+        "correction_rule": meta.get("correction_rule"),
     }
 
 
@@ -1406,6 +1505,7 @@ def write_catalog(
         end=provenance["end"],
         crs=crs,
         mask_rule=meta.get("mask_rule"),
+        correction_rule=meta.get("correction_rule"),
     )
     _dump(item_dir / f"{item_id}.json", item)
 

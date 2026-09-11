@@ -70,6 +70,22 @@ settled" in `FINDINGS.md`.
 
 ## Known issues
 
+### A corrected composite measures something else
+
+A de-striped P95 measures how hot a surface gets against its own monthly
+normal. The pooled P95 this repository built before measures the hottest
+observed value. Both rasters look alike, and no pixel in either one states
+which rule produced it. So differencing a corrected tile against an uncorrected
+one measures the rule rather than the ground.
+`nlebovits/landsat-lst` measured the correction cooling the P95 by about 4 C at
+a 21.8% scene rejection.
+
+Every published item states its rule in `processing:lineage`, beside the mask
+rules and naming the scene set the offsets were fitted over. Read it before
+comparing two tiles. `merge_parts` refuses to assemble parts built under two
+rules, so one tile has one rule. A collection can still hold tiles built under
+several, so the item is where the claim belongs.
+
 ### Hot pixels left by ASTER GED coverage gaps
 
 Where ASTER GED caught no clear sky between 2000 and 2008, USGS interpolates

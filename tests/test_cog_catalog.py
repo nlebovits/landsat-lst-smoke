@@ -40,6 +40,7 @@ from cog_catalog import (  # noqa: E402
     band_statistics,
     catalog_provenance,
     check_raster_shape,
+    correction_lineage,
     mask_lineage,
     multihash_sha256,
     read_cog_encoding,
@@ -509,6 +510,100 @@ class TestTheMaskExplainsItself:
         )
         assert PROCESSING_EXTENSION in item["stac_extensions"]
         assert SCIENTIFIC_EXTENSION in item["stac_extensions"]
+
+
+CORRECTION_RULE: dict[str, Any] = {
+    "prep_scene_digest": "9f2c11a0b4d3e7c8",
+    "prep_window": {"start": "2021-01-01", "end": "2025-12-31"},
+    "swath_quad_share": 0.5,
+    "max_offset_c": 15.0,
+    "destripe": True,
+    "feather": True,
+    "paths": ["228", "229"],
+}
+
+
+class TestTheCorrectionExplainsItself:
+    """Two composites of the same ground are not always comparable.
+
+    A de-striped P95 answers how hot a surface gets against its own monthly
+    normal. A pooled one answers what the hottest observed value was. Nothing
+    in the raster separates them, so a reader differencing two tiles built
+    under different rules reads the correction as climate. The item says which
+    rule produced its pixels, the way it already says which mask did.
+    """
+
+    def test_it_names_both_corrections_and_what_they_change(self):
+        lineage = correction_lineage(CORRECTION_RULE)
+        assert "Scene offsets:" in lineage
+        assert "Per-path percentiles:" in lineage
+        assert "relative to that month's normal, not an absolute maximum" in lineage
+        assert "15.0 C" in lineage
+        assert "228, 229" in lineage
+
+    def test_it_names_the_fit_the_pixels_came_from(self):
+        # Two prep files built from different scene lists under identical
+        # settings compare equal on every other field.
+        lineage = correction_lineage(CORRECTION_RULE)
+        assert "9f2c11a0b4d3e7c8" in lineage
+        assert "2021-01-01 to 2025-12-31" in lineage
+
+    def test_an_uncorrected_tile_says_the_seam_may_be_there(self):
+        # An absent rule is a claim about the pixels, not a gap in the record.
+        assert "No seam correction ran" in correction_lineage(None)
+        assert "footprint edges may show as steps" in correction_lineage(None)
+
+    def test_a_part_written_before_the_correction_existed_reads_as_pooled(self):
+        assert correction_lineage({}) == correction_lineage(None)
+
+    def test_both_corrections_off_is_the_pooled_percentile(self):
+        rule = CORRECTION_RULE | {"destripe": False, "feather": False}
+        assert correction_lineage(rule) == correction_lineage(None)
+
+    def test_one_correction_alone_states_only_that_one(self):
+        offsets_only = correction_lineage(CORRECTION_RULE | {"feather": False})
+        assert "Scene offsets:" in offsets_only
+        assert "Per-path percentiles:" not in offsets_only
+
+        feather_only = correction_lineage(CORRECTION_RULE | {"destripe": False})
+        assert "Per-path percentiles:" in feather_only
+        assert "Scene offsets:" not in feather_only
+
+    def test_the_item_carries_it_beside_the_mask_lineage(self, tmp_path):
+        _lst = encode_celsius(np.full((SIZE, SIZE), 30.0, dtype="float32"))
+        qa = np.zeros((12, SIZE, SIZE), dtype="uint8")
+        meta = meta_for(BBOX) | {
+            "mask_rule": MASK_RULE,
+            "correction_rule": CORRECTION_RULE,
+        }
+        root = write_catalog(
+            tmp_path / "catalog", _lst, qa, meta, collection_id=COLLECTION_ID
+        )
+        item = json.loads(
+            (root / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        lineage = item["properties"]["processing:lineage"]
+        assert "Scene offsets:" in lineage
+        assert "Water:" in lineage
+
+    def test_an_item_from_a_part_with_no_rule_states_the_pooled_percentile(
+        self, tmp_path
+    ):
+        _lst = encode_celsius(np.full((SIZE, SIZE), 30.0, dtype="float32"))
+        qa = np.zeros((12, SIZE, SIZE), dtype="uint8")
+        meta = meta_for(BBOX) | {"mask_rule": MASK_RULE}
+        root = write_catalog(
+            tmp_path / "catalog", _lst, qa, meta, collection_id=COLLECTION_ID
+        )
+        item = json.loads(
+            (root / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        assert "No seam correction ran" in item["properties"]["processing:lineage"]
+
+    def test_the_provenance_record_carries_the_rule(self):
+        meta = meta_for(BBOX) | {"correction_rule": CORRECTION_RULE}
+        provenance = catalog_provenance(meta, collection_id=COLLECTION_ID)
+        assert provenance["correction_rule"] == CORRECTION_RULE
 
 
 class TestCatalogStructure:

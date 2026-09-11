@@ -1487,9 +1487,12 @@ def merge_parts(dirs, out_dir: Path, args) -> int:
         "coverage": covered,
         "raster": [h, w],
         "meta": meta,
-        # The rule every part agreed on, hoisted so a reader of the
-        # merged tile does not have to open a part to find it.
+        # The rules every part agreed on, hoisted so a reader of the
+        # merged tile does not have to open a part to find them.
         "mask_rule": meta.get("mask_rule"),
+        # None here is a claim, not an absence: it says these pixels are the
+        # pooled percentile with every scene at its own baseline.
+        "correction_rule": meta.get("correction_rule"),
     }
     # The record lands before the catalog, so a merge that took an hour is on
     # disk whatever the catalog writer then does.

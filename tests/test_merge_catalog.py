@@ -94,6 +94,44 @@ class TestTheMergeWritesACatalog:
         assert Path(record["catalog"]) == (out / "catalog").resolve()
         assert record["coverage"] == 1.0
 
+    def test_the_merge_record_hoists_both_rules(self, tmp_path):
+        """A reader of the merged tile should not have to open a part.
+
+        `merge_parts` already refuses parts that disagree about either rule, so
+        the one it merged under is a fact about the whole tile. `mask_rule` was
+        hoisted for that reason and `correction_rule` was not.
+        """
+        rule = {"destripe": True, "feather": True, "prep_scene_digest": "abc"}
+        out = tmp_path / "tile"
+        merge(write_parts(tmp_path / "part0", correction_rule=rule), out)
+        record = json.loads((out / "merge.json").read_text())
+        assert record["correction_rule"] == rule
+
+    def test_a_pooled_tile_records_the_rule_as_none(self, tmp_path):
+        # Absent and null have to read the same, because a part written before
+        # the correction existed carries no key at all.
+        out = tmp_path / "tile"
+        merge(write_parts(tmp_path / "part0"), out)
+        record = json.loads((out / "merge.json").read_text())
+        assert record["correction_rule"] is None
+
+    def test_the_item_says_which_correction_produced_its_pixels(self, tmp_path):
+        rule = {
+            "destripe": True,
+            "feather": False,
+            "max_offset_c": 15.0,
+            "prep_scene_digest": "abc123",
+            "prep_window": {"start": "2021-01-01", "end": "2025-12-31"},
+        }
+        out = tmp_path / "tile"
+        merge(write_parts(tmp_path / "part0", correction_rule=rule), out)
+        item = json.loads(
+            (out / "catalog" / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        lineage = item["properties"]["processing:lineage"]
+        assert "Scene offsets:" in lineage
+        assert "abc123" in lineage
+
     def test_the_item_carries_the_window_the_parts_recorded(self, tmp_path):
         out = tmp_path / "tile"
         merge(write_parts(tmp_path / "part0"), out)
