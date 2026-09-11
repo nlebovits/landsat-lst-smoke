@@ -301,10 +301,18 @@ def shard_bytes(shard_px: int, n_scenes: int) -> float:
 #: array outside the model on the largest tile the fleet runs.
 CLIENT_BYTES_PER_OUTPUT_PIXEL = 2 + 12 + 2
 
+#: What `--emit-pooled` adds: `pooled_out`, a fourth full-tile array at uint16.
+#: Counted separately because it is off by default, and naming it in the sum
+#: above would reserve 0.6 GiB on every run that does not ask for it.
+POOLED_BYTES_PER_OUTPUT_PIXEL = 2
 
-def client_bytes(width: int, height: int) -> float:
+
+def client_bytes(width: int, height: int, *, emit_pooled: bool = False) -> float:
     """The full-tile arrays the client holds while it gathers, in GiB."""
-    return width * height * CLIENT_BYTES_PER_OUTPUT_PIXEL / GIB
+    per_pixel = CLIENT_BYTES_PER_OUTPUT_PIXEL + (
+        POOLED_BYTES_PER_OUTPUT_PIXEL if emit_pooled else 0
+    )
+    return width * height * per_pixel / GIB
 
 
 def worker_memory_guard(
@@ -315,6 +323,7 @@ def worker_memory_guard(
     height: int,
     *,
     total_bytes: int | None = None,
+    emit_pooled: bool = False,
 ) -> float:
     """Refuse a configuration that cannot fit, before the cluster starts.
 
@@ -359,9 +368,9 @@ def worker_memory_guard(
         total_bytes = psutil.virtual_memory().total
     ordered = sorted(depths, reverse=True)[:workers]
     if not ordered:
-        return client_bytes(width, height)
+        return client_bytes(width, height, emit_pooled=emit_pooled)
     arrays = sum(shard_bytes(shard_px, n) for n in ordered)
-    client = client_bytes(width, height)
+    client = client_bytes(width, height, emit_pooled=emit_pooled)
     demand = arrays + client
     total = total_bytes / GIB
     if demand <= total:
@@ -1450,6 +1459,54 @@ def check_part_rules(metas) -> None:
             )
 
 
+def assemble_parts(parts, raster):
+    """Every shard in every part file, laid into one tile's arrays.
+
+    A part carries one `lst_` and one `qa_` key per shard it wrote, and a
+    `pooled_` key as well when that slice ran `--emit-pooled`. The flag is
+    per-run and `part-meta.json` records nothing about it, so the pooled
+    accumulator is allocated on the first key that appears. A merge of parts
+    that never used the flag then allocates nothing.
+
+    Returns:
+        `(lst, qa, pooled, seen, pooled_seen, n_shards)`. `pooled` is None when
+        no part carried a baseline. `seen` and `pooled_seen` are what the
+        coverage figures are taken from, and they can differ: slices running
+        under different flags still merge, because a diagnostic raster is not
+        a reason to refuse a product.
+    """
+    import numpy as np
+
+    h, w = raster
+    lst = np.zeros((h, w), dtype="uint16")
+    qa = np.zeros((12, h, w), dtype="uint8")
+    seen = np.zeros((h, w), dtype=bool)
+    pooled = None
+    pooled_seen = np.zeros((h, w), dtype=bool)
+    n = 0
+
+    for f in parts:
+        with np.load(f) as z:
+            for key in z.files:
+                if not key.startswith("lst_"):
+                    continue
+                tag = key[4:]
+                y0, x0 = (int(v) for v in tag.split("_"))
+                a = z[key]
+                q = z["qa_" + tag]
+                lst[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = a
+                qa[:, y0 : y0 + q.shape[1], x0 : x0 + q.shape[2]] = q
+                seen[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = True
+                if "pooled_" + tag in z.files:
+                    if pooled is None:
+                        pooled = np.zeros((h, w), dtype="uint16")
+                    b = z["pooled_" + tag]
+                    pooled[y0 : y0 + b.shape[0], x0 : x0 + b.shape[1]] = b
+                    pooled_seen[y0 : y0 + b.shape[0], x0 : x0 + b.shape[1]] = True
+                n += 1
+    return lst, qa, pooled, seen, pooled_seen, n
+
+
 def merge_parts(dirs, out_dir: Path, args) -> int:
     """Assemble one tile from the parts written by --shard-slice runs.
 
@@ -1485,24 +1542,7 @@ def merge_parts(dirs, out_dir: Path, args) -> int:
         except ValueError as exc:
             raise SystemExit(f"cannot write a catalog for this tile: {exc}") from exc
     h, w = meta["raster"]
-    lst = np.zeros((h, w), dtype="uint16")
-    qa = np.zeros((12, h, w), dtype="uint8")
-
-    seen = np.zeros((h, w), dtype=bool)
-    n = 0
-    for f in parts:
-        with np.load(f) as z:
-            for key in z.files:
-                if not key.startswith("lst_"):
-                    continue
-                tag = key[4:]
-                y0, x0 = (int(v) for v in tag.split("_"))
-                a = z[key]
-                q = z["qa_" + tag]
-                lst[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = a
-                qa[:, y0 : y0 + q.shape[1], x0 : x0 + q.shape[2]] = q
-                seen[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = True
-                n += 1
+    lst, qa, pooled, seen, pooled_seen, n = assemble_parts(parts, meta["raster"])
 
     out_dir.mkdir(parents=True, exist_ok=True)
     covered = float(seen.mean())
@@ -1520,6 +1560,16 @@ def merge_parts(dirs, out_dir: Path, args) -> int:
         )
     np.save(out_dir / "lst_p95_dn.npy", lst)
     np.save(out_dir / "qa_count.npy", qa)
+    pooled_coverage = None
+    if pooled is not None:
+        pooled_coverage = float(pooled_seen.mean())
+        np.save(out_dir / "lst_p95_pooled_dn.npy", pooled)
+        print(f"pooled        baseline written, coverage {pooled_coverage * 100:.2f}%")
+        if pooled_coverage < covered:
+            print(
+                "WARNING       some slices ran without --emit-pooled; the "
+                "baseline covers less ground than the product"
+            )
 
     record: dict = {
         "shards": n,
@@ -1533,6 +1583,10 @@ def merge_parts(dirs, out_dir: Path, args) -> int:
         # None here is a claim, not an absence: it says these pixels are the
         # pooled percentile with every scene at its own baseline.
         "correction_rule": meta.get("correction_rule"),
+        # None when no slice ran `--emit-pooled`, which is the usual case. The
+        # baseline is not a product, so a partial one is reported rather than
+        # refused.
+        "pooled_coverage": pooled_coverage,
     }
     # The record lands before the catalog, so a merge that took an hour is on
     # disk whatever the catalog writer then does.
@@ -1624,7 +1678,7 @@ def main(argv=None) -> int:  # noqa: C901
         )
         print(f"coverage      {cover:,} px == raster, no gaps or overlap")
 
-        client_gib = client_bytes(width, height)
+        client_gib = client_bytes(width, height, emit_pooled=args.emit_pooled)
         print(
             f"\nnaive budget, assuming every shard sees every scene "
             f"(+{client_gib:.1f} GiB of client output):"
@@ -1683,6 +1737,7 @@ def main(argv=None) -> int:  # noqa: C901
                         width,
                         height,
                         total_bytes=int(args.target_memory_gib * GIB),
+                        emit_pooled=args.emit_pooled,
                     )
                 except SystemExit as exc:
                     print(f"\nREFUSED on a {args.target_memory_gib:g} GiB machine:")
@@ -1885,6 +1940,7 @@ def main(argv=None) -> int:  # noqa: C901
             concurrency,
             width,
             height,
+            emit_pooled=args.emit_pooled,
         )
         print(
             f"memory        {memory_demand:.1f} GiB demanded across "

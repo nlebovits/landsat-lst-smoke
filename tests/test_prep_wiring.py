@@ -222,6 +222,106 @@ class TestTheCorrectionRule:
         assert rule["max_offset_c"] is None
 
 
+def write_part(directory: Path, rule, *, pooled=None) -> Path:
+    """One part file and its meta, covering a 4 x 4 tile in a single shard.
+
+    `pooled` is the baseline array `--emit-pooled` would have written. Nothing
+    in the meta records the flag, so the merge finds the key by looking, and
+    this is what a part that ran without it looks like.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    arrays = {
+        "lst_0_0": np.zeros((4, 4), dtype="uint16"),
+        "qa_0_0": np.zeros((12, 4, 4), dtype="uint8"),
+    }
+    if pooled is not None:
+        arrays["pooled_0_0"] = pooled
+    # numpy declares savez_compressed(**kwds: ArrayLike) alongside a bool
+    # allow_pickle, so a dict of arrays collides with the named parameter.
+    np.savez_compressed(
+        directory / "part-000.npz",
+        **arrays,  # ty: ignore[invalid-argument-type]
+    )
+    (directory / "part-meta.json").write_text(
+        json.dumps(
+            {
+                "raster": [4, 4],
+                "bbox": list(BBOX),
+                "crs": "EPSG:4326",
+                "pixels_per_degree": PPD,
+                "shard_px": 4,
+                "n_shards": 1,
+                "mask_rule": None,
+                "correction_rule": rule,
+            }
+        )
+    )
+    return directory
+
+
+class TestTheMergedPooledBaseline:
+    """`--emit-pooled` wrote a raster the merge used to drop on the floor.
+
+    Every part carried `pooled_<y0>_<x0>` keys and `merge_parts` skipped every
+    key that did not start with `lst_`, so the baseline existed only inside
+    part files, one per slice, and the README promised a raster beside the
+    product.
+    """
+
+    def test_a_run_without_the_flag_writes_no_baseline(self, tmp_path):
+        a = write_part(tmp_path / "a", None)
+        assert shard_lst_p95.merge_parts([a], tmp_path / "out", merge_args()) in (0, 2)
+        assert not (tmp_path / "out" / "lst_p95_pooled_dn.npy").exists()
+        record = json.loads((tmp_path / "out" / "merge.json").read_text())
+        assert record["pooled_coverage"] is None
+
+    def test_the_baseline_is_assembled_beside_the_product(self, tmp_path):
+        pooled = np.full((4, 4), 4_242, dtype="uint16")
+        a = write_part(tmp_path / "a", None, pooled=pooled)
+        assert shard_lst_p95.merge_parts([a], tmp_path / "out", merge_args()) in (0, 2)
+        written = np.load(tmp_path / "out" / "lst_p95_pooled_dn.npy")
+        assert np.array_equal(written, pooled)
+        record = json.loads((tmp_path / "out" / "merge.json").read_text())
+        assert record["pooled_coverage"] == 1.0
+
+    def test_one_slice_without_the_flag_reports_partial_coverage(self, tmp_path):
+        """A diagnostic raster is no reason to refuse a product.
+
+        The mask and correction rules stop a merge because they decide pixel
+        values. This one is a baseline for comparison, so a partial one is
+        reported and the tile still merges.
+        """
+        pooled = np.full((2, 2), 7, dtype="uint16")
+        a = tmp_path / "a"
+        a.mkdir(parents=True)
+        np.savez_compressed(
+            a / "part-000.npz",
+            lst_0_0=np.zeros((2, 2), dtype="uint16"),
+            qa_0_0=np.zeros((12, 2, 2), dtype="uint8"),
+            pooled_0_0=pooled,
+            lst_2_0=np.zeros((2, 2), dtype="uint16"),
+            qa_2_0=np.zeros((12, 2, 2), dtype="uint8"),
+        )
+        (a / "part-meta.json").write_text(
+            json.dumps(
+                {
+                    "raster": [4, 2],
+                    "bbox": list(BBOX),
+                    "crs": "EPSG:4326",
+                    "pixels_per_degree": PPD,
+                    "shard_px": 2,
+                    "n_shards": 2,
+                    "mask_rule": None,
+                    "correction_rule": None,
+                }
+            )
+        )
+        assert shard_lst_p95.merge_parts([a], tmp_path / "out", merge_args()) in (0, 2)
+        record = json.loads((tmp_path / "out" / "merge.json").read_text())
+        assert record["pooled_coverage"] == 0.5
+        assert record["coverage"] == 1.0
+
+
 class TestMergingRefusesMixedParts:
     def part(self, directory: Path, rule) -> Path:
         directory.mkdir(parents=True, exist_ok=True)

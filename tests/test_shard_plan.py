@@ -342,6 +342,47 @@ class TestWorkerMemoryGuard:
         """
         assert client_bytes(self.TILE_PX, self.TILE_PX) == pytest.approx(4.8, abs=0.05)
 
+    def test_emitting_the_pooled_baseline_adds_a_fourth_full_tile_array(self):
+        """`--emit-pooled` allocates `pooled_out` at uint16, height by width.
+
+        Two bytes a pixel is 0.6 GiB on the largest tile the fleet runs, which
+        is the same figure that put the model 0.6 GiB low when it counted
+        fourteen bytes instead of sixteen.
+        """
+        plain = client_bytes(self.TILE_PX, self.TILE_PX)
+        with_pooled = client_bytes(self.TILE_PX, self.TILE_PX, emit_pooled=True)
+        assert with_pooled - plain == pytest.approx(
+            self.TILE_PX**2 * 2 / self.GIB, abs=0.01
+        )
+        assert with_pooled == pytest.approx(5.4, abs=0.05)
+
+    def test_the_guard_refuses_a_run_the_pooled_array_pushes_over(self):
+        # The whole point of counting it: a configuration that fits without the
+        # flag and not with it has to be refused rather than printed.
+        # 8 deep shards at 360 px want 13.9 GiB, and the client's own arrays
+        # 4.8. That is 18.7 GiB, and 19.3 with the baseline.
+        args = (360, [820] * 8, 8, self.TILE_PX, self.TILE_PX)
+        machine = int(19.0 * self.GIB)
+        assert worker_memory_guard(*args, total_bytes=machine) == pytest.approx(
+            18.7, abs=0.1
+        )
+        with pytest.raises(SystemExit, match="19.3 GiB"):
+            worker_memory_guard(*args, total_bytes=machine, emit_pooled=True)
+
+    def test_an_empty_slice_still_counts_the_pooled_array(self):
+        demand = worker_memory_guard(
+            360,
+            [],
+            64,
+            self.TILE_PX,
+            self.TILE_PX,
+            total_bytes=247 * self.GIB,
+            emit_pooled=True,
+        )
+        assert demand == pytest.approx(
+            client_bytes(self.TILE_PX, self.TILE_PX, emit_pooled=True)
+        )
+
     def test_the_configuration_that_killed_an_instance_is_refused(self):
         """64 workers, 512 px, a quarter tile of scenes, on 128 GiB.
 
