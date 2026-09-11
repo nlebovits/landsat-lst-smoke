@@ -43,9 +43,10 @@ jobs:
         run: |
           uvx vulture@2.14 \
             aster_ged.py cog_catalog.py compare_qa_masks.py cost_report.py \
-            fleet_plan.py \
+            fleet_plan.py item_table.py \
             land_tiles.py masks.py measure_ged_registration.py \
             measure_land_defects.py measure_s3_requests.py \
+            measure_submit_cost.py \
             measure_scene_centre.py measure_shard_memory.py \
             memory_sampler.py \
             profile_lst_p95.py shard_lst_p95.py \

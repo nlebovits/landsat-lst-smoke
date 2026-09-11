@@ -19,6 +19,7 @@ reads what `tile_inventory.build_item` writes.
 
 from __future__ import annotations
 
+import copy
 import io
 import sys
 from pathlib import Path
@@ -145,6 +146,136 @@ class TestManifest:
         item = build_item(make_row(TILE, 0, thermal=False))
         manifest = staging.staging_manifest([item], [0])
         assert [band for _, band, _ in manifest] == ["qa_pixel"]
+
+
+class TestStagedPaths:
+    """The href is named before the GET, so a shard can run while others land."""
+
+    def test_the_rewrite_agrees_with_what_the_fetch_writes(self, real_items, tmp_path):
+        # The two used to be one statement. They are now a prediction and a
+        # write, and if they disagree every shard opens a file that is not
+        # there. `measure_shard_memory.staged_items` reads this layout too.
+        items, _ = real_items
+        fake = FakeS3()
+
+        staging.stage_scenes(
+            items, [0, 1], tmp_path, threads=2, client_factory=lambda _n: fake
+        )
+
+        for item in items[:2]:
+            for band in staging.BANDS:
+                href = item["assets"][band]["href"]
+                assert Path(href).is_file()
+                assert Path(href).parent.name == item["id"]
+                assert Path(href).stem == band
+
+    def test_the_hrefs_are_rewritten_before_the_first_get(self, real_items, tmp_path):
+        # What makes the overlap possible. The table is final from the start,
+        # so the only thing a shard waits on is its own files arriving.
+        items, _ = real_items
+        seen_at_get = []
+
+        class Watching(FakeS3):
+            def get_object(self, **kw):  # noqa: N803
+                seen_at_get.append(items[0]["assets"]["lwir11"]["href"])
+                return super().get_object(**kw)
+
+        staging.stage_scenes(
+            items, [0], tmp_path, threads=1, client_factory=lambda _n: Watching()
+        )
+
+        assert seen_at_get, "nothing was fetched"
+        assert not any(h.startswith("s3://") for h in seen_at_get)
+
+    def test_the_manifest_comes_back_so_it_is_not_built_twice(
+        self, real_items, tmp_path
+    ):
+        items, _ = real_items
+        manifest = staging.repoint_items(items, [0, 1], tmp_path)
+
+        assert len(manifest) == 4
+        assert all(href.startswith("s3://") for _, _, href in manifest)
+        assert all(
+            item["assets"]["lwir11"]["href"].startswith(str(tmp_path))
+            for item in items[:2]
+        )
+
+    def test_repointing_an_already_staged_item_is_refused(self, real_items, tmp_path):
+        # The rewrite reads the s3 href to name the destination, so it can only
+        # run once. Running it twice means the caller lost track of which
+        # ordering it is in, and a silent second pass would name files after
+        # local paths.
+        items, _ = real_items
+        staging.repoint_items(items, [0], tmp_path)
+
+        with pytest.raises(staging.StagingError, match="expects an s3:// href"):
+            staging.repoint_items(items, [0], tmp_path)
+
+
+class TestStagingRun:
+    """The streaming form. `stage_scenes` is its serial drain."""
+
+    def test_every_object_lands_exactly_once(self, real_items, tmp_path):
+        items, _ = real_items
+        manifest = staging.repoint_items(items, [0, 1, 2], tmp_path)
+        fake = FakeS3()
+
+        landed = []
+        with staging.StagingRun(
+            manifest, tmp_path, threads=2, client_factory=lambda _n: fake
+        ) as run:
+            while not run.done:
+                landed.extend(run.landed())
+
+        assert sorted(landed) == sorted((i, b) for i, b, _ in manifest)
+        assert run.report()["objects"] == len(manifest)
+
+    def test_the_report_matches_what_stage_scenes_returns(self, real_items, tmp_path):
+        # One fetch, two orderings. They must not diverge on the counts that
+        # `cost_report.py` prices.
+        items, _ = real_items
+        fresh = copy.deepcopy(items)
+        serial = staging.stage_scenes(
+            items, [0, 1], tmp_path / "a", threads=2, client_factory=lambda _n: FakeS3()
+        )
+        manifest = staging.repoint_items(fresh, [0, 1], tmp_path / "b")
+        with staging.StagingRun(
+            manifest, tmp_path / "b", threads=2, client_factory=lambda _n: FakeS3()
+        ) as run:
+            run.drain()
+        streamed = run.report()
+
+        for key in ("objects", "bytes", "get_requests", "retries"):
+            assert serial[key] == streamed[key], key
+
+    def test_a_failed_fetch_reaches_the_caller(self, real_items, tmp_path):
+        items, _ = real_items
+        manifest = staging.repoint_items(items, [0], tmp_path)
+        fake = FakeS3(fail_first=staging.MAX_ATTEMPTS)
+
+        with pytest.raises(staging.StagingError):  # noqa: PT012
+            with staging.StagingRun(
+                manifest, tmp_path, threads=1, client_factory=lambda _n: fake
+            ) as run:
+                while not run.done:
+                    run.landed()
+
+    def test_one_failure_abandons_the_rest_of_the_manifest(self, real_items, tmp_path):
+        # A failed GET is billed. Draining the pool after the run is already
+        # lost buys nothing and pays for thousands of objects.
+        items, _ = real_items
+        manifest = staging.repoint_items(items, list(range(20)), tmp_path)
+        fake = FakeS3(fail_first=staging.MAX_ATTEMPTS)
+
+        with pytest.raises(staging.StagingError):  # noqa: PT012
+            with staging.StagingRun(
+                manifest, tmp_path, threads=1, client_factory=lambda _n: fake
+            ) as run:
+                run.drain()
+
+        assert len(fake.calls) < len(manifest), (
+            f"{len(fake.calls)} GETs billed for a run abandoned at the first"
+        )
 
 
 class TestSplitS3Uri:

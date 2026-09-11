@@ -50,6 +50,7 @@ RUNTIME_MODULES = (
     "masks",
     "aster_ged",
     "staging",
+    "item_table",
     "memory_sampler",
 )
 
@@ -401,6 +402,40 @@ class TestTheComputePathIsOffline:
         # monthly counts hold all three observations.
         assert not np.any(out["lst_p95"] == shard_lst_p95.LST_NODATA_DN)
         assert int(out["qa_count"].sum(axis=0).max()) == 3
+
+    def test_the_table_path_gives_the_same_pixels(
+        self, no_network, scenes_in_a_bucket, tmp_path
+    ):
+        """What `shard_task` changed, checked against the arrays.
+
+        A shard used to receive its item dicts in the task message. It now
+        receives a path and a list of positions, and the dicts make a round
+        trip through JSON on the way. That round trip turns each geometry
+        corner from a tuple into a list, which is the one thing it alters, and
+        this is the check that the alteration reaches no pixel.
+        """
+        import numpy as np
+
+        import item_table
+
+        items, shard, blobs = scenes_in_a_bucket
+        staging.stage_scenes(
+            items,
+            range(len(items)),
+            tmp_path / "stage",
+            threads=2,
+            client_factory=lambda _n: FileBackedS3(blobs),
+        )
+
+        direct = shard_lst_p95.process_shard(shard, items, "EPSG:4326", SCENE_RES)
+        report = item_table.write(tmp_path / "item-table.json", items)
+        through = shard_lst_p95.shard_task(
+            shard, report["path"], list(range(len(items))), "EPSG:4326", SCENE_RES
+        )
+
+        assert np.array_equal(direct["lst_p95"], through["lst_p95"])
+        assert np.array_equal(direct["qa_count"], through["qa_count"])
+        assert direct["n_scenes"] == through["n_scenes"]
 
     def test_the_staged_run_reads_no_object_twice(
         self, no_network, scenes_in_a_bucket, tmp_path

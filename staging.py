@@ -21,11 +21,23 @@ This module fetches every object the slice needs with one GET, writes it to
 local disk, and rewrites the item hrefs to point there. The 155 reads still
 happen. They stop being billable, and the run's S3 line becomes a counted total
 rather than a figure derived from a sampled requests-per-read.
+
+The hrefs are rewritten before the first GET rather than after the last one,
+because the destination is a pure function of the item id, the band, and the
+source key. Nothing depends on that ordering now, and it costs nothing: the
+manifest is built once and read twice.
+
+The fetch finishes before the cluster starts. Running it beside the shards it
+feeds was tried and MEASURED as a loss. The same 1,998 objects and 78.9 GiB
+stage in 91.9 s on an idle `m6id.16xlarge` and in 358.7 s beside 64 busy
+workers, because this phase spends its time on TLS, HTTP and the copy loop and
+all three want a core. See `FINDINGS.md`.
 """
 
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import threading
 import time
@@ -67,6 +79,10 @@ MAX_ATTEMPTS = 3
 #: Seconds before a retry. Short, because a failure here is usually a reset
 #: connection rather than throttling.
 RETRY_BACKOFF_S = 1.0
+
+#: Copy buffer for one object, against `shutil.copyfileobj`'s 64 KiB default.
+#: See `_fetch_one`.
+COPY_BUFFER_BYTES = 1024 * 1024
 
 
 class StagingError(RuntimeError):
@@ -127,6 +143,10 @@ def staging_manifest(item_dicts, indices):
     One scene appearing in 155 shards produces two objects, not 310. That
     collapse is the entire saving, so it happens here, before anything is
     fetched.
+
+    Sorted, so two runs over the same slice fetch in the same order. Nothing
+    downstream depends on the order now that staging finishes before the
+    cluster starts.
     """
     seen: dict[tuple[str, str], tuple[str, str, str]] = {}
     for i in indices:
@@ -140,6 +160,52 @@ def staging_manifest(item_dicts, indices):
             if asset and asset.get("href"):
                 seen.setdefault((item_id, band), (item_id, band, asset["href"]))
     return sorted(seen.values())
+
+
+def staged_path(stage_dir, item_id: str, band: str, key: str) -> Path:
+    """Where one staged object lands: `<stage_dir>/<item_id>/<band><suffix>`.
+
+    One definition, read by the fetch and by the href rewrite that now runs in
+    front of it. `measure_shard_memory.staged_items` reads this layout back off
+    disk to build items from a `--keep-staged` directory, so the shape is a
+    contract rather than an implementation detail.
+    """
+    return Path(stage_dir) / item_id / f"{band}{_suffix(key)}"
+
+
+def repoint_items(item_dicts, indices, stage_dir):
+    """Point every asset href at its staged file, before the first GET.
+
+    The destination is a pure function of the item id, the band, and the source
+    key, so it can be named before anything is fetched. That is what lets a
+    shard be submitted while other scenes are still arriving: the item table is
+    final from the start, and the only thing that changes is whether a given
+    file has landed yet. The caller releases a shard when its own objects have.
+
+    The rewrite used to run after the whole fetch pool drained, which is what
+    forced staging to finish before the cluster could start.
+
+    The href becomes an absolute local path rather than a `file://` URL,
+    because rasterio opens the former directly.
+
+    Returns:
+        The staging manifest, so the caller does not build it twice.
+    """
+    stage_dir = Path(stage_dir)
+    manifest = staging_manifest(item_dicts, indices)
+    placed = {
+        (item_id, band): str(
+            staged_path(stage_dir, item_id, band, split_s3_uri(href)[1]).resolve()
+        )
+        for item_id, band, href in manifest
+    }
+    for i in indices:
+        item = item_dicts[i]
+        for band in BANDS:
+            path = placed.get((item["id"], band))
+            if path is not None:
+                item["assets"][band]["href"] = path
+    return manifest
 
 
 def estimated_bytes(manifest) -> int:
@@ -216,9 +282,8 @@ def _release_page_cache(fh) -> None:
 
     A mean tile stages about 278 GB onto an instance holding 256 GiB of RAM.
     The written volume exceeds memory, so the kernel has to reclaim that cache
-    whatever happens, and it would otherwise do so while 64 workers are
-    allocating about 118 GiB between them. Releasing each object as it lands
-    moves the reclaim to a point where nothing is competing for the memory.
+    whatever happens. Releasing each object as it lands bounds what there is to
+    reclaim to one object, instead of letting it grow until the kernel decides.
 
     The workers re-read these files from NVMe seconds later, so the cache is
     not worth holding: the read repopulates what it needs.
@@ -259,6 +324,11 @@ def _fetch_one(client, bucket: str, key: str, dest: Path) -> tuple[int, int]:
     read leaves no file behind, because a truncated GeoTIFF would produce a
     wrong percentile in silence rather than an error.
 
+    `copyfileobj` gets a 1 MiB buffer rather than its 64 KiB default. At the
+    measured 922 MB/s the default acquires and releases the GIL about 14,000
+    times a second, in the same interpreter that now runs the frisky client and
+    the assembly loop. One keyword cuts that by 16x and changes nothing else.
+
     Returns:
         The bytes written and the number of billable requests it took.
     """
@@ -271,7 +341,7 @@ def _fetch_one(client, bucket: str, key: str, dest: Path) -> tuple[int, int]:
             expected = int(resp["ContentLength"])
             dest.parent.mkdir(parents=True, exist_ok=True)
             with dest.open("wb") as fh:
-                shutil.copyfileobj(resp["Body"], fh)
+                shutil.copyfileobj(resp["Body"], fh, COPY_BUFFER_BYTES)
                 _release_page_cache(fh)
             written = dest.stat().st_size
             if written != expected:
@@ -293,24 +363,180 @@ def _fetch_one(client, bucket: str, key: str, dest: Path) -> tuple[int, int]:
     raise StagingError(msg)
 
 
+class StagingRun:
+    """Fetch a manifest, and say which objects have landed while it runs.
+
+    Two callers, one fetch. `stage_scenes` drains this to the end and returns a
+    report, which is what `--no-overlap` does. An overlapped run drains it a few
+    objects at a time between gathering shard results, and releases each shard
+    as the last object it waits on arrives.
+
+    The fetch itself is the same either way, so the two orderings cannot
+    diverge on request counts, retries, or the bytes they verify.
+    """
+
+    def __init__(
+        self,
+        manifest,
+        stage_dir: Path,
+        *,
+        threads: int | None = None,
+        client_factory=None,
+    ):
+        self.manifest = list(manifest)
+        self.stage_dir = Path(stage_dir)
+        self.threads = threads or _default_threads()
+        #: Objects still to land. `landed` decrements it, so an overlapped
+        #: caller can tell a quiet moment from a finished fetch.
+        self.outstanding = len(self.manifest)
+        self.seconds = 0.0
+        self._counters = {"bytes": 0, "requests": 0}
+        self._lock = threading.Lock()
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        # Resolved in `start`, not bound here. A default argument would
+        # capture `_default_client` at import, which is not what a caller
+        # swapping it for a fake bucket expects.
+        self._client_factory = client_factory
+        self._pool: ThreadPoolExecutor | None = None
+        self._futures: list = []
+        self._t0 = 0.0
+        # Set by the first failed fetch. Every queued entry checks it on entry
+        # and gives up, because a failed GET is billed and the run is already
+        # lost: without the scene the composite would be wrong, not late.
+        self._stop = threading.Event()
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, exc_type, _exc, _tb):
+        # Cancel on the way out of a failure. The alternative is fetching the
+        # remaining thousands of objects for a run that has already lost a
+        # scene and cannot produce a correct percentile.
+        self.close(cancel=exc_type is not None)
+        return False
+
+    def start(self):
+        """Put every object in flight and return immediately."""
+        # One client, shared, sized to the pool. See `_default_client`.
+        factory = self._client_factory or _default_client
+        client = factory(self.threads)
+        self._t0 = time.perf_counter()
+        self._pool = ThreadPoolExecutor(max_workers=self.threads)
+        for entry in self.manifest:
+            future = self._pool.submit(self._fetch, client, entry)
+            future.add_done_callback(self._record)
+            self._futures.append(future)
+        return self
+
+    def _fetch(self, client, entry):
+        item_id, band, href = entry
+        if self._stop.is_set():
+            msg = f"staging abandoned before {item_id} {band}: an earlier object failed"
+            raise StagingError(msg)
+        bucket, key = split_s3_uri(href)
+        dest = staged_path(self.stage_dir, item_id, band, key)
+        written, attempts = _fetch_one(client, bucket, key, dest)
+        with self._lock:
+            self._counters["bytes"] += written
+            self._counters["requests"] += attempts
+            free = shutil.disk_usage(self.stage_dir).free
+        if free < FREE_SPACE_FLOOR_BYTES:
+            msg = (
+                f"{self.stage_dir} fell to {free / 1024**3:.1f} GiB free while "
+                f"staging, below the {FREE_SPACE_FLOOR_BYTES / 1024**3:.0f} "
+                f"GiB floor. The per-object estimate was too low for this slice."
+            )
+            raise StagingError(msg)
+        return item_id, band
+
+    def _record(self, future) -> None:
+        """Runs on the fetch thread as each object finishes, good or bad."""
+        if future.cancelled():
+            return
+        exc = future.exception()
+        if exc is not None:
+            self._stop.set()
+            self._queue.put(("error", exc))
+        else:
+            self._queue.put(("object", future.result()))
+
+    def landed(self) -> list[tuple[str, str]]:
+        """The `(item_id, band)` pairs that reached disk since the last call.
+
+        Never blocks, so the caller can interleave it with gathering results.
+
+        Raises:
+            Whatever the fetch raised, for the first object that failed. A
+            missing scene is not recoverable here: a run that kept computing
+            without it would write a wrong percentile rather than fail.
+        """
+        out = []
+        while True:
+            try:
+                kind, payload = self._queue.get_nowait()
+            except queue.Empty:
+                return out
+            self.outstanding -= 1
+            if kind == "error":
+                raise payload
+            out.append(payload)
+
+    @property
+    def done(self) -> bool:
+        return self.outstanding <= 0
+
+    def drain(self) -> None:
+        """Block until every object has landed. The serial path."""
+        while not self.done:
+            kind, payload = self._queue.get()
+            self.outstanding -= 1
+            if kind == "error":
+                raise payload
+
+    def close(self, *, cancel: bool = False) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=True, cancel_futures=cancel)
+            self._pool = None
+            self.seconds = time.perf_counter() - self._t0
+
+    def report(self, *, reserved: int = 0, owns_stage_dir: bool = True) -> dict:
+        """This run's S3 line, counted rather than derived.
+
+        Objects, bytes, seconds, billable GETs, retries, and the estimate the
+        disk guard reserved. `cost_report.py --s3-get-requests` prices
+        `get_requests` directly, so these key names are an interface.
+        """
+        return {
+            "objects": len(self.manifest),
+            "bytes": self._counters["bytes"],
+            "seconds": self.seconds,
+            "get_requests": self._counters["requests"],
+            "retries": self._counters["requests"] - len(self.manifest),
+            "reserved_bytes": reserved,
+            "stage_dir": str(self.stage_dir),
+            "owns_stage_dir": owns_stage_dir,
+        }
+
+
 def stage_scenes(
     item_dicts,
     indices,
     stage_dir: Path,
     *,
     threads: int | None = None,
-    client_factory=_default_client,
+    client_factory=None,
 ) -> dict:
     """Fetch every object the slice needs and repoint the items at local disk.
 
-    Mutates the asset hrefs of the staged items in place. The href becomes an
-    absolute local path rather than a `file://` URL, because rasterio opens the
-    former directly.
+    The serial form: nothing else runs until the last object lands. An
+    overlapped run drives `StagingRun` directly instead, so that it can submit
+    shards while the fetch continues.
+
+    Mutates the asset hrefs of the staged items in place, through
+    `repoint_items`, before the first GET rather than after the last one.
 
     Returns:
-        A report: objects, bytes, seconds, billable GETs, retries, and the
-        estimate the disk guard reserved. It is the run's S3 line, counted
-        rather than derived.
+        The staging report. See `StagingRun.report`.
     """
     stage_dir = Path(stage_dir)
     # Whether this call owns the directory. `cleanup` removes what it is
@@ -318,61 +544,17 @@ def stage_scenes(
     # a directory on it would otherwise lose everything else there.
     pre_existing = stage_dir.exists() and any(stage_dir.iterdir())
     stage_dir.mkdir(parents=True, exist_ok=True)
-    manifest = staging_manifest(item_dicts, indices)
+    manifest = repoint_items(item_dicts, indices, stage_dir)
     if not manifest:
         return _empty_report(stage_dir)
     reserved = disk_guard(manifest, stage_dir)
 
-    n_threads = threads or _default_threads()
-    counters = {"bytes": 0, "requests": 0}
-    lock = threading.Lock()
-    # One client for every thread. Creating one per thread races inside
-    # botocore and gives each thread its own connection pool.
-    client = client_factory(n_threads)
-
-    def fetch(entry):
-        item_id, band, href = entry
-        bucket, key = split_s3_uri(href)
-        dest = stage_dir / item_id / f"{band}{_suffix(key)}"
-        written, attempts = _fetch_one(client, bucket, key, dest)
-        with lock:
-            counters["bytes"] += written
-            counters["requests"] += attempts
-            free = shutil.disk_usage(stage_dir).free
-        if free < FREE_SPACE_FLOOR_BYTES:
-            msg = (
-                f"{stage_dir} fell to {free / 1024**3:.1f} GiB free while "
-                f"staging, below the {FREE_SPACE_FLOOR_BYTES / 1024**3:.0f} "
-                f"GiB floor. The per-object estimate was too low for this slice."
-            )
-            raise StagingError(msg)
-        return item_id, band, str(dest.resolve())
-
-    t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=n_threads) as pool:
-        placed = list(pool.map(fetch, manifest))
-    elapsed = time.perf_counter() - t0
-
-    by_object = {(item_id, band): path for item_id, band, path in placed}
-    for i in indices:
-        item = item_dicts[i]
-        for band in BANDS:
-            path = by_object.get((item["id"], band))
-            if path is not None:
-                item["assets"][band]["href"] = path
-
-    return {
-        "objects": len(manifest),
-        "bytes": counters["bytes"],
-        "seconds": elapsed,
-        "get_requests": counters["requests"],
-        "retries": counters["requests"] - len(manifest),
-        "reserved_bytes": reserved,
-        "stage_dir": str(stage_dir),
-        # `cleanup` reads this. A directory that held files before staging
-        # started belongs to someone else.
-        "owns_stage_dir": not pre_existing,
-    }
+    run = StagingRun(
+        manifest, stage_dir, threads=threads, client_factory=client_factory
+    )
+    with run:
+        run.drain()
+    return run.report(reserved=reserved, owns_stage_dir=not pre_existing)
 
 
 def _suffix(key: str) -> str:

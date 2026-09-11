@@ -595,7 +595,8 @@ Lock (GIL) costs 2.1 milliseconds and the scheduler 18.5 s of 1,187. `observe
 stragglers` reports every worker within 0 s of the median. The run spills 0 B
 and transfers 0 B.
 
-**More cores is the only lever left for wall clock.** A full tile comes to 1,296
+**More cores is the only lever left inside compute.** Of the 700 s around it,
+the submission half was recoverable and the staging half was not. A full tile comes to 1,296
 shards, four times the quarter tile, because it covers four times the area.
 Revisit rate, not tile size, sets how many scenes a shard reads, so the compute
 cost per tile does not change as wall time falls.
@@ -611,6 +612,97 @@ the catalogue search, and every S3 request charge. The measured fleet cost $1.94
 of EC2 time and $4.28 in total. `c6i` outperformed the `r6i` of the early
 measurements on both axes, because the 26.5 GiB peak of 96 means the
 memory-optimised instance rented RAM the job never touched.
+
+### Submission carried the scene list, once per shard
+
+Compute is saturated. Staging and submission, on either side of it, were not.
+The issue proposed fixing both. Submission held. Staging did not.
+
+**The submission cost is the payload, not the pickling.** The issue attributed
+about 399 s to "roughly 660,000 dict serializations". MEASURED on the committed
+inventory slice, that is not where the time goes:
+
+| | |
+|---|---|
+| `pickle.dumps` of 509 item dicts | 0.904 ms |
+| the same, across 1,296 shards | **1.2 s of 373.7 s** |
+| `cloudpickle.dumps(process_shard)` as `__main__` | 3,313 B, 0.023 ms |
+
+Serialisation is 0.3% of the phase. The payload itself is the cost. 509 item
+dicts pickle to 423,128 B, so a full tile pushed **0.55 GB** at the scheduler to
+describe 3,910 items that pickle to 3.2 MB between them. The amplification is
+171.
+
+MEASURED by `measure_submit_cost.py` against a real `frisky.LocalCluster`, four
+workers, a 3,910-item table, 40 submits per shape, three runs on an idle laptop:
+
+| submit payload | per submit |
+|---|---|
+| 509 item dicts, as the pipeline did | **5.3 to 6.1 ms** |
+| a scattered table and a list of positions | 0.025 to 0.026 ms |
+| **a table path and a list of positions** | **0.024 to 0.031 ms** |
+
+MEASURED on an `m6id.16xlarge` over 250 real shards: **0.14 ms each**, against
+the 0.31 s per submit the committed full-tile slices imply. The phase is gone.
+
+`Client.scatter(broadcast=True)` raises `NotImplementedError` in frisky 0.7.2.
+Plain `scatter` places one replica and scattered data has no recompute path, so
+a worker killed before it replicates loses the run, which is the window
+`tests/test_run_survives_worker_death.py` fires in. The table goes to a file in
+the stage directory instead and every worker parses it once, 7.89 MB and about
+45 ms. A restarted worker re-reads it from local disk.
+
+### Staging beside compute is slower than staging before it
+
+The second half of the issue proposed overlapping the fetch with the shards it
+feeds, on the premise that staging is network-bound and compute is
+processor-bound. It was built, run, and **falsified**.
+
+MEASURED on an `m6id.16xlarge`, us-west-2, the identical workload in both rows:
+
+| 1,998 objects, 78.9 GiB | wall |
+|---|---|
+| staging with the machine to itself | **91.9 s** = 922 MB/s |
+| staging beside 64 busy workers | **358.7 s** = 236 MB/s |
+
+**3.9x.** Not a scale artifact and not the 922 MB/s figure failing: same
+objects, same bytes, same instance type. Staging spends its time on TLS, HTTP
+and the copy loop, and all three want a core. At 25 Gbps the instance was using
+30% of its network at 922 MB/s, so the fetch was never network-bound in the
+first place, and the premise the overlap rested on was wrong.
+
+The arithmetic on a 250-shard slice, with 256 fetch threads and
+`--read-threads 1`, which is the overlap at its best:
+
+```
+overlapped   449 s   (stage 358.7 s, compute 264.7 s, overlap 219.9 s)
+serial       357 s   (stage  91.9 s + compute 264.7 s)
+```
+
+The overlap pays 267 s of extra staging to save 220 s of wall clock. It loses
+by about 90 s, and it loses by more as a tile gets deeper, because the fetch
+slows in proportion to how busy the workers are. The implementation is removed
+rather than kept behind a flag: a second ordering that is slower in every
+measured case is a maintenance cost with no case to answer for it.
+
+`worker.paused` does not appear at all in that run, against 4,463 s in the
+64-core quarter tile, once workers are sized to one thread each and given a real
+memory limit. `worker.exec.deserialize` falls to 30.7 ms across 128 tasks from
+48.5 s, which is the item table: workers no longer unpack 400 item dicts per
+task.
+
+### A first wave is not a rate
+
+The 64-shard wave that opens a run reports about **59 s per shard**. The next
+39 shards report **6.6 s**, and a staged shard settles near **11 s**. The
+difference is page-cache warmup on first touch. The effect was recorded once in
+a pull request body and then walked into twice from this document, so it is
+named here.
+
+The progress line was part of the trap. It printed a running mean, which hides
+the decay: it reads as a slow cluster for most of a run and as a rate for none
+of it. It now prints the rate over the last 25 shards beside the mean, so the
+number that misleads has been replaced rather than annotated.
 
 ### The tails are the thinly observed pixels
 
@@ -2380,10 +2472,12 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `qa-parity/` | that comparison, with both rasters and the difference image |
 | `sweep_throughput.py` | configuration sweep driver |
 | `cost_report.py` | the labelled, deterministic cost report |
-| `staging.py` | fetches each scene object once, and the L2SR filter |
+| `staging.py` | fetches each scene object once, beside compute, and the L2SR filter |
+| `item_table.py` | the scene table every worker reads instead of receiving |
 | `memory_sampler.py` | client and worker RSS, sampled from its own process |
 | `measure_shard_memory.py` | what a shard costs in memory, and shard size in compute |
 | `measure_s3_requests.py` | counts the S3 GET requests one shard issues |
+| `measure_submit_cost.py` | what one `client.submit` costs, against its payload |
 | `s3-requests/` | the request measurement: both shard sizes, and the priced tile |
 | `dryrun/` | local graph-build runs, no cluster and no reads |
 | `ec2-results/` | eight department-scale runs: stages, memory series, frisky reports |
