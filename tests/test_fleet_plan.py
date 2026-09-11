@@ -142,11 +142,17 @@ class TestARunPointedAtABarrenTile:
     `summary.json` rather than on status.
     """
 
-    @pytest.fixture
-    def run(self, slice_artifact, numobs_artifact, land_geometry, tmp_path):
+    # Module-scoped: the five tests below all read one run's result and none
+    # of them mutates it. Function-scoped, this drove the whole pipeline once
+    # per test, five setups of about 10 s where one does. The three artifact
+    # fixtures are session-scoped, so nothing here widens a narrower scope.
+    @pytest.fixture(scope="module")
+    def run(self, slice_artifact, numobs_artifact, land_geometry, tmp_path_factory):
         import json
 
         import shard_lst_p95
+
+        tmp_path = tmp_path_factory.mktemp("barren")
 
         # The mask artifacts are named even though this tile never reaches the
         # mask. The thermal filter empties the scene list first, and asserting
