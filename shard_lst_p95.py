@@ -46,6 +46,7 @@ import time
 from pathlib import Path
 
 import aster_ged
+import item_table
 import masks
 import staging
 from aster_ged import DEFAULT_NUMOBS_URI
@@ -110,6 +111,16 @@ SUPPORTED_READ_SOURCE = "earth-search"
 #: once in cog_catalog, because the COG band descriptions have to match.
 MONTHS = MONTH_NAMES
 GIB = 1024.0**3
+
+#: How long `drive_shards` waits when neither staging nor the gather has
+#: anything ready. A shard runs about a second, so this costs a fraction of a
+#: core and bounds how long a freed shard sits unsubmitted.
+POLL_INTERVAL_S = 0.005
+
+#: The scene table, written beside the staged scenes rather than into the
+#: output directory. `staging.cleanup` already removes that directory, and
+#: 7.8 MB of scratch does not belong in an artifact that ships.
+ITEM_TABLE_NAME = "item-table.json"
 
 
 # --------------------------------------------------------------------------
@@ -481,6 +492,48 @@ def process_shard(
     }
 
 
+def shard_task(
+    shard: Shard,
+    table_path,
+    indices,
+    crs: str,
+    resolution: float,
+    read_threads: int = 4,
+) -> dict:
+    """What the client submits. Resolves the scene table inside the worker.
+
+    `process_shard` still takes item dicts. Four test modules and
+    `measure_shard_memory.py` call it directly, and the staged-parity test has
+    to run the same function through two href regimes, so the unit of work
+    keeps the signature it had. This wrapper is the only thing that changed
+    about how it is reached.
+
+    The saving is the argument list. A shard used to carry its own 509 item
+    dicts, 423,128 B per task and 0.55 GB across a full tile. It now carries a
+    path and a list of positions. MEASURED by `measure_submit_cost.py` against
+    a real cluster: 5.3 to 6.1 ms per submit against 0.024 to 0.031 ms.
+    """
+    return process_shard(
+        shard, item_table.select(table_path, indices), crs, resolution, read_threads
+    )
+
+
+def rehearse_task(
+    shard: Shard,
+    table_path,
+    indices,
+    crs: str,
+    resolution: float,
+    read_threads: int = 4,
+) -> dict:
+    """The rehearsal counterpart. It reads no table, because it reads nothing.
+
+    `rehearse_shard` only ever used `len(item_dicts)`, and `len(indices)` is the
+    same number.
+    """
+    return rehearse_shard(shard, indices, crs, resolution, read_threads)
+
+
 def resolve_area(args):
     """The bbox this run covers, and the tile it belongs to.
 
@@ -536,7 +589,16 @@ def stage_scenes_for(args, item_dicts, work_idx):
     """Fetch this slice's scene objects to local disk, or say why it did not.
 
     Runs after `--max-shards`, so a two-shard smoke run fetches what those two
-    shards need rather than the whole slice.
+    shards need rather than the whole slice, and before the cluster starts.
+
+    That ordering was questioned and is now measured. Fetching beside the
+    shards it feeds sounds free, because the fetch is network work and the
+    shards are processor work. It is not: MEASURED on an `m6id.16xlarge`, the
+    same 1,998 objects and 78.9 GiB stage in 91.9 s with the machine to
+    themselves and in 358.7 s beside 64 busy workers. Staging spends its time
+    on TLS, HTTP and the copy loop, all of which want a core, so 64 workers
+    take 3.9x of it away. The overlap saved 220 s of wall clock on a 250-shard
+    slice and paid 267 s for it.
 
     Returns:
         The staging report, or None when the run reads from S3. The report is
@@ -556,7 +618,14 @@ def stage_scenes_for(args, item_dicts, work_idx):
         item_dicts,
         sorted({i for _, idx in work_idx for i in idx}),
         args.stage_dir,
+        threads=args.stage_threads,
     )
+    report_staging(report)
+    return report
+
+
+def report_staging(report) -> None:
+    """The two console lines a staged run prints about what it fetched."""
     print(
         f"stage         {report['objects']:,} objects, "
         f"{report['bytes'] / GIB:.1f} GiB in {report['seconds']:.1f}s "
@@ -566,7 +635,81 @@ def stage_scenes_for(args, item_dicts, work_idx):
         f"              {report['get_requests']:,} billable GETs, "
         f"{report['retries']} retries"
     )
-    return report
+
+
+def drive_shards(
+    client,
+    fn,
+    work_idx,
+    table_path,
+    crs,
+    res,
+    read_threads,
+    *,
+    assemble,
+    marks,
+    t0,
+):
+    """Submit every shard, then assemble results as they return.
+
+    Shards are submitted in batches rather than one at a time.
+    `_AsCompleted.add` clears its completion cursor, so adding singly makes the
+    next drain rescan every pending future and the gather quadratic in the
+    shard count.
+
+    Results are assembled one at a time and dropped. `client.gather` on every
+    future at once held about 1 GB of results and aborted the process with a
+    Rust panic across the PyO3 boundary at 90% completion, taking 290 finished
+    shards with it.
+
+    Returns:
+        The per-shard stats in completion order, and the seconds spent inside
+        `client.submit`.
+    """
+    import frisky  # deferred, like main's: a dry run must not need it
+
+    total = len(work_idx)
+    stats: list[dict] = []
+    completed = frisky.as_completed([], raise_errors=False)
+
+    t_submit = time.perf_counter()
+    marks["first_submit_s"] = t_submit - t0
+    completed.update(
+        [
+            client.submit(fn, shard, table_path, idx, crs, res, read_threads)
+            for shard, idx in work_idx
+        ]
+    )
+    submit_s = time.perf_counter() - t_submit
+    marks["last_submit_s"] = time.perf_counter() - t0
+
+    done = 0
+    #: Shards finished at the last checkpoint, so the line can report the rate
+    #: over the last 25 rather than since the start. The cumulative figure hides
+    #: page-cache warmup: the first wave of 64 shards runs about 59 s each and
+    #: later ones about 11 s, so a running mean reads as a slow cluster for
+    #: most of a run and as a rate for none of it.
+    last_mark = (0, time.perf_counter())
+    while done < total:
+        for future in completed.next_batch(block=True):
+            stats.append(assemble(future))
+            done += 1
+            marks.setdefault("first_result_s", time.perf_counter() - t0)
+            if done % 25 == 0 or done == total:
+                now = time.perf_counter()
+                elapsed = now - t0 - marks["first_submit_s"]
+                span = (now - last_mark[1]) / max(done - last_mark[0], 1)
+                last_mark = (done, now)
+                print(
+                    f"  {done:4d}/{total}  {elapsed:6.1f}s  "
+                    f"{elapsed / done:5.2f}s/shard mean  "
+                    f"{span:5.2f}s/shard last 25"
+                )
+        if done < total and completed.is_empty():
+            msg = f"{total - done} of {total} shards never returned a result"
+            raise RuntimeError(msg)
+    marks["last_result_s"] = time.perf_counter() - t0
+    return stats, submit_s
 
 
 def _target_verdict(args, per_shard_gib, slots, client_gib) -> str:
@@ -811,9 +954,11 @@ def parse_args(argv=None):
         "--stage-dir",
         type=Path,
         default=Path(os.environ.get("LST_STAGE_DIR", DEFAULT_STAGE_DIR)),
-        help="local directory the scene objects are fetched into before the "
-        "cluster starts. Wants throughput as well as capacity: the compute "
-        "phase already reads about 358 MB/s and staging writes on top of it",
+        help="local directory the scene objects are fetched into. Wants "
+        "throughput as well as capacity, and now needs both at once: the "
+        "fetch writes at up to 922 MB/s while the shards read the files it "
+        "has already landed at about 358 MB/s. Pass --no-overlap to put the "
+        "two back in sequence",
     )
     p.add_argument(
         "--no-stage",
@@ -822,6 +967,15 @@ def parse_args(argv=None):
         "staging existed. About 155 shards touch each scene and each open "
         "costs 4.77 requests, so this is the expensive path and it is kept "
         "for measuring against",
+    )
+    p.add_argument(
+        "--stage-threads",
+        type=int,
+        default=None,
+        help="threads in the fetch pool. Defaults to min(64, 4 x cores). The "
+        "cap was chosen when staging ran on its own; beside compute each "
+        "thread spends far more of its life blocked, so more of them keep the "
+        "same bytes in flight for the same cores",
     )
     p.add_argument(
         "--keep-staged",
@@ -1311,7 +1465,7 @@ def main(argv=None) -> int:  # noqa: C901
             )
 
     # Slice the PLAN, never the filtered list. Shards with no overlapping
-    # scenes drop out of `work`, so slicing after filtering shifts every index
+    # scenes drop out of `work_idx`, so slicing after filtering shifts every index
     # and machines silently leave gaps. The rehearsal caught exactly that:
     # slice 972:1296 ran 288 shards, and the merge reported 1,440,000 px
     # never written.
@@ -1325,8 +1479,8 @@ def main(argv=None) -> int:  # noqa: C901
             f"slice         shards[{lo}:{hi}] -> {len(mine)} of {len(shards)} planned"
         )
 
-    # One pass over the plan, read twice. `work` and `barren` partition this
-    # slice, and staging needs the union of the indices in `work`, so all three
+    # One pass over the plan, read twice. `work_idx` and `barren` partition
+    # this slice, and staging needs the union of those indices, so all three
     # come from the same list rather than from three sweeps of the same test.
     per_shard = [items_for_shard(sh, item_bboxes) for sh in mine]
     work_idx = [(sh, idx) for sh, idx in zip(mine, per_shard, strict=True) if idx]
@@ -1357,15 +1511,12 @@ def main(argv=None) -> int:  # noqa: C901
             f"{concurrency} slots, fits"
         )
 
-    # Staging runs after --max-shards, so a smoke run over two shards fetches
-    # the objects those two shards need and not the whole slice.
-    stage_report = stage_scenes_for(args, item_dicts, work_idx)
-
-    work = [(sh, [item_dicts[i] for i in idx]) for sh, idx in work_idx]
-    counts = [len(d) for _, d in work]
+    counts = [len(idx) for _, idx in work_idx]
     print(
-        f"shards        {len(work)} with data, "
-        f"scenes/shard min {min(counts)} p50 {sorted(counts)[len(counts) // 2]} "
+        f"shards        {len(work_idx)} with data, "
+        f"scenes/shard min {min(counts)} "
+        f"p50 {sorted(counts)[len(counts) // 2]} "
+        f"p95 {sorted(counts)[int(len(counts) * 0.95)]} "
         f"max {max(counts)}"
     )
     print(
@@ -1374,17 +1525,52 @@ def main(argv=None) -> int:  # noqa: C901
         f"{concurrency} slots\n"
     )
 
+    # One origin for every phase mark below, so the summary's numbers subtract.
+    t0 = time.perf_counter()
+    t0_wall = time.time()
+    marks: dict[str, float | bool] = {}
+
     proc = psutil.Process()
     peak = {"rss": 0.0}
 
     # What the workers actually hold, sampled from outside them. `shard_bytes`
     # predicts this and nothing on a production run had ever measured it, so
-    # the model was checked against its own output. The sampler starts before
-    # the cluster, because worker RSS peaks while they are all allocating.
+    # the model was checked against its own output.
+    #
+    # It starts before staging as well as before the cluster, so the fetch has
+    # a memory and network series too. Before this it was sampled by nothing.
     args.out_dir.mkdir(parents=True, exist_ok=True)
     sampler = MemorySampler(args.out_dir / "memory.csv", args.sample_interval)
     sampler.start()
 
+    # Staging runs after --max-shards, so a smoke run over two shards fetches
+    # the objects those two shards need and not the whole slice.
+    #
+    # It runs to completion before the cluster starts, and that ordering is
+    # deliberate rather than historical. Overlapping the fetch with the shards
+    # it feeds was tried and MEASURED as a loss: the same 1,998 objects and
+    # 78.9 GiB that stage in 91.9 s on an idle machine take 358.7 s beside 64
+    # busy workers, because staging is bound by processor time and not by the
+    # network. See `FINDINGS.md`, "Staging beside compute is slower than
+    # staging before it".
+    marks["stage_start_s"] = time.perf_counter() - t0
+    stage_report = stage_scenes_for(args, item_dicts, work_idx)
+    marks["stage_end_s"] = time.perf_counter() - t0
+
+    # After staging, so the table carries the staged hrefs.
+    table_path = None
+    table_report = None
+    if not args.rehearse:
+        args.stage_dir.mkdir(parents=True, exist_ok=True)
+        table_report = item_table.write(args.stage_dir / ITEM_TABLE_NAME, item_dicts)
+        table_path = table_report["path"]
+        marks["table_write_s"] = table_report["seconds"]
+        print(
+            f"item table    {table_report['n_items']:,} scenes, "
+            f"{table_report['bytes'] / 1e6:.1f} MB -> {table_path}"
+        )
+
+    t_cluster = time.perf_counter()
     cluster = frisky.LocalCluster(
         n_workers=args.workers,
         threads_per_worker=args.threads_per_worker,
@@ -1394,6 +1580,7 @@ def main(argv=None) -> int:  # noqa: C901
         silence_summary=True,
     )
     client = cluster.get_client()
+    marks["cluster_start_s"] = time.perf_counter() - t_cluster
     dash = cluster.dashboard_address
     dash = dash if str(dash).startswith("http") else f"http://{dash}"
     print(f"dashboard     {dash}")
@@ -1401,51 +1588,76 @@ def main(argv=None) -> int:  # noqa: C901
     lst_out = np.zeros((height, width), dtype="uint16")
     qa_out = np.zeros((12, height, width), dtype="uint8")
 
-    t0 = time.perf_counter()
-    fn = rehearse_shard if args.rehearse else process_shard
-    futures = [
-        client.submit(fn, sh, d, args.crs, res, args.read_threads) for sh, d in work
-    ]
-    print(f"submitted     {len(futures)} shards in {time.perf_counter() - t0:.1f}s")
-
-    done = 0
-    stats = []
-    t_compute = time.perf_counter()
-    # Collect one at a time and drop each result after assembling it.
-    # client.gather(futures) on all 324 at once held ~1 GB of results and
-    # aborted the process with a Rust panic across the PyO3 boundary at 90%
-    # ("panic in a function that cannot unwind"), losing the whole run.
-    for fut in frisky.as_completed(list(futures), raise_errors=False):
+    def assemble(future) -> dict:
+        """One shard into the output arrays, then dropped."""
         try:
-            res_d = fut.result()
+            res_d = future.result()
         except Exception as exc:  # a dead shard must not kill the tile
-            stats.append({"error": repr(exc)})
-            done += 1
-            continue
+            return {"error": repr(exc)}
         y0, x0 = res_d["y0"], res_d["x0"]
         a = res_d["lst_p95"]
         lst_out[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = a
         q = res_d["qa_count"]
         qa_out[:, y0 : y0 + q.shape[1], x0 : x0 + q.shape[2]] = q
-        stats.append(
-            {k: res_d[k] for k in ("row", "col", "n_scenes", "load_s", "reduce_s")}
-        )
+        stat = {k: res_d[k] for k in ("row", "col", "n_scenes", "load_s", "reduce_s")}
         del res_d, a, q
-        done += 1
         peak["rss"] = max(peak["rss"], proc.memory_info().rss / GIB)
-        if done % 25 == 0 or done == len(futures):
-            el = time.perf_counter() - t_compute
-            print(
-                f"  {done:4d}/{len(futures)}  {el:6.1f}s  "
-                f"{el / done:5.2f}s/shard  client RSS {peak['rss']:.1f} GiB"
-            )
-    compute_s = time.perf_counter() - t_compute
+        return stat
+
+    fn = rehearse_task if args.rehearse else shard_task
+    try:
+        stats, submit_s = drive_shards(
+            client,
+            fn,
+            work_idx,
+            table_path,
+            args.crs,
+            res,
+            args.read_threads,
+            assemble=assemble,
+            marks=marks,
+            t0=t0,
+        )
+    except BaseException:
+        # Without this the process hangs on a live cluster where before a
+        # failure in this stretch simply killed it.
+        cluster.close()
+        sampler.stop()
+        raise
+
+    print(
+        f"submitted     {len(work_idx)} shards in {submit_s:.1f}s of client time "
+        f"({submit_s / max(len(work_idx), 1) * 1000:.2f} ms each)"
+    )
+
+    # `compute_s` spans the whole shard-processing window. It used to run from
+    # the last submit to the last result, which was the same thing when every
+    # shard was submitted before any returned, and both are recorded so a
+    # before-and-after table can compare like with like.
+    compute_s = marks["last_result_s"] - marks["first_submit_s"]
+    marks |= {
+        "t0_wall": t0_wall,
+        "search_s": t_search,
+        "submit_total_s": submit_s,
+        "compute_s": compute_s,
+        "compute_from_last_submit_s": marks["last_result_s"] - marks["last_submit_s"],
+        "stage_s": marks["stage_end_s"] - marks["stage_start_s"],
+        "wall_s": time.perf_counter() - t0,
+    }
+    print(
+        f"phases        stage {marks['stage_s']:.1f}s, "
+        f"submit {submit_s:.1f}s, compute {compute_s:.1f}s"
+    )
 
     # Every shard has been gathered, so nothing reads the staged files again.
     # A failed run keeps them, which is what a rerun and a post-mortem both
     # want; the disk guard on the next run says so rather than filling up.
     if stage_report is not None and not args.keep_staged:
         staging.cleanup(args.stage_dir, owned=stage_report.get("owns_stage_dir", True))
+    elif table_path is not None and not args.keep_staged:
+        # --no-stage writes the table and stages nothing, so `cleanup` never
+        # runs and 7.8 MB would be left behind on every run.
+        Path(table_path).unlink(missing_ok=True)
 
     # The mask goes on before anything is measured or written, so the summary
     # statistics, the part file, and a merge of parts from several machines all
@@ -1486,15 +1698,20 @@ def main(argv=None) -> int:  # noqa: C901
         "pixels_per_degree": args.pixels_per_degree,
         "raster": [height, width],
         "shard_px": args.shard,
-        "n_shards": len(work),
+        "n_shards": len(work_idx),
         # What the run composited, after the L2SR filter. The inventory total
         # sits beside it, because the two differ by `scenes_dropped_no_thermal`
         # and a reader cannot tell which one a single figure means.
         "n_scenes": len(item_dicts),
         "n_scenes_inventory": len(items),
         "search_s": t_search,
+        # Every phase, as seconds from one origin, so a before-and-after table
+        # is two summaries subtracted rather than two logs scraped. The submit
+        # time in particular used to be printed and then discarded.
+        "phases": marks,
+        "item_table": table_report,
         "compute_s": compute_s,
-        "s_per_shard": compute_s / max(len(work), 1),
+        "s_per_shard": compute_s / max(len(work_idx), 1),
         "client_rss_peak_gib": peak["rss"],
         # MEASURED across the worker processes, not predicted. `shard_bytes`
         # models the same quantity, so a run now says whether the model held.
@@ -1542,14 +1759,14 @@ def main(argv=None) -> int:  # noqa: C901
             f"max {cel.max():.1f} C  ({100 * valid.mean():.1f}% valid)"
         )
     print(
-        f"compute       {compute_s:.1f}s for {len(work)} shards "
-        f"({compute_s / max(len(work), 1):.2f}s/shard of wall clock, not "
+        f"compute       {compute_s:.1f}s for {len(work_idx)} shards "
+        f"({compute_s / max(len(work_idx), 1):.2f}s/shard of wall clock, not "
         f"per-shard duration)"
     )
     n_errored = sum(1 for s in stats if "error" in s)
     if n_errored:
         print(
-            f"FAILED        {n_errored} of {len(work)} shards errored; this "
+            f"FAILED        {n_errored} of {len(work_idx)} shards errored; this "
             f"tile is incomplete"
         )
     print(f"client RSS    {peak['rss']:.2f} GiB peak")
@@ -1600,7 +1817,7 @@ def main(argv=None) -> int:  # noqa: C901
                     "crs": args.crs,
                     "pixels_per_degree": args.pixels_per_degree,
                     "shard_px": args.shard,
-                    "n_shards": len(work),
+                    "n_shards": len(work_idx),
                     # What the mask did to this part. `merge_parts` compares
                     # it across parts, because two machines that masked the
                     # same tile differently produce one raster that no single
@@ -1626,7 +1843,16 @@ def main(argv=None) -> int:  # noqa: C901
     if stage_report is not None:
         (args.out_dir / "staging.json").write_text(
             json.dumps(
-                stage_report | {"scenes_dropped_no_thermal": dropped_no_thermal},
+                stage_report
+                | {
+                    "scenes_dropped_no_thermal": dropped_no_thermal,
+                    # Beside the counts, because pricing a run reads only this
+                    # file and whether the fetch overlapped the compute changes
+                    # what its seconds mean.
+                    "started_s": marks.get("stage_start_s"),
+                    "ended_s": marks.get("stage_end_s"),
+                    "overlapped": marks.get("overlapped", False),
+                },
                 indent=2,
             )
         )
