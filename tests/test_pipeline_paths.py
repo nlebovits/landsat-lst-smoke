@@ -414,15 +414,21 @@ def corrected_items(stack):
     ]
 
 
-def correction_for(stack):
-    """A prep payload on the fixture's own grid, with one scene rejected."""
+def correction_for(stack, *, uncovered_cols=0):
+    """A prep payload on the fixture's own grid, with one scene rejected.
+
+    `uncovered_cols` pulls both swaths back off that many leading columns, so
+    those pixels carry observations that no path's swath reaches. Both paths
+    fall back to the pooled percentile there, and the two have to agree on it
+    the way they agree everywhere else.
+    """
     import destripe
     from masks import transform_for
 
     west = np.zeros((NY, NX), dtype=bool)
-    west[:, :3] = True
+    west[:, uncovered_cols:3] = True
     east = np.zeros((NY, NX), dtype=bool)
-    east[:, 1:] = True
+    east[:, max(1, uncovered_cols) :] = True
     paths, weight, _inside = destripe.path_weights(
         {CORRECTED_PATHS[0]: west, CORRECTED_PATHS[1]: east},
         transform_for(AREA, NX * 10),
@@ -483,6 +489,54 @@ def test_the_two_paths_agree_once_the_seam_corrections_are_on(
     )
 
 
+def test_the_two_paths_agree_where_no_swath_reaches(monkeypatch, fake_stac_load, stack):
+    """The pooled fallback is a second reduction, and it is written twice.
+
+    The eager path takes it over a boolean slice of the stack, and the lazy one
+    as one more expression on a graph already held. Those are different
+    operations that have to reach the same raster, which is the contract this
+    module holds for every other pair.
+    """
+    import pystac
+
+    monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
+    items = corrected_items(stack)
+    shard = shard_lst_p95.Shard(0, 0, 0, 0, NY, NX, AREA)
+
+    sharded = shard_lst_p95.process_shard(
+        shard,
+        items,
+        "EPSG:4326",
+        1 / 3600,
+        read_threads=1,
+        correction=correction_for(stack, uncovered_cols=1),
+    )
+    lst_u16, _qa, _ = profile_lst_p95.build_graph(
+        items,
+        AREA,
+        NX,
+        "EPSG:4326",
+        1 / 3600,
+        time_chunk=N_TIME,
+        load_chunk=NX,
+        correction=correction_for(stack, uncovered_cols=1),
+    )
+    graph_lst = np.asarray(lst_u16.values)
+
+    # The fallback has to have fired, or this test passes on the covered case.
+    assert sharded["n_pooled_fallback"] == NY
+    np.testing.assert_array_equal(
+        sharded["lst_p95"] == LST_NODATA_DN, graph_lst == LST_NODATA_DN
+    )
+    valid = sharded["lst_p95"] != LST_NODATA_DN
+    assert (
+        np.abs(
+            sharded["lst_p95"][valid].astype("int32") - graph_lst[valid].astype("int32")
+        ).max()
+        <= 1
+    )
+
+
 def test_a_rejected_scene_leaves_the_monthly_counts(monkeypatch, fake_stac_load, stack):
     """`qa_count` says what evidence is behind the P95, not what was available."""
     import pystac
@@ -512,3 +566,42 @@ def test_a_rejected_scene_leaves_the_monthly_counts(monkeypatch, fake_stac_load,
     # Pixel (0, 0) is clear in every scene, so it loses exactly the one that
     # was discarded.
     assert int(corrected["qa_count"][:, 0, 0].sum()) == N_TIME - 1
+
+
+def test_a_corrected_part_is_nodata_exactly_where_it_saw_nothing(
+    monkeypatch, fake_stac_load, stack
+):
+    """The one invariant the seam correction could break, on the path that can.
+
+    A nodata temperature beside a `qa_count` above zero says the pixel had
+    observations and lost them to the reduction, which is a different fact from
+    a masked pixel. `tests/test_output_mask_run.py` asserts this on the part
+    file, and every run there is a rehearsal, so no correction is applied and
+    the feathered path is never checked against it.
+
+    Feathering can break it two ways: a pixel outside every swath, and a pixel
+    whose covering paths all observed nothing. The pooled fallback answers both.
+    """
+    import pystac
+
+    monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
+    items = corrected_items(stack)
+    shard = shard_lst_p95.Shard(0, 0, 0, 0, NY, NX, AREA)
+
+    out = shard_lst_p95.process_shard(
+        shard,
+        items,
+        "EPSG:4326",
+        1 / 3600,
+        read_threads=1,
+        correction=correction_for(stack, uncovered_cols=1),
+    )
+
+    assert out["n_pooled_fallback"] == NY
+    np.testing.assert_array_equal(
+        out["lst_p95"] == LST_NODATA_DN, out["qa_count"].sum(axis=0) == 0
+    )
+    # Pixel (1, 1) is fill in every scene. It is the only one that saw nothing,
+    # so the assertion above would also pass on an all-nodata raster.
+    assert int(out["lst_p95"][1, 1]) == LST_NODATA_DN
+    assert (out["lst_p95"] != LST_NODATA_DN).sum() == NY * NX - 1

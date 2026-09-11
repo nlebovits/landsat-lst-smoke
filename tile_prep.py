@@ -198,6 +198,35 @@ def swath_transform(bbox, pixels_per_degree: int, swath_factor: int):
     return transform_for(bbox, pixels_per_degree // swath_factor)
 
 
+def check_every_path_has_a_swath(item_dicts, paths) -> None:
+    """Refuse a tile where some path reached no swath cell at all.
+
+    `feathered_percentile` reduces one subset per path in `paths` and blends
+    them. A scene whose path is missing from that list enters no subset, so it
+    loads, costs a read, and contributes nothing. The pixels it observed still
+    reach `qa_count`, and where another path covers them the composite is a
+    value fitted without them. That is a wrong number rather than a missing
+    one, and nothing in the raster marks it.
+
+    A path drops out when every one of its quads stayed under
+    `SWATH_QUAD_SHARE` on every cell. That is the swath definition failing to
+    describe the path, not a fact about the ground, so the tile stops here
+    rather than at the shards.
+
+    Raises:
+        SystemExit: naming the paths and the one flag that composites anyway.
+    """
+    absent = sorted({destripe.path_of(d) for d in item_dicts} - set(paths))
+    if not absent:
+        return
+    raise SystemExit(
+        f"{len(absent)} WRS paths reached no swath cell on this tile: "
+        f"{', '.join(absent)}. Their scenes would load and contribute nothing "
+        f"to any shard, against a swath share of {destripe.SWATH_QUAD_SHARE}. "
+        f"Composite with --no-feather."
+    )
+
+
 def memory_model(block: int, scenes_per_block, n_scenes, n_quads, swath_shape, slots):
     """Every array this pass keeps resident, named, in GiB.
 
@@ -608,6 +637,7 @@ def main(argv=None) -> int:  # noqa: C901
             f"{covered.mean():.1%} of the prep grid covered, "
             f"{(inside.sum(axis=0) >= 2).mean():.1%} reached by two or more"
         )
+        check_every_path_has_a_swath(items, paths)
 
     write_artifact(
         args.out_dir,

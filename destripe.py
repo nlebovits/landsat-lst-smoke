@@ -767,7 +767,20 @@ def feathered_percentile(celsius, path_of_scene, paths, weight, q=95.0):
 
     A path covering a pixel but observing nothing there drops out of that
     pixel's blend and the remaining paths renormalise, so a thin path cannot
-    pull a value toward nodata. A pixel no path reaches stays NaN.
+    pull a value toward nodata.
+
+    A pixel no swath covers falls back to the pooled percentile of whatever
+    observed it. A swath is the ground at least `SWATH_QUAD_SHARE` of a quad's
+    scenes reached, so a pixel one path reaches on a third of its passes lies
+    outside every swath and still carries real observations. Returning NaN
+    there would discard them while `qa_count` went on counting them, and the
+    tiles that lose the most would be the cloudy ones that have the least.
+
+    The fallback is the blend, not an exception to it. Where no swath covers, no
+    path has an opinion about the ratio, so `w_j = d_j / sum_i d_i` degenerates
+    to the unweighted percentile. It meets the feathered value continuously at
+    the swath edge, because the scenes observing a pixel just outside path A's
+    swath are almost all A's.
 
     Args:
         celsius: `(n_scenes, ny, nx)` float32, already de-biased and masked.
@@ -776,7 +789,10 @@ def feathered_percentile(celsius, path_of_scene, paths, weight, q=95.0):
         weight: `(n_paths, ny, nx)` float32 on this shard's grid.
 
     Returns:
-        `(ny, nx)` float32, NaN where nothing covers or nothing was observed.
+        `(field, n_pooled)`. `field` is `(ny, nx)` float32, NaN only where
+        nothing was observed. `n_pooled` counts the pixels that took the
+        fallback, which is how much of this shard the cross-fade could not
+        describe.
     """
     import numpy as np
 
@@ -805,7 +821,19 @@ def feathered_percentile(celsius, path_of_scene, paths, weight, q=95.0):
 
     covered = denominator > 0
     safe = np.where(covered, denominator, np.float32(1.0))
-    return np.where(covered, numerator / safe, np.float32(np.nan)).astype("float32")
+    out = np.where(covered, numerator / safe, np.float32(np.nan)).astype("float32")
+
+    observed = np.isfinite(celsius).any(axis=0)
+    pooled = observed & ~covered
+    if pooled.any():
+        with np.errstate(all="ignore"):
+            # Reduces only the pixels it rescues, so the cost tracks the loss
+            # it prevents. overwrite_input is safe for the reason it is safe
+            # above: the boolean index already made a copy.
+            out[pooled] = np.nanpercentile(
+                celsius[:, pooled], q, axis=0, overwrite_input=True
+            ).astype("float32")
+    return out, int(pooled.sum())
 
 
 def scene_digest(scene_ids, window: dict) -> str:
@@ -1028,6 +1056,14 @@ def feathered_quantile_xr(lst, path_of_scene, paths, weight, dims, q=0.95):
     give the scheduler two incompatible consumers of the same stack, and it
     would hold the whole thing rather than stream it.
 
+    A pixel no swath covers falls back to the pooled quantile, for the reason
+    `feathered_percentile` gives. The fallback is one more reduction over the
+    same source blocks, so it joins the same compute rather than adding a pass.
+
+    This returns the field alone. `feathered_percentile` also returns how many
+    pixels took the fallback, which is a count a lazy graph cannot produce
+    without forcing a compute the caller did not ask for.
+
     Returns None when no path matched a single step, which leaves the caller to
     composite pooled.
     """
@@ -1055,4 +1091,6 @@ def feathered_quantile_xr(lst, path_of_scene, paths, weight, dims, q=0.95):
     if numerator is None or denominator is None:
         return None
     covered = denominator > 0
-    return xr.where(covered, numerator / denominator.where(covered, 1.0), np.nan)
+    feathered = xr.where(covered, numerator / denominator.where(covered, 1.0), np.nan)
+    pooled = lst.quantile(q, dim="time").drop_vars("quantile", errors="ignore")
+    return xr.where(covered, feathered, pooled)

@@ -424,6 +424,7 @@ def rehearse_shard(
         "n_scenes": n,
         "n_scenes_kept": n,
         "n_rejected": 0,
+        "n_pooled_fallback": 0,
         "load_s": 0.0,
         "reduce_s": 0.0,
     }
@@ -491,6 +492,7 @@ def process_shard(
 
     t1 = time.perf_counter()
     n_rejected = 0
+    n_pooled_fallback = 0
     pooled = None
     if correction is None:
         with np.errstate(all="ignore"):
@@ -502,11 +504,12 @@ def process_shard(
         if correction["emit_pooled"]:
             pooled = encode_celsius(destripe.pooled_percentile(lst))
         if correction["paths"]:
-            p95 = destripe.feathered_percentile(
+            p95, n_pooled_fallback = destripe.feathered_percentile(
                 lst, labels, correction["paths"], correction["weight"]
             )
         else:
             p95 = destripe.pooled_percentile(lst)
+            n_pooled_fallback = int(np.isfinite(p95).sum())
     t_reduce = time.perf_counter() - t1
 
     months = data["time"].dt.month.values
@@ -530,6 +533,11 @@ def process_shard(
         "n_scenes": int(lst.shape[0]),
         "n_scenes_kept": int(lst.shape[0]) - n_rejected,
         "n_rejected": n_rejected,
+        # Pixels the cross-fade could not describe, which took the pooled
+        # percentile instead. A shard well inside one swath reports 0. A high
+        # share says the swath definition missed ground the scenes did reach,
+        # which is the number to watch per tile.
+        "n_pooled_fallback": n_pooled_fallback,
         "load_s": t_load,
         "reduce_s": t_reduce,
     }
@@ -1946,6 +1954,7 @@ def main(argv=None) -> int:  # noqa: C901
                 "n_scenes",
                 "n_scenes_kept",
                 "n_rejected",
+                "n_pooled_fallback",
                 "load_s",
                 "reduce_s",
             )

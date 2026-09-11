@@ -449,7 +449,7 @@ class TestTheFeatheredPercentile:
     def test_a_single_path_pixel_is_bit_identical_to_that_path_alone(self):
         stack, labels = self.stack_and_labels()
         paths, weight, inside = destripe.path_weights(two_paths(), grid_transform())
-        out = destripe.feathered_percentile(stack, labels, paths, weight)
+        out, _ = destripe.feathered_percentile(stack, labels, paths, weight)
         for j, path in enumerate(paths):
             single = (inside.sum(axis=0) == 1) & inside[j]
             if not single.any():
@@ -463,8 +463,8 @@ class TestTheFeatheredPercentile:
         reversed_ = {k: forward[k] for k in reversed(list(forward))}
         a = destripe.path_weights(forward, grid_transform())
         b = destripe.path_weights(reversed_, grid_transform())
-        out_a = destripe.feathered_percentile(stack, labels, a[0], a[1])
-        out_b = destripe.feathered_percentile(stack, labels, b[0], b[1])
+        out_a, _ = destripe.feathered_percentile(stack, labels, a[0], a[1])
+        out_b, _ = destripe.feathered_percentile(stack, labels, b[0], b[1])
         assert np.array_equal(out_a, out_b)
 
     def test_it_removes_the_step_the_pooled_percentile_leaves(self):
@@ -481,7 +481,7 @@ class TestTheFeatheredPercentile:
             two_paths(), grid_transform(), factor=1
         )
         pooled = destripe.pooled_percentile(stack)
-        feathered = destripe.feathered_percentile(stack, labels, paths, weight)
+        feathered, _ = destripe.feathered_percentile(stack, labels, paths, weight)
 
         # A seam is a jump between neighbouring columns, so that is the
         # measurement. Crossing the same 6 C over the twelve columns of the
@@ -500,21 +500,61 @@ class TestTheFeatheredPercentile:
         stack, labels = self.stack_and_labels()
         stack[labels == EAST, :, 24:30] = np.nan
         paths, weight, _inside = destripe.path_weights(two_paths(), grid_transform())
-        out = destripe.feathered_percentile(stack, labels, paths, weight)
+        out, _ = destripe.feathered_percentile(stack, labels, paths, weight)
         west_alone = destripe.pooled_percentile(stack[labels == WEST])
         # Renormalising divides by the surviving weight, so this is the west
         # estimate to float32 rounding rather than bit for bit.
         assert np.allclose(out[:, 24:30], west_alone[:, 24:30], rtol=1e-6)
 
-    def test_a_pixel_no_path_reaches_is_nodata(self):
+    def test_a_pixel_outside_every_swath_takes_the_pooled_percentile(self):
+        """The swath is a threshold, so ground outside it still gets observed.
+
+        A quad's swath is where at least half its scenes reached. A pixel one
+        path reaches on a third of its passes is outside every swath and
+        carries real temperatures. Returning nodata there would discard them
+        while `qa_count` went on counting them.
+        """
         stack, labels = self.stack_and_labels()
         masks = two_paths()
         masks[WEST][:, :4] = False
         masks[EAST][:, :4] = False
         paths, weight, _inside = destripe.path_weights(masks, grid_transform())
-        out = destripe.feathered_percentile(stack, labels, paths, weight)
-        assert np.isnan(out[:, :4]).all()
+        out, n_pooled = destripe.feathered_percentile(stack, labels, paths, weight)
+
+        assert not np.isnan(out[:, :4]).any()
+        assert np.allclose(out[:, :4], destripe.pooled_percentile(stack)[:, :4])
         assert not np.isnan(out[:, 10:]).any()
+        assert n_pooled == out[:, :4].size
+
+    def test_a_pixel_nothing_observed_is_still_nodata(self):
+        """The one remaining meaning of a nodata pixel in the composite."""
+        stack, labels = self.stack_and_labels()
+        stack[:, :, :4] = np.nan
+        masks = two_paths()
+        masks[WEST][:, :4] = False
+        masks[EAST][:, :4] = False
+        paths, weight, _inside = destripe.path_weights(masks, grid_transform())
+        out, n_pooled = destripe.feathered_percentile(stack, labels, paths, weight)
+
+        assert np.isnan(out[:, :4]).all()
+        assert n_pooled == 0
+
+    def test_the_fallback_leaves_a_covered_pixel_bit_identical(self):
+        """Rescuing the uncovered pixels must not move the feathered ones."""
+        stack, labels = self.stack_and_labels()
+        paths, weight, inside = destripe.path_weights(two_paths(), grid_transform())
+        full, n_pooled = destripe.feathered_percentile(stack, labels, paths, weight)
+
+        narrowed = two_paths()
+        narrowed[WEST][:, :4] = False
+        narrowed[EAST][:, :4] = False
+        n_paths, n_weight, _ = destripe.path_weights(narrowed, grid_transform())
+        cut, _ = destripe.feathered_percentile(stack, labels, n_paths, n_weight)
+
+        covered = inside.any(axis=0)
+        covered[:, :4] = False
+        assert n_pooled == 0
+        assert np.array_equal(full[covered], cut[covered])
 
 
 class TestTheWindowResample:

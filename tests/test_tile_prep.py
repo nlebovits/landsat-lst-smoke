@@ -272,6 +272,46 @@ class TestSplittingTheGrid:
             assert np.abs(other - answers[0]).max() <= destripe.ANOMALY_BIN_C
 
 
+class TestEveryPathNeedsASwath:
+    """A path with no swath cell would load its scenes and composite none.
+
+    `feathered_percentile` reduces one subset per path the prep file names. A
+    scene whose path is not on that list enters no subset, so its observations
+    reach `qa_count` and not the temperature, and where another path covers the
+    same ground the value is fitted without them. That is a wrong number rather
+    than a missing one, so the prep run stops instead.
+    """
+
+    def test_a_path_with_no_swath_cell_stops_the_run(self):
+        items = make_items()
+        with pytest.raises(SystemExit, match="reached no swath cell"):
+            tile_prep.check_every_path_has_a_swath(items, (WEST,))
+
+    def test_the_message_names_every_missing_path(self):
+        items = make_items()
+        with pytest.raises(SystemExit) as caught:
+            tile_prep.check_every_path_has_a_swath(items, ())
+        assert WEST in str(caught.value)
+        assert EAST in str(caught.value)
+        assert "--no-feather" in str(caught.value)
+
+    def test_every_path_present_passes(self):
+        items = make_items()
+        assert tile_prep.check_every_path_has_a_swath(items, (WEST, EAST)) is None
+
+    def test_a_path_the_scenes_never_carry_is_not_required(self):
+        """The check is one-way. A prep file may name more paths than it needs.
+
+        `swath_masks` only ever returns paths it saw, so this cannot happen
+        today. Asserting it keeps the check from becoming an equality test,
+        which would fail a tile whose margin caught a path the tile did not.
+        """
+        items = make_items()
+        assert (
+            tile_prep.check_every_path_has_a_swath(items, (WEST, EAST, "999")) is None
+        )
+
+
 class TestTheArtifact:
     def test_it_round_trips_every_field_a_slice_reads(self, tmp_path):
         payload = {

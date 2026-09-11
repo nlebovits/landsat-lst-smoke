@@ -45,6 +45,13 @@ product bounding rectangle and exceed the imaged area by about 46%. The seam
 lies along the imaged edge. So a `(path, row)` quad's swath is the ground where
 at least half its scenes produced a valid observation.
 
+Half is a threshold, so ground a path sees less often falls outside every swath
+and still carries temperatures. Those pixels take the pooled percentile. The
+cross-fade weights one path's estimate against another, and outside every swath
+there is one estimate to weigh, so the blend is the pooled value already. The
+run summary counts them as `n_pooled_fallback`. A nodata pixel keeps the meaning
+it had: nothing was observed there.
+
 Both corrections run on the stack a shard has already loaded, so neither adds a
 read and neither adds a pass. The prep file is the extra traversal, taken once
 per tile and shared by every slice.

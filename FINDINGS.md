@@ -2325,10 +2325,22 @@ records the same count for one that would rather read a file.
   agricultural AOI, at a 21.8% rejected share. A humid tropical tile may not
   behave that way, and the rejected share is the number to watch per tile.
 - **The shard memory model has not been re-measured with the corrections on.**
-  `SHARD_BYTES_PER_PIXEL_SCENE = 15` should hold or fall: the per-path
-  percentile partitions each path's subset in place, where the pooled one
-  partitions a copy of the whole stack. No measurement backs that reasoning yet,
-  and `worker_memory_guard` refuses runs on the constant.
+  `SHARD_BYTES_PER_PIXEL_SCENE = 15` should hold or fall on a fully covered
+  shard: the per-path percentile partitions each path's subset in place, where
+  the pooled one partitions a copy of the whole stack. The pooled fallback adds
+  to it. It reduces the uncovered pixels alone, so it costs 4 bytes per
+  pixel-scene times the uncovered share: zero inside one swath, a second
+  whole-stack copy on a shard the swaths miss entirely. All of this is
+  arithmetic, and `worker_memory_guard` refuses runs on the constant.
+- **How much ground the swaths miss is unmeasured.** A quad's swath is the
+  ground where at least half its scenes produced a valid observation. A pixel
+  one path sees on a third of its passes falls outside every swath and still
+  carries temperatures. `feathered_percentile` composites those pixels
+  pooled, and `process_shard` counts them as `n_pooled_fallback`. Whether that
+  share is a rounding error or a third of a tile depends on cloud, and no tile
+  has been prepped. Watch it beside the rejected share. A high one says the
+  swath definition described less ground than the scenes cover, so the
+  cross-fade describes less of the tile than the composite implies.
 - **The prep memory model is arithmetic, not a measurement.**
   `tile_prep.memory_model` names five resident terms and `--target-memory-gib`
   refuses a run that exceeds them, the way `worker_memory_guard` does for a
