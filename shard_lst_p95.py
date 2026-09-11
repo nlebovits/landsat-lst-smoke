@@ -1191,9 +1191,11 @@ def parse_args(argv=None):
     p.add_argument(
         "--emit-pooled",
         action="store_true",
-        help="also write the pooled percentile beside the product, as a "
-        "baseline built from identical scenes and identical reads. It costs a "
-        "second reduction over the stack, which is not free on this path",
+        help="also write a pooled percentile beside the product, from the same "
+        "load after the offsets are applied. It isolates the cross-fade and "
+        "says nothing about the offsets; measure_seam.py separates those. It "
+        "costs a second reduction over the stack, which is not free on an "
+        "eager path",
     )
     args = p.parse_args(argv)
     if args.tile_prep is None and (args.no_destripe or args.no_feather):
@@ -1864,9 +1866,11 @@ def main(argv=None) -> int:  # noqa: C901
 
     lst_out = np.zeros((height, width), dtype="uint16")
     qa_out = np.zeros((12, height, width), dtype="uint8")
-    # The only baseline built from identical scenes, identical worker code, and
-    # identical reads. It rides the same load rather than a second run, so the
-    # difference between the two rasters is the correction and nothing else.
+    # Built from identical scenes, identical worker code, and identical reads,
+    # on the same load rather than a second run. It is taken after the offsets
+    # are applied, so the difference between the two rasters is the cross-fade
+    # alone. Separating the offsets from the cross-fade needs all four arms,
+    # which is what measure_seam.py runs.
     pooled_out = np.zeros((height, width), dtype="uint16") if args.emit_pooled else None
 
     def assemble(future) -> dict:

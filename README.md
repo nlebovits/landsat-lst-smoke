@@ -50,9 +50,11 @@ read and neither adds a pass. The prep file is the extra traversal, taken once
 per tile and shared by every slice.
 
 Turn either off with `--no-destripe` or `--no-feather`. Add `--emit-pooled` to
-write the uncorrected percentile beside the product, built from identical
-scenes and identical reads. `measure_seam.py` runs all four arms on one shard
-that straddles a swath and reports what each one removed.
+write a pooled percentile beside the product. It is taken from the same load
+after the offsets are applied, so it isolates the cross-fade and says nothing
+about the offsets. For the offsets, and for both together, run
+`measure_seam.py`: it composites four arms from one load on a shard that
+straddles a swath and reports what each one removed.
 
 **Not yet measured here.** Every number above comes from
 `nlebovits/landsat-lst` on its own grid. No tile in this repository has been
