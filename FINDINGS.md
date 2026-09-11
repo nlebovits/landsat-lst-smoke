@@ -6,10 +6,32 @@ Session `b5dd543f-2974-40c1-9f4c-5892e87c8d48`, 2026-09-08. A label marks each
 figure MEASURED or DERIVED. `Corrections` records what earlier versions of this
 document got wrong.
 
+## How to read this document
+
+This is the measurement record, not the design record. Every figure was true of
+the run that produced it, and the configuration around it has moved since. The
+merged pull requests are the current record: #6 precomputed the inventory, #7
+made staging the default, and #8 replaced the emissivity rule. Where a PR and
+this document disagree, read the PR.
+
+- **No section here is a recommended configuration.** The `Headline` run is four
+  unstaged `c6i.16xlarge` at a 512 px shard under the old QA mask. Steady state
+  is one staged `m6id.16xlarge` a tile at `--shard 360`. See `What to run`.
+- **No figure here is a per-tile price.** The $4.28 below bought one tile on
+  four machines that read every shard from S3. A staged tile is $1.68 to $1.87
+  and 26 to 29 minutes on one instance. See `Cost`.
+
 ## Headline
 
 Four `c6i.16xlarge` instances built the full tile `S30W065`, 18,000 x 18,000 px
 over 3,910 scenes, in **4.8 minutes of wall clock** for **$4.28**.
+
+Read every number in this section as one tile on four machines, reading every
+shard from S3, at a 512 px shard, on 2026-09-08. The 4.8 minutes is the slowest
+of four parallel slices, not the time one machine takes. The $4.28 is the whole
+tile, not a per-machine or per-hour rate. Staging, the 360 px shard, and the
+current mask all postdate it, and `What to run` has the configuration that
+replaced it.
 
 | slice | shards | compute | per shard |
 |---|---|---|---|
@@ -37,9 +59,10 @@ S3 requester-pays requests are 54% of that $4.28 and EC2 is 45%. That run read
 every shard straight from S3, which opens each scene about 155 times at 4.77
 requests an open. Staging fetches each object once instead, which takes the
 per-tile S3 line from **$2.31 to $0.0031** and the 769-tile total from
-**$2,389 - $2,494 to $1,118 - $1,410**. It costs a staging phase, an
-`m6id.16xlarge` in place of a `c6i.16xlarge`, and a 360 px shard. No staged run
-has yet completed on an instance. See `Cost` and `What is not settled`.
+**$2,389 - $2,494 to $1,290 - $1,436**. It costs a staging phase, an
+`m6id.16xlarge` in place of a `c6i.16xlarge`, and a 360 px shard. One staged run
+has completed on an instance, over 64 shards of one tile. No fleet has run
+staged. See `Cost` and `What is not settled`.
 
 ## What to run
 
@@ -100,29 +123,48 @@ uv run measure_scene_centre.py --all-years \
     --out artifacts/scene_centre_offset.json
 ```
 
-Then stage both Parquet files where the fleet can read them, and run one
-machine per tile:
+Then stage both Parquet files where the fleet can read them. Steady state runs
+one `m6id.16xlarge` per tile:
 
 ```bash
-# one machine per slice
 uv run shard_lst_p95.py --tile S30W065 \
     --inventory-uri artifacts/tile_scene_inventory.parquet \
     --pixels-per-degree 3600 \
+    --shard 360 \
     --stage-dir /mnt/nvme/stage \
-    --shard-slice 0:324 --out-dir ./part0
-uv run shard_lst_p95.py ... --shard-slice 324:648  --out-dir ./part1
-uv run shard_lst_p95.py ... --shard-slice 648:972  --out-dir ./part2
-uv run shard_lst_p95.py ... --shard-slice 972:1296 --out-dir ./part3
+    --out-dir ./tile
+```
+
+`--shard` and `--stage-dir` are requirements here, not preferences. `--shard`
+defaults to 512, and at 512 px the memory guard refuses a tile's deepest slice
+on anything under 256 GiB. `--stage-dir` defaults to the system temp directory, which on an
+instance is the root EBS volume, and gp3 tops out at 1,000 MB/s against a
+measured staging rate of 922 MB/s.
+
+Splitting a tile across machines buys wall clock and pays for it in staging,
+because each slice stages nearly the whole tile. A quarter of the tile's area
+touches about 2,004 of its 4,776 scenes, so four machines stage 157 GB each,
+628 GB against the 375 GB one instance writes. Split when wall clock is worth
+that:
+
+```bash
+# one machine per slice, four slices of the 2,500-shard plan at 360 px
+uv run shard_lst_p95.py --tile S30W065 ... --shard 360 \
+    --shard-slice 0:625 --out-dir ./part0
+uv run shard_lst_p95.py ... --shard-slice 625:1250  --out-dir ./part1
+uv run shard_lst_p95.py ... --shard-slice 1250:1875 --out-dir ./part2
+uv run shard_lst_p95.py ... --shard-slice 1875:2500 --out-dir ./part3
 
 # then anywhere
 uv run shard_lst_p95.py --merge part0 part1 part2 part3 --out-dir ./tile
 ```
 
-Staging is on by default and `--stage-dir` says where it lands. Point it at the
-instance's fastest volume; the default under the system temp directory is a
-laptop convenience, not a fleet setting. `--no-stage` reads every shard from S3
-instead, which is the path `measure_s3_requests.py` prices and the one that
-costs 739 requests per object.
+Staging is on by default. `--no-stage` reads every shard from S3 instead, which
+is the path `measure_s3_requests.py` prices and the one that costs 739 requests
+per object, or $2.31 a tile against $0.0031. It exists to measure against.
+Do not pair it with `--shard 360`: the small shard is chosen for memory once
+staging has removed the request cost, and unstaged it multiplies that cost
+instead. See `Shard size is a memory decision once staging is on`.
 
 The shard plan is deterministic and anchors to whole degrees, so a shard covers
 the same pixels whichever request produced it. Machines need no coordination
@@ -197,7 +239,7 @@ distinguish them:
 |---|---|---|
 | no usable observation | every scene was cloudy, or the pixel is off every footprint | yes |
 | water | outside the buffered land geometry | no |
-| failed emissivity retrieval | 70 C or hotter inside an ASTER GED gap cell | no |
+| failed emissivity retrieval | 70 C or hotter in an ASTER GED gap cell, or one cell from it | no |
 
 The last two are the output mask, and `masks.py` applies both. Both remove
 values the composite held, and they treat `qa_count` differently.
@@ -392,15 +434,15 @@ worker span exists to read.
 
 ### The shard plan
 
-A 512 x 512 shard needs `512² x 1765 x 18` = 8.3 GB at its peak. One worker
-holds that, and no array crosses a worker boundary, so nothing rechunks and
-nothing shuffles.
+A 512 x 512 shard needs `512² x 1765 x 15` = 6.9 GB at its peak, plus the
+0.25 GiB fixed term. One worker holds that, and no array crosses a worker
+boundary, so nothing rechunks and nothing shuffles.
 
-Eighteen bytes per pixel-scene, not the four an earlier version of this section
+Fifteen bytes per pixel-scene, not the four an earlier version of this section
 claimed. `process_shard` holds five arrays at once and decoding allocates
 transients on top of them. See `The memory model was four times low`, which is
-what a fleet instance found out the expensive way. `shard_lst_p95.py` submits one shard as one task
-that loads, masks, reduces, encodes, and returns.
+what a fleet instance found out the expensive way. `shard_lst_p95.py` submits
+one shard as one task that loads, masks, reduces, encodes, and returns.
 
 | | array graph | **sharded** |
 |---|---|---|
@@ -602,26 +644,33 @@ MEASURED on one `m6id.16xlarge` in us-west-2, 64 shards of `S30W065` at a
 | objects staged | **1,998** for 999 scenes, two bands each |
 | GETs | **1,998**, zero retries |
 | staged volume | **78.9 GiB in 91.9 s = 922 MB/s** |
-| per scene | 84.8 MB, against the 78.5 MB the disk guard assumes |
-| compute | 65.9 s for 64 shards |
+| per scene | 84.8 MB, against the 78.5 MB mean the staged volumes below use |
+| compute | 65.9 s of wall clock for 64 shards |
 | composite | min 14.3 C, mean 47.7 C, max 65.2 C |
 | machine memory | 247 GiB |
 
 One GET per object, on the wire, at fleet width.
 
+Staging also moves compute. MEASURED in PR #7, commit `c771f27`, over four
+shards run twice in one process: **11 s staged against 21 s unstaged**, so
+reading local files runs about twice as fast as `/vsis3` for the same pixels.
+That is four shards, not a tile, and no staged tile has been timed end to end.
+
 DERIVED from `shard_bytes`, and printed by the same run: a worst shard of
 **0.88 GiB**, or 56.6 GiB across 64 slots. That is the model's own output. An
 earlier version of this section put it in the table above and then cited it as
-evidence for the model at 64 workers, which is circular. That run measured only
-the client process, because `shard_lst_p95.py` sampled `psutil.Process()` and
-none of its children.
+evidence for the model at 64 workers, which is circular. The coefficient has
+risen since, so the same slice now budgets 0.98 GiB a shard and 59.7 GiB summed.
+That run measured only the client process, because `shard_lst_p95.py` sampled
+`psutil.Process()` and none of its children.
 
 It samples the children now. `memory_sampler.py` polls the client and every
 worker, and each run writes `memory.csv` beside its summary along with a
-`workers_rss_peak_gib`. The next fleet run reports a measurement in place of a
-prediction. Until one does, the independent check is frisky's
-`memory 95.93 GiB / 102.40 GiB (94%)` across 64 workers on the full-tile run,
-which is 1.50 GiB each against 1.53 from the model at 512 px and 404 scenes.
+`workers_rss_peak_gib`. One instance run has since reported it, 35.99 GiB across
+64 workers, and frisky's own spans agree at 35.87. The other independent check is
+frisky's `memory 95.93 GiB / 102.40 GiB (94%)` across 64 workers on the
+quarter-tile run, which is 1.50 GiB each against 1.73 from the model at 512 px
+and 404 scenes.
 
 What the superseded model would have predicted for the same configuration is
 14 GiB, which is the configuration that killed an earlier instance.
@@ -730,23 +779,29 @@ That rules out gp3, which tops out at 1,000 MB/s and would put the staging
 phase alone at 270 s. `--stage-dir` has to name an NVMe mount; its default is
 the system temp directory, which on these instances is the root volume.
 
-Disk is not the binding constraint, though. **Memory is**, and only two
-configurations fit at the worst shard a tile presents:
+Disk is not the binding constraint, though. **Memory is**, and the shard edge
+decides which boxes hold the deepest slice a tile presents:
 
 | config | needs | of RAM | 769 tiles |
 |---|---|---|---|
-| `c6id.16xlarge` 128 GiB, 512 px | 217 GiB | 170% | — |
-| `c6id.16xlarge` 128 GiB, 360 px | 118 GiB | 92% | $1,072 |
-| `m6id.16xlarge` 256 GiB, 512 px | 217 GiB | 85% | $1,156 |
-| **`m6id.16xlarge` 256 GiB, 360 px** | **118 GiB** | **46%** | **$1,262** |
+| `c6id.16xlarge` 128 GiB, 512 px | 140.0 GiB | 109% | — |
+| `c6id.16xlarge` 128 GiB, 360 px | 71.4 GiB | 56% | $1,072 |
+| `m6id.16xlarge` 256 GiB, 512 px | 140.0 GiB | 55% | $1,156 |
+| **`m6id.16xlarge` 256 GiB, 360 px** | **71.4 GiB** | **28%** | **$1,262** |
 
-64 workers at the 971-scene worst shard, plus 4.2 GiB of full-tile output
-arrays in the client. The failed run was a `c6id.16xlarge` at 512 px, which
-wanted 170% of the box.
+DERIVED, and printed by the dry run: the 15-byte model summed over the 64 shard
+depths of a deep slice of S30W065, plus 4.83 GiB of client output arrays. The
+depths are measured, from the inventory. The slices are `shards[987:1051]` at
+360 px, 203 to 820 scenes deep, and `shards[690:754]` at 512 px, 198 to 802. The
+failed run was a `c6id.16xlarge` at 512 px.
 
-**Use `m6id.16xlarge` at `--shard 360`.** The cheaper rows fit on paper at 92% and
-85% of RAM, against a worst shard extrapolated from the one tile whose shards
-have been counted. Neither leaves room to be wrong, and 46% is worth $106.
+**Use `--shard 360`.** A 512 px shard needs 140.0 GiB, so a 128 GiB box refuses
+it and only the `m6id.16xlarge` runs it. At 360 px both boxes hold the slice, so
+memory no longer rules out the `c6id.16xlarge` and the $190 it saves. That row
+became affordable when the guard began summing a slice's shard depths instead
+of multiplying its worst shard by the slot count. No run has tested a 128 GiB box
+since, and the `m6id.16xlarge` is the box the one staged run measured, so it
+stays the recorded configuration.
 
 ### The memory model was four times low
 
@@ -794,7 +849,8 @@ The surplus is the read. GDAL decodes whole blocks out of a tiled source and
 `odc.stac` assembles them into the target array, and the five named arrays do
 not cover that intermediate. Which allocation holds it is unverified, because
 this document profiles none. So the model is the five named arrays plus
-measured read overhead, and 15 bounds every point of all six committed sweeps.
+measured read overhead, and 15 bounds all 36 points of the eight committed
+sweeps.
 
 Erring high is the safe direction: over-reserving costs worker slots an
 operator can add back, and under-reserving cost a fleet instance its workers.
@@ -802,7 +858,7 @@ operator can add back, and under-reserving cost a fleet instance its workers.
 **What made 13 look safe for a week.** Two things, and both are properties of
 how it was measured rather than of the pipeline. The synthetic fixture writes
 one untiled raster at the shard's own edge and reads it whole, so it never
-allocates the intermediate, and it fits 12.67 to 13.20. And a staged sweep that
+allocates the intermediate, and it fits 12.68 to 12.97. And a staged sweep that
 stops shallow agrees with 13 as well, because the 0.25 GiB fixed term still
 covers the gap below about 280 scenes. The first staged sweep reached 100
 scenes. Every fleet shard runs 195 to 820.
@@ -822,20 +878,21 @@ MEASURED against 100 real staged scenes of `S30W065`, at four shard edges:
 
 | source | 256 px | 360 px | 512 px | 1024 px |
 |---|---|---|---|---|
-| synthetic | | 13.20 | 12.67 | |
-| staged COGs | 14.75 | 14.55 | 14.01 | 11.20 |
+| synthetic | | 12.97 | 12.68 | |
+| staged COGs | 14.48 | 13.59 | 13.25 | 10.47 |
 
-The model at 13 bytes plus 0.25 GiB bounds all 40 points, staged and
-synthetic. It is the slope that is not tightly determined: a repeat of the
-512 px staged sweep moved it from 14.45 to 14.01, and the 1024 px figure sits
+The model at 15 bytes plus 0.25 GiB bounds all 36 points of the eight committed
+sweeps, staged and synthetic, and under-predicts none of them. It is the slope
+that is not tightly determined: these shallow staged fits sit 0.9 to 1.2 bytes
+below the deep staged sweeps at the same two edges, and the 1024 px figure sits
 below every other. Real scenes make shard edge and how much data falls in the
 shard move together, which is the same confound the timing mode documents in
 the other direction.
 
-So the fixture understates the slope by something between nothing and 15%, and
-the margin absorbs it. A staged sweep deep enough to reach the 199 to 971
-scenes in a fleet shard would measure the slope where it matters. That costs
-about 34 GB of requester-pays egress, against the 8.5 GB spent here.
+So the fixture understates the slope by 10% at 360 px and 12% at 512, measured
+against the deep sweeps, and the margin absorbs it. Read these four as the
+shallow end they are. They stop at 100 scenes. Every fleet shard runs 195 to
+820, a range only the deep sweep above reaches.
 
 Each point runs in a fresh interpreter, and it has to. glibc does not return
 freed arenas to the kernel promptly, so a second shard measured in the same
@@ -856,22 +913,24 @@ a larger number and launched anyway.
 `worker_memory_guard` refuses it, and it runs before the first GET the way
 `staging.disk_guard` does, so a configuration that cannot fit does not buy its
 objects first. The demand is the sum of the slice's shard depths, deepest first
-up to the slot count, plus the client's two full-tile arrays, which are
-`uint16` of p95 and twelve `uint8` monthly counts: 14 bytes an output pixel, or
-4.2 GiB for an 18,000 px tile. The refusal states the demand, the machine's
-total, and the shard edge that would fit. `--force` spends the margin.
+up to the slot count, plus the client's arrays, which are `uint16` of p95,
+twelve `uint8` monthly counts, and the two boolean masks: 16 bytes an output
+pixel, or 4.83 GiB for an 18,000 px tile. The refusal states the demand, the
+machine's total, and the shard edge that would fit. `--force` spends the margin.
 
 It summed nothing at first. It multiplied the worst shard by the slot count,
-and MEASURED on the deep slice of S30W065 that over-reserves by **2.77x**:
+which on the deep slice of S30W065 at 360 px over-reserves by **3.1x**. The two
+budget rows are recomputed here against the 15-byte model now in the code, and
+the third is the measurement they are checked against:
 
 | | GiB |
 |---|---|
-| 64 x worst shard | 102.6 |
-| sum of the 64 actual depths | 64.0 |
+| 64 x worst shard, plus client | 115.5 |
+| sum of the 64 actual depths, plus client | **71.4** |
 | simultaneous peak, sampled at 0.5 s | **37.0** |
 
 The slice runs 203 to 820 scenes deep with a median of 401, so the worst shard
-is not what the other 63 workers hold. Summing removes 38 of the 66 GiB of
+is not what the other 63 workers hold. Summing removes 44 of the 78 GiB of
 over-reservation and needs no new measurement, because `work_idx` already
 carries every depth.
 
@@ -929,9 +988,16 @@ uv run shard_lst_p95.py --tile S30W065 --shard 512 --workers 64 \
 ```
 
 ```
-  worst shard: 2.80 GiB, 183.1 GiB across 64 slots   OVER by 55.1 GiB
-REFUSED on a 128 GiB machine
+  slice: min 198  p50 412  max 802   <- what this machine holds
+  worst shard: 3.19 GiB, 820.7 GiB across 256 slots   OVER by 692.7 GiB
+REFUSED on a 128 GiB machine:
+  64 shards at 512 px, 198 to 802 scenes deep, need 135.2 GiB between them,
+  plus 4.83 GiB of client output. That is 140.0 GiB and this machine has
+  128.0 GiB. Use --shard 485 or smaller, drop --workers, or pass --force.
 ```
+
+`--workers 64` is 64 worker processes at the default four threads each, so the
+naive line counts 256 slots. The guard counts the 64 shards the slice holds.
 
 That is the configuration that killed the `c6id.16xlarge`, refused from a
 laptop before an instance starts.
@@ -949,34 +1015,50 @@ runs one slice, so that slice's worst shard sets the memory it needs. On S30W065
 | whole tile | min 195, p50 408, p95 802, **max 820** |
 
 So the instance run that produced the figures above took a slice at half the
-tile's worst depth. A fleet machine at 360 px faces 102.6 GiB, not the 56.6 the
-lighter slice reported, and that is the number to size an instance from.
-`m6id.16xlarge` holds it with 2.4x to spare. A 512 px shard at the same depth
-needs 186.8 GiB, which fits that box and not a 128 GiB one.
+tile's worst depth. A fleet machine at 360 px faces 71.4 GiB, not the 59.7 the
+lighter slice needs, and that is the number to size an instance from.
+`m6id.16xlarge` holds it with 3.6x to spare. A 512 px shard at the same depth
+needs 140.0 GiB, which fits that box and not a 128 GiB one.
 
-The number was already in this document. A full-tile run printed
+The number was already in this document. The quarter-tile run printed
 `memory 95.93 GiB / 102.40 GiB (94%)` across 64 workers, which is 1.50 GiB
 each, against a budget function reporting 0.39. It was written up as a tuning
 result.
 
-### Shard size is now a memory decision
+### Shard size is a memory decision once staging is on
 
 It used to be a request-cost lever worth 2.8x. Staging removed that: one GET
 per object whatever the shard edge. What remains is memory, which falls with
 the square of the edge, against compute, which does not.
 
+Unstaged the lever is still there, and a smaller shard pulls it the wrong way.
+MEASURED from the inventory by `--dry-run --search-in-dry-run` on `S30W065`: the
+2,500-shard plan at 360 px makes **1,264,988** shard-scene reads against
+**690,659** for the 1,296-shard plan at 512 px. That is 265 opens per object
+against 145, and unstaged every open is billed and pays a fresh round trip. So a
+360 px shard with `--no-stage` takes the memory-optimised edge and the unstaged
+request bill together, which is the worst of the four pairings.
+
 MEASURED by `measure_shard_memory.py --mode timing` over ten staged scenes:
 
-| shard | s/Mpx-scene | vs 512 px | worst shard at 971 scenes |
+| shard | s/Mpx-scene | vs 512 px | worst shard at 820 scenes |
 |---|---|---|---|
-| 256 px | 2.768 | +36% | 0.68 GiB |
-| **360 px** | **2.277** | **+12%** | **1.77 GiB** |
-| 448 px | 2.056 | +1% | 2.65 GiB |
-| 512 px | 2.030 | — | 3.33 GiB |
+| 256 px | 2.768 | +36% | 1.00 GiB |
+| **360 px** | **2.277** | **+12%** | **1.73 GiB** |
+| 448 px | 2.056 | +1% | 2.55 GiB |
+| 512 px | 2.030 | — | 3.25 GiB |
+
+The seconds are measured. The memory column is the 15-byte model at the deepest
+shard the inventory gives S30W065, which is 820 scenes.
+
+Read the +12% as a staged figure. A local open costs a file handle and a header
+parse, so spreading that over fewer pixels moves the total by 12%. An unstaged
+open costs a round trip and about four ranged GETs, and the 360 px plan issues
+1.83x as many of them.
 
 Read the penalty as an upper bound. These ran at ten scenes per shard, where
 the fixed per-shard cost is amortised over the least work; a fleet shard
-carries 199 to 971. The measurement needs real scenes, because a synthetic
+carries 195 to 820. The measurement needs real scenes, because a synthetic
 raster generated at the shard's own edge makes shard size and source layout
 move together and reports a 4.7x cliff at 512 px that does not exist.
 
@@ -1193,10 +1275,15 @@ columns run 769 and the unstaged column is restated on the same basis.
 | **total, spot** | **$1,952 - $1,989** | **$377 - $420** |
 
 Read the EC2 rows as DERIVED. Measurement supplies the per-tile compute and the
-tile count. The tail is a bracket, and the staged column adds 60 to 120 s per
-tile for the fetch, and prices the disk it writes to. The S3 rows are
-arithmetic over `tile_scene_rows`: 154.9 opens x 2 bands x 4.77 GETs unstaged,
+tile count. The tail is a bracket, and the staged column adds the 302 s a mean
+tile takes to fetch at the measured 922 MB/s, and prices the disk it writes to.
+The S3 rows are arithmetic over `tile_scene_rows`: 154.9 opens x 2 bands x 4.77 GETs unstaged,
 against 2 GETs staged.
+
+Per tile, the staged column is **$1.68 to $1.87** and **26 to 29 minutes** on
+one `m6id.16xlarge`. Divide either total by 769; the minutes follow from the
+EC2 line at $3.7968/hr. Quote these two for one tile. The headline's $4.28 and
+4.8 minutes describe four unstaged machines working on one tile together.
 
 Staging cuts the total by **1.7x to 1.9x on demand and 4.6x to 5.3x on spot**.
 EC2 rises, on a larger instance, at a smaller shard, and for longer, and still
@@ -1208,7 +1295,7 @@ cannot be extrapolated: 25 shards took 59.3 s and the next 39 took 6.6,
 which is page-cache warmup on the staged files rather than a rate.
 
 Removing the per-tile search saves 38.1 s x 895 tiles, or 9.5 instance-hours.
-That is $26 on-demand and $9 spot, against an S3 line of $1,822. The search was
+That is $26 on-demand and $9 spot, against an S3 line of $1,718. The search was
 never the money. It was 895 dependencies on a public service, one per machine,
 each able to fail a run that had already paid for its instance.
 
@@ -1218,9 +1305,10 @@ than six times the spot compute. Shard size moves them by a factor of 2.8, and
 staging moves them by a factor of 738, so shard size is no longer the lever
 worth spending memory on.
 
-The whole session, across five EC2 sessions, eight completed department runs,
-one 200-scene quarter-tile smoke run, and two quarter-tile attempts that never
-finished, cost about **$4.45**.
+The department-scale phase, across five EC2 sessions, eight completed
+department runs, one 200-scene quarter-tile smoke run, and two quarter-tile
+attempts that never finished, cost about **$4.45**. The full-tile fleet cost
+**$4.28** on top of it. The staged and memory-sweep instances are unpriced.
 
 ### How to price a run
 
@@ -1916,12 +2004,15 @@ records the same count for one that would rather read a file.
 
 - **No fleet has run against the precomputed inventory.** Every parity check
   passes, including a fixed shard loaded from both paths to an identical P95
-  raster, but the largest run through the new path is six scenes.
+  raster. The largest run through the new path is one `m6id.16xlarge`, which
+  staged 999 scenes and computed 64 shards of one tile.
 - **The 895 tiles have never been priced against a real run.** The per-tile
   compute is measured and the tile count is measured. Their product is not.
 - **One staged run has completed, over 64 shards of one tile.** It measured
-  the staging rate, confirmed the memory model at 64 workers, and wrote a
-  composite. It did not run a whole tile, and no fleet has run at all. Three
+  the staging rate and wrote a composite. It sampled no worker RSS, so it
+  confirmed nothing about the memory model: the 56.6 GiB it printed is
+  `shard_bytes` output. A later instance run sampled 35.99 GiB across 64
+  workers. Neither ran a whole tile, and no fleet has run at all. Three
   `c6id.16xlarge` attempts came before it and produced no composite: the first
   wrote its results to a serial console that AWS discards on termination, the
   second stopped on a missing `pyarrow`, and the third lost its workers to the
@@ -1929,26 +2020,26 @@ records the same count for one that would rather read a file.
 - **A worker aborting is survivable, and the panic is not the risk.** This
   entry used to say frisky aborts workers at teardown and leaves the exit code
   unknown. Both halves were wrong, and the section below has the measurements.
-- **The memory model's slope on real COGs is not tightly determined.** Forty
-  points across four shard edges and two sources, and the model bounds every
-  one. The synthetic sweeps at 360 and 512 px fit 13.20 and 12.67 bytes per
-  pixel-scene. The staged sweeps on 100 real scenes fit 14.75, 14.55, 14.01 and
-  11.20 at 256, 360, 512 and 1024 px, and a repeat at 512 px moved 14.45 to
-  14.01. Real scenes make shard edge and data coverage move together, so the
-  scatter is partly the fixture. A staged sweep deep enough to reach the 199 to
-  971 scenes in a fleet shard would settle it, at about 34 GB of requester-pays
-  egress. Every sweep is EPSG:4326, so nothing reprojects. A UTM source warping
-  into the output grid could hold arrays this does not count.
+- **The memory model's slope on real COGs is not tightly determined.** Thirty-six
+  points across four shard edges and two sources, and the model at 15 bytes
+  bounds every one. The synthetic sweeps at 360 and 512 px fit 12.97 and 12.68
+  bytes per pixel-scene. The shallow staged sweeps on 100 real scenes fit 14.48,
+  13.59, 13.25 and 10.47 at 256, 360, 512 and 1024 px, against 14.47 and 14.44
+  from the deep staged sweeps. Real scenes make shard edge and data coverage move
+  together, so the scatter is partly the fixture. Only the two deep sweeps reach
+  the 195 to 820 scenes a fleet shard runs, and they cover two edges of the four.
+  Every sweep is EPSG:4326, so nothing reprojects. A UTM source warping into the
+  output grid could hold arrays this does not count.
 - **No fleet run has measured worker RSS yet.** `memory_sampler.py` is wired
   into `shard_lst_p95.py` and writes `memory.csv` and `workers_rss_peak_gib` on
-  every run, but the instance runs recorded in this document predate it. Until
-  one run reports it, the only independent check on the model at 64 workers is
-  frisky's 1.50 GiB a worker on the full-tile run.
-- **The staging phase is the widest term in the cost.** The live check fetched
-  12 objects. A mean tile needs 3,445 scenes and
-  270 GB, and the 90 to 270 s bracket assumes 3.0 to 1.0 GB/s of combined
-  network and disk. That factor of three is the difference between $999 and
-  $1,287 of EC2 across 895 tiles. One slice measures it.
+  every run. One 64-shard instance run has reported it, 35.99 GiB across 64
+  workers, which frisky's spans put at 35.87. No whole tile and no fleet has been
+  measured, and the other check on the model at 64 workers is frisky's 1.50 GiB a
+  worker on the quarter-tile run.
+- **The staging rate rests on one slice of one instance.** An `m6id.16xlarge`
+  staged 1,998 objects, 78.9 GiB in 91.9 s, or 922 MB/s. A mean tile writes about
+  278 GB, or 302 s, at that rate. No other instance type and no whole tile has
+  staged, and the fleet's staging term is that one measurement scaled.
 - **The per-tile scene count in `Cost` is not the inventory's.** The 1,094.8 s
   of compute was measured against the 3,910 scenes Earth Search returned.
   The artifact assigns 4,776 to `S30W065` and 3,445 to a mean tile, so the
@@ -1985,8 +2076,7 @@ records the same count for one that would rather read a file.
 - **The request count covers one area at one date range.** Requests per band
   read follows from where the shard window falls on the internal block grid, so
   a different grid origin or resolution can move it.
-- **Nobody has run past 64 cores per instance.** The prediction that a 384 px
-  shard edge keeps the working set inside RAM has no measurement behind it.
+- **Nobody has run past 64 cores per instance.**
 - **Chunk 512 versus 256 remains unresolved** at department scale, inside the
   9.6% noise floor.
 - **The department tuning covers one department at 711 scenes.** A different
@@ -2046,15 +2136,18 @@ plan.
 
 **S3 GET requests cost $2,067 across 895 tiles.** That multiplied 895 by the
 $2.31 measured on `S30W065`, which carries 4,776 scenes against a mean of 3,445.
-The global line scales on `tile_scene_rows`, the 3,083,129 tile-scene pairs the
-inventory holds, and comes to **$1,822**. The dense tile was the one that had
-been run, and the arithmetic used it as the mean without saying so.
+The global line scales on `tile_scene_rows`. Over the 3,083,129 tile-scene pairs
+the inventory holds it comes to $1,822. Over the 2,905,875 with a thermal band,
+which is what the 769 launched tiles read, it comes to **$1,718**, and that is
+the figure `Cost` uses. The dense tile was the one that had been run, and the
+arithmetic used it as the mean without saying so.
 
 **Shard size is the largest cost lever in this pipeline.** True when written and
 superseded. Moving from a 512 px shard to 1024 px cuts requests 2.8x and costs
 four times the memory per shard. Staging cuts them 738x and costs disk, which is
-cheaper than memory and does not cap the shard plan. Shard size is now a memory
-decision, not a cost one.
+cheaper than memory and does not cap the shard plan. Shard size is a memory
+decision once staging is on. Unstaged it is still a cost lever, and a 360 px
+shard makes it worse, at 265 opens per object against 145.
 
 **The antimeridian slivers selected 45 open-ocean cells, and the Null Island
 placeholder selected four: `N00E000`, `N00W005`, `S05E000`, `S05W005`.** Both
@@ -2087,9 +2180,10 @@ of S3.** Withdrawn. The 520 has no derivation in this repository or in
 generated: 895 cells inside +/-60 degrees intersect Natural Earth 10m land
 buffered by 25 km, which is the geometry the pixel mask uses. The nearest
 figure with a derivation behind it was the 700-tile frozen set in
-`landsat_lst.tiling`, built from Natural Earth 110m without a buffer. Re-priced
-at 895 tiles, on-demand EC2 is $781 to $903 and S3 is $2,067 at a 512 px shard.
-The per-tile rates are unchanged and still measured; only the multiplier moved.
+`landsat_lst.tiling`, built from Natural Earth 110m without a buffer. The
+multiplier is now the 769 tiles that hold a thermal band, and `Cost` prices them.
+The $2,067 this entry once carried is withdrawn in the entry above. The per-tile
+rates are unchanged and still measured; only the multiplier moved.
 
 **Every tile VM pays a 38.1 s catalogue search.** No longer true, and it was
 never the expensive part. Removing it saves 9.5 instance-hours across 895
