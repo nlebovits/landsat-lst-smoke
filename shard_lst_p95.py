@@ -46,6 +46,7 @@ import time
 from pathlib import Path
 
 import aster_ged
+import destripe
 import item_table
 import masks
 import staging
@@ -391,7 +392,12 @@ def worker_memory_guard(
 
 
 def rehearse_shard(
-    shard: Shard, item_dicts, crs: str, resolution: float, read_threads: int = 4
+    shard: Shard,
+    item_dicts,
+    crs: str,
+    resolution: float,
+    read_threads: int = 4,
+    correction=None,
 ) -> dict:
     """Same contract as process_shard, with synthetic pixels and no S3.
 
@@ -416,18 +422,34 @@ def rehearse_shard(
         "lst_p95": dn,
         "qa_count": qa,
         "n_scenes": n,
+        "n_rejected": 0,
         "load_s": 0.0,
         "reduce_s": 0.0,
     }
 
 
 def process_shard(
-    shard: Shard, item_dicts, crs: str, resolution: float, read_threads: int = 4
+    shard: Shard,
+    item_dicts,
+    crs: str,
+    resolution: float,
+    read_threads: int = 4,
+    correction=None,
 ) -> dict:
     """Load, mask, reduce and encode one shard. Returns small arrays only.
 
     Deliberately eager: no dask inside. The whole point is that this fits in
     memory, so a lazy graph would only reintroduce the rechunk we are avoiding.
+
+    `correction` is what `destripe.shard_correction` cut out of the tile's prep
+    artifact for this shard: one offset and one keep flag per item, and the
+    cross-fade weights already resampled onto this shard's grid. Passing None
+    composites the pooled percentile this repository built before either
+    correction existed, which is what `--no-destripe --no-feather` asks for.
+
+    Both corrections happen on the stack already in memory. The de-biasing is a
+    scalar subtraction per scene, and the per-path percentiles reduce disjoint
+    slices of the same array, so neither adds a read and neither adds a pass.
     """
     import numpy as np
     import pystac
@@ -467,8 +489,23 @@ def process_shard(
     lst, valid = masked_celsius(data["lwir11"].values, data["qa_pixel"].values)
 
     t1 = time.perf_counter()
-    with np.errstate(all="ignore"):
-        p95 = np.nanpercentile(lst, 95, axis=0)
+    n_rejected = 0
+    pooled = None
+    if correction is None:
+        with np.errstate(all="ignore"):
+            p95 = np.nanpercentile(lst, 95, axis=0)
+    else:
+        labels, n_rejected = destripe.apply_to_stack(
+            lst, valid, items, data["time"].values, correction
+        )
+        if correction["emit_pooled"]:
+            pooled = encode_celsius(destripe.pooled_percentile(lst))
+        if correction["paths"]:
+            p95 = destripe.feathered_percentile(
+                lst, labels, correction["paths"], correction["weight"]
+            )
+        else:
+            p95 = destripe.pooled_percentile(lst)
     t_reduce = time.perf_counter() - t1
 
     months = data["time"].dt.month.values
@@ -479,17 +516,21 @@ def process_shard(
             qa_count[m - 1] = np.minimum(valid[sel].sum(axis=0), 255).astype("uint8")
 
     dn_out = encode_celsius(p95)
-    return {
+    out = {
         "row": shard.row,
         "col": shard.col,
         "y0": shard.y0,
         "x0": shard.x0,
         "lst_p95": dn_out,
         "qa_count": qa_count,
-        "n_scenes": int(lst.shape[0]),
+        "n_scenes": int(lst.shape[0]) - n_rejected,
+        "n_rejected": n_rejected,
         "load_s": t_load,
         "reduce_s": t_reduce,
     }
+    if pooled is not None:
+        out["lst_p95_pooled"] = pooled
+    return out
 
 
 def shard_task(
@@ -499,6 +540,7 @@ def shard_task(
     crs: str,
     resolution: float,
     read_threads: int = 4,
+    correction=None,
 ) -> dict:
     """What the client submits. Resolves the scene table inside the worker.
 
@@ -514,7 +556,12 @@ def shard_task(
     a real cluster: 5.3 to 6.1 ms per submit against 0.024 to 0.031 ms.
     """
     return process_shard(
-        shard, item_table.select(table_path, indices), crs, resolution, read_threads
+        shard,
+        item_table.select(table_path, indices),
+        crs,
+        resolution,
+        read_threads,
+        correction,
     )
 
 
@@ -525,13 +572,15 @@ def rehearse_task(
     crs: str,
     resolution: float,
     read_threads: int = 4,
+    correction=None,
 ) -> dict:
     """The rehearsal counterpart. It reads no table, because it reads nothing.
 
     `rehearse_shard` only ever used `len(item_dicts)`, and `len(indices)` is the
-    same number.
+    same number. A rehearsal never carries a correction, because `--rehearse`
+    reads no prep file, but the signature matches so one driver submits both.
     """
-    return rehearse_shard(shard, indices, crs, resolution, read_threads)
+    return rehearse_shard(shard, indices, crs, resolution, read_threads, correction)
 
 
 def resolve_area(args):
@@ -649,6 +698,7 @@ def drive_shards(
     assemble,
     marks,
     t0,
+    correction_of=None,
 ):
     """Submit every shard, then assemble results as they return.
 
@@ -662,6 +712,12 @@ def drive_shards(
     Rust panic across the PyO3 boundary at 90% completion, taking 290 finished
     shards with it.
 
+    `correction_of(shard, indices)` is the seam correction for one shard, or
+    None to composite pooled. It is called inside the submit comprehension so
+    each shard's weight window is serialised and released rather than held for
+    the whole tile. The weights are the one part of a task payload that cannot
+    move into the table: they are cut to the shard's own window.
+
     Returns:
         The per-shard stats in completion order, and the seconds spent inside
         `client.submit`.
@@ -674,11 +730,18 @@ def drive_shards(
 
     t_submit = time.perf_counter()
     marks["first_submit_s"] = t_submit - t0
+    def task_args(shard, idx):
+        """The submitted argument list, with the correction only if there is one.
+
+        A run without `--tile-prep` submits what it always submitted. The
+        correction is the one argument that cannot move into the scene table,
+        because it is cut to the shard's own window.
+        """
+        base = (shard, table_path, idx, crs, res, read_threads)
+        return base if correction_of is None else (*base, correction_of(shard, idx))
+
     completed.update(
-        [
-            client.submit(fn, shard, table_path, idx, crs, res, read_threads)
-            for shard, idx in work_idx
-        ]
+        [client.submit(fn, *task_args(shard, idx)) for shard, idx in work_idx]
     )
     submit_s = time.perf_counter() - t_submit
     marks["last_submit_s"] = time.perf_counter() - t0
@@ -761,6 +824,40 @@ def no_thermal_coverage(args, tile_id, bbox, n_scenes, dropped, run_provenance) 
     print("              nothing to composite; summary written, no parts")
     print(f"artifacts     {args.out_dir.resolve()}")
     return 0
+
+
+def no_scene_survives_destriping(args, tile_id, prep, run_provenance) -> int:
+    """Every scene of the tile failed the offset rule. Stop rather than ship.
+
+    An empty composite is not a tile with no data. It is a tile whose whole
+    scene list was found untrustworthy, and writing it as nodata would present
+    that as an observation gap. `nlebovits/landsat-lst` takes the same position
+    one level down: prefer honest omission over a questionable correction, and
+    prefer a stopped run over an omission that looks like ground truth.
+
+    The cap is the first thing to look at. It was calibrated on mid-latitude
+    cropland at a 21.8% rejected share, and a tile at 100% is either somewhere
+    that calibration does not describe or a tile whose prep pass went wrong.
+    """
+    summary = {
+        "status": "no-scene-survives-destriping",
+        "tile": tile_id,
+        "n_scenes": len(prep.offset),
+        "max_offset_c": args.max_offset_c,
+        "offsets": prep.meta.get("offsets"),
+        "inventory": run_provenance,
+    }
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    (args.out_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, default=str)
+    )
+    print(
+        f"destripe      all {len(prep.offset):,} scenes of {tile_id} fail the "
+        f"{args.max_offset_c:g} C cap or the sparse floor"
+    )
+    print(f"              {prep.meta.get('offsets')}")
+    print("              nothing to composite; summary written, no parts")
+    return 1
 
 
 def check_mask_inputs(args) -> dict | None:
@@ -1064,7 +1161,47 @@ def parse_args(argv=None):
         action="store_true",
         help="also hit STAC, to report real scenes per shard",
     )
+    p.add_argument(
+        "--tile-prep",
+        type=Path,
+        default=None,
+        help="directory holding tile-prep.npz and tile-prep.json, written by "
+        "tile_prep.py. Without it the run composites the pooled percentile "
+        "and the WRS seam stays in the output",
+    )
+    p.add_argument(
+        "--no-destripe",
+        action="store_true",
+        help="keep every scene at its own baseline. Reads the prep file for "
+        "the swath geometry and ignores the offsets",
+    )
+    p.add_argument(
+        "--no-feather",
+        action="store_true",
+        help="one pooled percentile instead of one per WRS path",
+    )
+    p.add_argument(
+        "--max-offset-c",
+        type=float,
+        default=destripe.DESTRIPE_MAX_OFFSET_C,
+        help="discard a scene whose absolute offset exceeds this. The prep "
+        "file carries the estimate and this decides on it, so sweeping the cap "
+        "costs a read of that file rather than another pass over the tile",
+    )
+    p.add_argument(
+        "--emit-pooled",
+        action="store_true",
+        help="also write the pooled percentile beside the product, as a "
+        "baseline built from identical scenes and identical reads. It costs a "
+        "second reduction over the stack, which is not free on this path",
+    )
     args = p.parse_args(argv)
+    if args.tile_prep is None and (args.no_destripe or args.no_feather):
+        raise SystemExit(
+            "--no-destripe and --no-feather turn off corrections that need "
+            "--tile-prep to be on at all. Without --tile-prep the run is "
+            "already pooled and un-de-striped."
+        )
     # Refuse an unreadable source here rather than after the shard plan is
     # printed. `configure_read_env` runs late enough that a run could get a
     # full budget report before learning its source cannot read a scene.
@@ -1099,6 +1236,126 @@ def mask_rule(args, counts, ged_provenance=None) -> dict | None:
     return rule
 
 
+def load_tile_prep(args, tile_id: str):
+    """The prep artifact, checked against the tile this run is building.
+
+    Returns None when the run was not given one, which composites pooled.
+
+    Raises:
+        SystemExit: if the artifact describes a different tile or a layout this
+            version does not know. Compositing against the wrong tile's offsets
+            would finish and look ordinary.
+    """
+    if args.tile_prep is None:
+        return None
+    prep = destripe.load_prep(args.tile_prep)
+    if prep.tile != tile_id:
+        raise SystemExit(
+            f"{args.tile_prep} was written for tile {prep.tile}, and this run "
+            f"is building {tile_id}. Run tile_prep.py --tile {tile_id}."
+        )
+    if prep.meta.get("schema_version") != tile_prep_schema_version():
+        raise SystemExit(
+            f"{args.tile_prep} carries schema version "
+            f"{prep.meta.get('schema_version')} and this version reads "
+            f"{tile_prep_schema_version()}. Rebuild it."
+        )
+    if prep.pixels_per_degree != args.pixels_per_degree:
+        raise SystemExit(
+            f"{args.tile_prep} was built on a 1/{prep.pixels_per_degree} degree "
+            f"grid and this run is on 1/{args.pixels_per_degree}. The weights "
+            f"would land on the wrong ground."
+        )
+    return prep
+
+
+def tile_prep_schema_version() -> int:
+    """Read lazily, because `tile_prep` imports this module."""
+    import tile_prep
+
+    return tile_prep.PREP_SCHEMA_VERSION
+
+
+def shard_correction_for(args, prep, shard: Shard, item_dicts):
+    """One shard's slice of the prep artifact, or None to composite pooled."""
+    if prep is None:
+        return None
+    return destripe.shard_correction(
+        prep,
+        item_dicts,
+        shard.bbox,
+        (shard.ny, shard.nx),
+        pixels_per_degree=args.pixels_per_degree,
+        max_offset_c=args.max_offset_c,
+        debias=not args.no_destripe,
+        feather=not args.no_feather,
+        emit_pooled=args.emit_pooled,
+    )
+
+
+def correction_rule(args, prep) -> dict | None:
+    """The seam correction a part was built under, for a merge to compare.
+
+    None means the pooled percentile with every scene at its own baseline,
+    which is itself a rule a merge has to see. One un-de-striped part beside
+    three de-striped ones is a raster carrying the seam in one corner only, and
+    nothing in the pixels says which corner.
+    """
+    if prep is None:
+        return None
+    return {
+        "prep_schema_version": prep.meta.get("schema_version"),
+        "prep_tile": prep.tile,
+        "prep_bbox": list(prep.bbox),
+        "prep_factor": prep.meta.get("prep_factor"),
+        "swath_factor": prep.swath_factor,
+        "weight_factor": prep.meta.get("weight_factor"),
+        "swath_quad_share": prep.meta.get("swath_quad_share"),
+        "anomaly_bin_c": prep.meta.get("anomaly_bin_c"),
+        "min_offset_samples": prep.meta.get("min_offset_samples"),
+        "max_offset_c": None if args.no_destripe else args.max_offset_c,
+        "destripe": not args.no_destripe,
+        "feather": not args.no_feather,
+        "paths": list(prep.paths),
+    }
+
+
+def check_part_rules(metas) -> None:
+    """Stop a merge whose parts were built under two different rules.
+
+    Both rules decide pixel values, and neither leaves a mark a reader could
+    find in the raster. Two machines that masked the same tile differently
+    produce one output that no single rule describes, and one un-de-striped
+    part beside three de-striped ones carries the WRS seam in one corner with
+    nothing in the pixels to say which corner.
+
+    Raises:
+        SystemExit: if any part disagrees with another on either rule. The
+            message names the rules and how to rebuild the odd slice.
+    """
+    for key, verb, remedy in (
+        (
+            "mask_rule",
+            "masked",
+            "Rerun the disagreeing slices with the same --numobs-uri, "
+            "--land-geometry-uri, and --no-output-mask setting.",
+        ),
+        (
+            "correction_rule",
+            "corrected",
+            "Rerun the disagreeing slices against the same --tile-prep, with "
+            "the same --max-offset-c, --no-destripe, and --no-feather setting.",
+        ),
+    ):
+        rules = {json.dumps(m.get(key), sort_keys=True) for m in metas}
+        if len(rules) > 1:
+            joined = "\n  ".join(sorted(rules))
+            raise SystemExit(
+                f"the parts were {verb} under {len(rules)} different rules, so "
+                f"no one rule describes the merged tile:\n  {joined}\n{remedy}"
+            )
+
+
 def merge_parts(dirs, out_dir: Path, args) -> int:
     """Assemble one tile from the parts written by --shard-slice runs.
 
@@ -1125,15 +1382,7 @@ def merge_parts(dirs, out_dir: Path, args) -> int:
     for f in parts:
         meta_path = Path(f).parent / "part-meta.json"
         metas[meta_path] = json.loads(meta_path.read_text())
-    rules = {json.dumps(m.get("mask_rule"), sort_keys=True) for m in metas.values()}
-    if len(rules) > 1:
-        joined = "\n  ".join(sorted(rules))
-        raise SystemExit(
-            f"the parts were masked under {len(rules)} different rules, so no "
-            f"one rule describes the merged tile:\n  {joined}\n"
-            f"Rerun the disagreeing slices with the same --numobs-uri, "
-            f"--land-geometry-uri, and --no-output-mask setting."
-        )
+    check_part_rules(metas.values())
 
     meta = next(iter(metas.values()))
     if not args.no_catalog:
@@ -1444,6 +1693,34 @@ def main(argv=None) -> int:  # noqa: C901
     # rehearsal fakes them, so nothing here converts a pystac object.
     item_dicts = items
 
+    # Before the first GET, like the mask and the disk guard. A prep file for
+    # the wrong tile or the wrong grid is a run that finishes and looks
+    # ordinary, so it is refused here rather than discovered in the pixels.
+    prep = None if args.rehearse else load_tile_prep(args, tile_id)
+    if prep is not None:
+        kept = destripe.keep_mask(
+            np.array([prep.offset.get(s, np.nan) for s in prep.offset]),
+            np.array([prep.n_valid.get(s, 0) for s in prep.offset]),
+            floor=destripe.DESTRIPE_MIN_PREP_SAMPLES,
+            max_offset_c=args.max_offset_c,
+        )
+        print(
+            f"prep          {len(prep.paths)} WRS paths, "
+            f"{1.0 - kept.mean():.1%} of scenes rejected at "
+            f"{args.max_offset_c:g} C"
+        )
+        print(
+            f"              destripe {'off' if args.no_destripe else 'on'}, "
+            f"feather {'off' if args.no_feather else 'on'}"
+        )
+        if not args.no_destripe and not kept.any():
+            return no_scene_survives_destriping(args, tile_id, prep, run_provenance)
+    elif not args.rehearse:
+        print(
+            "prep          none: pooled percentile, no scene offsets. The WRS "
+            "seam stays in the output"
+        )
+
     # L2SR products carry no thermal band, load as fill, and reach neither the
     # percentile nor the monthly counts. Dropping them is output-neutral and
     # buys back a layer on the time axis of every shard they touch, which is
@@ -1587,6 +1864,10 @@ def main(argv=None) -> int:  # noqa: C901
 
     lst_out = np.zeros((height, width), dtype="uint16")
     qa_out = np.zeros((12, height, width), dtype="uint8")
+    # The only baseline built from identical scenes, identical worker code, and
+    # identical reads. It rides the same load rather than a second run, so the
+    # difference between the two rasters is the correction and nothing else.
+    pooled_out = np.zeros((height, width), dtype="uint16") if args.emit_pooled else None
 
     def assemble(future) -> dict:
         """One shard into the output arrays, then dropped."""
@@ -1599,7 +1880,14 @@ def main(argv=None) -> int:  # noqa: C901
         lst_out[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = a
         q = res_d["qa_count"]
         qa_out[:, y0 : y0 + q.shape[1], x0 : x0 + q.shape[2]] = q
-        stat = {k: res_d[k] for k in ("row", "col", "n_scenes", "load_s", "reduce_s")}
+        if pooled_out is not None and "lst_p95_pooled" in res_d:
+            pooled = res_d["lst_p95_pooled"]
+            pooled_out[y0 : y0 + pooled.shape[0], x0 : x0 + pooled.shape[1]] = pooled
+            del pooled
+        stat = {
+            k: res_d.get(k)
+            for k in ("row", "col", "n_scenes", "n_rejected", "load_s", "reduce_s")
+        }
         del res_d, a, q
         peak["rss"] = max(peak["rss"], proc.memory_info().rss / GIB)
         return stat
@@ -1617,6 +1905,13 @@ def main(argv=None) -> int:  # noqa: C901
             assemble=assemble,
             marks=marks,
             t0=t0,
+            correction_of=(
+                None
+                if prep is None
+                else lambda sh, idx: shard_correction_for(
+                    args, prep, sh, [item_dicts[i] for i in idx]
+                )
+            ),
         )
     except BaseException:
         # Without this the process hangs on a live cluster where before a
@@ -1802,6 +2097,10 @@ def main(argv=None) -> int:  # noqa: C901
         tag = f"{sh.y0}_{sh.x0}"
         payload["lst_" + tag] = lst_out[sh.y0 : sh.y0 + sh.ny, sh.x0 : sh.x0 + sh.nx]
         payload["qa_" + tag] = qa_out[:, sh.y0 : sh.y0 + sh.ny, sh.x0 : sh.x0 + sh.nx]
+        if pooled_out is not None:
+            payload["pooled_" + tag] = pooled_out[
+                sh.y0 : sh.y0 + sh.ny, sh.x0 : sh.x0 + sh.nx
+            ]
     if payload:
         # numpy declares savez_compressed(**kwds: ArrayLike) alongside a bool
         # allow_pickle, so a dict of arrays collides with the named parameter.
@@ -1823,6 +2122,11 @@ def main(argv=None) -> int:  # noqa: C901
                     # same tile differently produce one raster that no single
                     # rule describes.
                     "mask_rule": mask_rule(args, mask_counts, ged_provenance),
+                    # What removed the WRS seam from this part, compared the
+                    # same way and for the same reason. One un-de-striped part
+                    # beside three de-striped ones carries the seam in one
+                    # corner, and nothing in the pixels says which corner.
+                    "correction_rule": correction_rule(args, prep),
                     # The merge turns these into the item's datetime interval,
                     # so a catalog states the window its pixels came from.
                     "start": args.start,
@@ -1831,9 +2135,7 @@ def main(argv=None) -> int:  # noqa: C901
                 indent=2,
             )
         )
-        print(
-            f"part written  {args.out_dir / 'part-000.npz'} ({len(payload) // 2} shards)"
-        )
+        print(f"part written  {args.out_dir / 'part-000.npz'} ({len(mine)} shards)")
 
     (args.out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, default=str)

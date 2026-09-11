@@ -52,6 +52,8 @@ RUNTIME_MODULES = (
     "staging",
     "item_table",
     "memory_sampler",
+    "destripe",
+    "tile_prep",
 )
 
 #: Modules that mean the mask is about to fetch its own inputs. `land_tiles`

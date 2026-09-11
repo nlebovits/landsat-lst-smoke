@@ -46,6 +46,7 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
+import destripe
 from lst_qa import (
     LST_NODATA_DN,
     LST_OFFSET,
@@ -307,6 +308,7 @@ def build_graph(
     resolution: float,
     time_chunk: int,
     load_chunk: int | None = None,
+    correction=None,
 ):
     """Lazy graph: load, mask, convert, reduce to p95, count valid per month.
 
@@ -366,7 +368,25 @@ def build_graph(
     if load_chunk != chunk:
         lst_c = lst_c.chunk({xdim: chunk, ydim: chunk})
 
-    lst_p95 = lst_c.quantile(0.95, dim="time").astype("float32")
+    # The seam corrections, if this run was given a tile prep artifact. Both
+    # happen on the stack already described by the graph, so neither adds a
+    # source pass: de-biasing is a per-scene scalar, and the per-path quantiles
+    # reduce disjoint subsets of the same rechunked stack. Rechunking a subset
+    # here would give the scheduler two incompatible consumers and it would hold
+    # the whole stack rather than stream it.
+    feathered = None
+    if correction is not None:
+        lst_c, labels, _rejected = destripe.apply_to_stack_xr(lst_c, items, correction)
+        if correction["paths"]:
+            feathered = destripe.feathered_quantile_xr(
+                lst_c, labels, correction["paths"], correction["weight"], (ydim, xdim)
+            )
+
+    if feathered is None:
+        lst_p95 = lst_c.quantile(0.95, dim="time")
+    else:
+        lst_p95 = feathered
+    lst_p95 = lst_p95.astype("float32")
     # quantile leaves a scalar `quantile` coord behind; it would become a
     # stray dimension on the way out.
     lst_p95 = lst_p95.drop_vars("quantile", errors="ignore")

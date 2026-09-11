@@ -2271,12 +2271,46 @@ records the same count for one that would rather read a file.
 - **The department tuning covers one department at 711 scenes.** A different
   area or scene count moves the optimum, because the memory term scales with
   both.
-- **This pipeline does not destripe.** The QA and nodata rules match
-  `nlebovits/landsat-lst` at the pixel level. They are not the destriping
-  algorithm. Scene-offset correction, the monthly climatology it fits, and the
-  temporal sampling rule are all absent here, and the P95 itself is unchanged.
-  A tighter mask removes some of what feeds scene-edge artifacts. It does not
-  make this composite equal to the production one.
+- **The seam corrections are built and have never run on real pixels.**
+  `destripe.py` defines both rules, `tile_prep.py` estimates what they need once
+  per tile, and `shard_lst_p95.py` applies them. 56 unit tests cover the
+  numerics, including the claim the whole design rests on: splitting the tile
+  into blocks does not move a scene offset, so the estimate costs one source
+  traversal rather than the two `nlebovits/landsat-lst` pays. Every one of
+  those tests runs against a synthetic stack. No tile has been prepped, no
+  shard has been composited with a correction on, and `measure_seam.py` has
+  produced no numbers. Until it does, the seam removal and the variance
+  retained quoted here are the sibling repository's measurements on its own
+  grid, not this one's.
+- **The swath comes from the data, and that is a departure.**
+  `nlebovits/landsat-lst` rasterises the imaged parallelogram Earth Search
+  publishes. This repository reads the USGS bulk metadata, whose corner columns
+  describe the product bounding rectangle and exceed the imaged area by about
+  46%, so rasterising the ring would put the cross-fade tens of kilometres off
+  the seam. Counting valid observations per `(path, row)` quad answers the same
+  question from the pixels instead. Comparing the two definitions on real ground
+  is still owed.
+- **Neighbouring tiles can disagree about a swath.** A quad's swath is the
+  ground where at least half its scenes produced a valid observation, and the
+  inventory assigns only some of that quad's scenes to each tile, so the
+  denominator differs across a tile border. The 1 degree
+  prep margin makes the swath edges inside a tile real acquisition edges, and
+  it does not make two tiles agree about an edge near their shared border.
+  `nlebovits/landsat-lst` has the same limit, and no merged pair of tiles has
+  been inspected.
+- **The prep resolution factor has no measurement behind it.** It defaults to
+  4. `nlebovits/landsat-lst` validated factor 2 at a median offset error of
+  0.002 C and rejected factor 4 at a maximum of 0.546 C against a
+  pre-registered 0.5 C gate, on a different grid and a different loader. This
+  repository owes its own sweep.
+- **The 15 C offset cap was calibrated somewhere else.** One mid-latitude
+  agricultural AOI, at a 21.8% rejected share. A humid tropical tile may not
+  behave that way, and the rejected share is the number to watch per tile.
+- **The memory model has not been re-measured with the corrections on.**
+  `SHARD_BYTES_PER_PIXEL_SCENE = 15` should hold or fall: the per-path
+  percentile partitions each path's subset in place, where the pooled one
+  partitions a copy of the whole stack. No measurement backs that reasoning yet,
+  and `worker_memory_guard` refuses runs on the constant.
 - **The mask has been measured on one tile.** S30W065 is interior South
   America, entirely land, with no coastline for the water rule to cut and a
   0.24% gap share. A coastal or tropical tile would exercise both rules
@@ -2458,6 +2492,9 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `profile_lst_p95.py` | the array-graph profiling harness |
 | `lst_qa.py` | the QA, fill, range, and nodata rules both P95 paths call |
 | `cog_catalog.py` | writes the COGs and the Portolan catalog the merge emits |
+| `destripe.py` | the two seam rules both P95 paths call: scene offsets, and the per-path cross-fade |
+| `tile_prep.py` | one coarse pass per tile for the offsets and the swath geometry |
+| `measure_seam.py` | four composites from one load, on a shard that straddles a swath |
 | `stac_window.py` | the composite window, and the cache identity it fixes |
 | `land_tiles.py` | the buffered land geometry and the generated tile list |
 | `masks.py` | the pixel rules: water, and the ASTER emissivity gap |

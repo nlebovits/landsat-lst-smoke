@@ -383,3 +383,127 @@ def test_the_two_paths_produce_the_same_raster(monkeypatch, fake_stac_load):
     np.testing.assert_allclose(
         sharded["lst_p95"].astype("int64"), graph_lst.astype("int64"), atol=1
     )
+
+
+# --------------------------------------------------------------------------
+# The same parity, with the seam corrections on.
+#
+# `destripe` holds one rule and both paths call it, the way both call `lst_qa`.
+# The eager path NaNs a rejected scene in place and the lazy one drops the time
+# step, because a lazy subset is free and an eager one copies the stack. Those
+# are different operations and they have to reach the same raster.
+# --------------------------------------------------------------------------
+
+AREA = (-60.0, -34.0, -59.9, -33.9)
+CORRECTED_PATHS = ("228", "229")
+
+
+def corrected_items(stack):
+    """One item per scene of the fixture, alternating between two WRS paths."""
+    times = stack[0]["time"].values
+    return [
+        {
+            "properties": {
+                "datetime": str(np.datetime_as_string(t, unit="us")) + "Z",
+                "landsat:scene_id": f"SCENE{i:02d}",
+                "landsat:wrs_path": CORRECTED_PATHS[i % 2],
+                "landsat:wrs_row": "030",
+            }
+        }
+        for i, t in enumerate(times)
+    ]
+
+
+def correction_for(stack):
+    """A prep payload on the fixture's own grid, with one scene rejected."""
+    import destripe
+    from masks import transform_for
+
+    west = np.zeros((NY, NX), dtype=bool)
+    west[:, :3] = True
+    east = np.zeros((NY, NX), dtype=bool)
+    east[:, 1:] = True
+    paths, weight, _inside = destripe.path_weights(
+        {CORRECTED_PATHS[0]: west, CORRECTED_PATHS[1]: east},
+        transform_for(AREA, NX * 10),
+        factor=1,
+    )
+    offset = np.linspace(-2.0, 2.0, N_TIME)
+    offset[4] = -40.0  # past the cap, so this scene has to be discarded
+    keep = destripe.keep_mask(offset, np.full(N_TIME, 9_000), floor=1)
+    assert not keep[4]
+    return {
+        "offset": offset,
+        "keep": keep,
+        "paths": paths,
+        "weight": weight,
+        "emit_pooled": False,
+    }
+
+
+def test_the_two_paths_agree_once_the_seam_corrections_are_on(
+    monkeypatch, fake_stac_load, stack
+):
+    import pystac
+
+    monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
+    items = corrected_items(stack)
+    shard = shard_lst_p95.Shard(0, 0, 0, 0, NY, NX, AREA)
+
+    sharded = shard_lst_p95.process_shard(
+        shard,
+        items,
+        "EPSG:4326",
+        1 / 3600,
+        read_threads=1,
+        correction=correction_for(stack),
+    )
+    lst_u16, qa_count, _ = profile_lst_p95.build_graph(
+        items,
+        AREA,
+        NX,
+        "EPSG:4326",
+        1 / 3600,
+        time_chunk=N_TIME,
+        load_chunk=NX,
+        correction=correction_for(stack),
+    )
+    graph_lst = np.asarray(lst_u16.values)
+
+    np.testing.assert_array_equal(
+        sharded["lst_p95"] == LST_NODATA_DN, graph_lst == LST_NODATA_DN
+    )
+    np.testing.assert_array_equal(sharded["qa_count"], np.asarray(qa_count.values))
+    valid = sharded["lst_p95"] != LST_NODATA_DN
+    assert (
+        np.abs(
+            sharded["lst_p95"][valid].astype("int32") - graph_lst[valid].astype("int32")
+        ).max()
+        <= 1
+    )
+
+
+def test_a_rejected_scene_leaves_the_monthly_counts(monkeypatch, fake_stac_load, stack):
+    """`qa_count` says what evidence is behind the P95, not what was available."""
+    import pystac
+
+    monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
+    items = corrected_items(stack)
+    shard = shard_lst_p95.Shard(0, 0, 0, 0, NY, NX, AREA)
+
+    plain = shard_lst_p95.process_shard(
+        shard, items, "EPSG:4326", 1 / 3600, read_threads=1
+    )
+    corrected = shard_lst_p95.process_shard(
+        shard,
+        items,
+        "EPSG:4326",
+        1 / 3600,
+        read_threads=1,
+        correction=correction_for(stack),
+    )
+    assert corrected["n_rejected"] == 1
+    assert corrected["n_scenes"] == plain["n_scenes"] - 1
+    # Pixel (0, 0) is clear in every scene, so it loses exactly the one that
+    # was discarded.
+    assert int(corrected["qa_count"][:, 0, 0].sum()) == N_TIME - 1

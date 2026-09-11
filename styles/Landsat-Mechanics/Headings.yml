@@ -48,6 +48,7 @@ exceptions:
   - USD
   - UTC
   - Vale
+  - WRS
   - YAML
   - landsat-lst
   - landsat-lst-smoke
