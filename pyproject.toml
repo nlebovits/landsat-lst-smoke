@@ -55,6 +55,10 @@ dev = [
   "ty>=0.0.1a14",
   "pytest>=8",
   "pytest-timeout>=2.3",
+  # The slow tests each drive a real frisky cluster in a subprocess, so the
+  # suite is latency-bound rather than CPU-bound and parallelises well. See
+  # `addopts` below for why the worker count is fixed rather than `auto`.
+  "pytest-xdist>=3.6",
 ]
 
 [tool.uv]
@@ -76,7 +80,35 @@ testpaths = ["tests"]
 #     uv run pytest -m "network and not s3"     # free, Earth Search only
 #     AWS_PROFILE=... uv run pytest -m s3       # costs money
 #     uv run pytest -m packaging                # resolves the script env
-addopts = "-q --timeout=60 -m 'not network and not s3 and not packaging'"
+# `-n 4 --dist loadfile`. The slow tests each drive a real frisky cluster in a
+# subprocess and spend most of their time waiting on it, so the suite is
+# latency-bound and shortens under parallelism even where the workers outnumber
+# the cores. Measured over the whole suite, with the barren-tile fixture
+# already module-scoped:
+#
+#     16 cores, serial    196 s
+#     16 cores, -n 4      146 s
+#      4 cores, -n 4      148 s   `taskset -c 0-3`, emulating the runner
+#
+# Four, not `auto`. `auto` reads the core count, which is 4 on the
+# `ubuntu-latest` runner and 16 on a development machine. Four matches the
+# runner exactly, so a `--timeout=60` failure reproduces locally rather than
+# only in CI. No test came near the timeout in the four-core run.
+#
+# Measure on an idle machine. A number taken while another checkout's suite was
+# running read half again as long, which is worth knowing before anyone trusts
+# a figure from a busy laptop.
+#
+# `loadfile` rather than the default, because several modules hold
+# module-scoped fixtures that drive a whole pipeline. Splitting a module across
+# workers would rebuild each one per worker.
+#
+# This applies to every invocation, debugging included. A single test now runs
+# on a worker, which swallows live output and disables `--pdb`. Pass `-n 0` to
+# get the serial run back:
+#
+#     uv run pytest -n 0 -x tests/test_fleet_plan.py
+addopts = "-q --timeout=60 -n 4 --dist loadfile -m 'not network and not s3 and not packaging'"
 markers = [
   "network: reaches Earth Search or the USGS bulk metadata service",
   "s3: reads s3://usgs-landsat, which is requester-pays and costs money",

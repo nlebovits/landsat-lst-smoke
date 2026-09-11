@@ -163,8 +163,10 @@ hooks = [
     pass_filenames = false,
   },
 
-  # Unit tests on pre-push. They run in about 4 seconds, and they assert the
-  # figures FINDINGS.md publishes.
+  # Unit tests on pre-push. They assert the figures FINDINGS.md publishes.
+  # They take minutes, not the seconds this comment once claimed, because
+  # several of them drive a real frisky cluster. `addopts` in pyproject.toml
+  # parallelises them; the measurements are there.
   {
     id = "pytest",
     name = "unit tests",
