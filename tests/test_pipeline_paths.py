@@ -503,7 +503,12 @@ def test_a_rejected_scene_leaves_the_monthly_counts(monkeypatch, fake_stac_load,
         correction=correction_for(stack),
     )
     assert corrected["n_rejected"] == 1
-    assert corrected["n_scenes"] == plain["n_scenes"] - 1
+    # `n_scenes` keeps meaning scenes loaded, which is what the memory model in
+    # `shard_bytes` is stated against. Survivors are a separate key, so a
+    # consumer reading the old one is not silently handed a new number.
+    assert corrected["n_scenes"] == plain["n_scenes"]
+    assert corrected["n_scenes_kept"] == plain["n_scenes"] - 1
+    assert plain["n_scenes_kept"] == plain["n_scenes"]
     # Pixel (0, 0) is clear in every scene, so it loses exactly the one that
     # was discarded.
     assert int(corrected["qa_count"][:, 0, 0].sum()) == N_TIME - 1

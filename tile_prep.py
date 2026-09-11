@@ -44,6 +44,15 @@ tile already holds: a WRS scene is about 1.7 degrees across, so a scene touching
 the tile reaches well beyond it. Without the margin every swath would be clipped
 at the tile border, that border would become part of the swath boundary, and the
 cross-fade would ramp toward the edge of the tile.
+
+**What a tile boundary still does to this.** Both quantities are measured over
+this grid and no wider, so a scene that two tiles share gets a different offset
+in each: the median anomaly is taken over different ground. A quad's swath moves
+for the same reason, because the inventory assigns only some of that quad's
+scenes to each tile and the half-the-scenes threshold then has a different
+denominator. Two merged tiles can therefore disagree along their shared border.
+`nlebovits/landsat-lst` has the same limit. Nothing here fixes it, and
+`FINDINGS.md` records it as open.
 """
 
 from __future__ import annotations
@@ -187,6 +196,59 @@ def swath_transform(bbox, pixels_per_degree: int, swath_factor: int):
     from masks import transform_for
 
     return transform_for(bbox, pixels_per_degree // swath_factor)
+
+
+def memory_model(block: int, scenes_per_block, n_scenes, n_quads, swath_shape, slots):
+    """Every array this pass keeps resident, named, in GiB.
+
+    The shard path refuses a configuration that will not fit, and this one has
+    to do the same rather than print a figure and start reading. Five terms:
+
+    - a worker's own block stack, `block**2 * scenes_in_block * 4` bytes, and
+      one per slot
+    - the histogram a worker builds for the scenes it saw, and which it ships
+      whole to the driver. This is the term that surprises: at 26,000 bins it
+      is 104 KB a scene, so a block seeing 2,000 scenes returns 208 MB
+    - the results in flight, one per slot, because `as_completed` hands them
+      over one at a time and each is freed after it is folded in
+    - the driver's histogram accumulator over every scene of the tile
+    - the driver's per-quad coverage counts on the swath grid
+    """
+    worst = max(scenes_per_block) if scenes_per_block else 0
+    stack = block**2 * worst * 4 / GIB
+    partial = worst * destripe.N_ANOMALY_BINS * 4 / GIB
+    accumulator = n_scenes * destripe.N_ANOMALY_BINS * 4 / GIB
+    coverage = n_quads * swath_shape[0] * swath_shape[1] * 2 / GIB
+    return {
+        "worker_block_stack_gib": stack,
+        "worker_histogram_gib": partial,
+        "workers_gib": (stack + partial) * slots,
+        "results_in_flight_gib": partial * slots,
+        "driver_histogram_gib": accumulator,
+        "driver_coverage_gib": coverage,
+        "total_gib": (stack + partial) * slots
+        + partial * slots
+        + accumulator
+        + coverage,
+    }
+
+
+def memory_guard(model: dict, target_gib: float | None, force: bool) -> None:
+    """Refuse a prep run that will not fit, before it buys its first object."""
+    if not target_gib or model["total_gib"] <= target_gib:
+        return
+    message = (
+        f"this prep needs {model['total_gib']:.1f} GiB and the machine has "
+        f"{target_gib:.1f} GiB. Largest terms: workers "
+        f"{model['workers_gib']:.1f}, results in flight "
+        f"{model['results_in_flight_gib']:.1f}, driver histogram "
+        f"{model['driver_histogram_gib']:.1f}, driver coverage "
+        f"{model['driver_coverage_gib']:.1f}. Try a smaller --block, fewer "
+        f"--workers, or a larger --prep-factor, or pass --force."
+    )
+    if not force:
+        raise SystemExit(message)
+    print(f"WARNING       {message}")
 
 
 # --------------------------------------------------------------------------
@@ -353,6 +415,17 @@ def parse_args(argv=None):
     p.add_argument("--stage-dir", type=Path, default=DEFAULT_STAGE_DIR)
     p.add_argument("--no-stage", action="store_true")
     p.add_argument(
+        "--target-memory-gib",
+        type=float,
+        default=None,
+        help="RAM of the machine this pass runs on. Without it nothing is "
+        "checked, because the host planning a fleet run is not the host doing "
+        "it. With it, a configuration that will not fit stops here",
+    )
+    p.add_argument(
+        "--force", action="store_true", help="run past the memory guard anyway"
+    )
+    p.add_argument(
         "--max-offset-c",
         type=float,
         default=destripe.DESTRIPE_MAX_OFFSET_C,
@@ -450,17 +523,38 @@ def main(argv=None) -> int:  # noqa: C901
         return 1
 
     scene_ids, quads, quad_scenes = scene_table(items)
+    window = {
+        "start": args.start,
+        "end": args.end,
+        "platforms": args.platforms,
+        "cloud_cover_lt": args.cloud_cover_lt,
+    }
     per_block = [items_for_shard(b, boxes) for b in blocks]
     work = [(b, idx) for b, idx in zip(blocks, per_block, strict=True) if idx]
     if args.max_blocks:
         work = work[: args.max_blocks]
-    resident = args.block**2 * max(len(idx) for _, idx in work) * 4 / GIB
-    print(f"blocks        {len(work)} with scenes, worst holds {resident:.1f} GiB")
-    print(
-        f"histograms    {len(items) * destripe.N_ANOMALY_BINS * 4 / GIB:.2f} GiB "
-        f"in the driver, {destripe.N_ANOMALY_BINS} bins of "
-        f"{destripe.ANOMALY_BIN_C} C"
+    slots = args.workers * args.threads_per_worker
+    model = memory_model(
+        args.block,
+        [len(idx) for _, idx in work],
+        len(items),
+        len(quad_scenes),
+        swath_shape,
+        slots,
     )
+    print(
+        f"blocks        {len(work)} with scenes, worst holds "
+        f"{model['worker_block_stack_gib']:.2f} GiB of pixels and returns "
+        f"{model['worker_histogram_gib']:.2f} GiB of histogram"
+    )
+    print(
+        f"memory        {model['total_gib']:.1f} GiB across {slots} slots: "
+        f"workers {model['workers_gib']:.1f}, in flight "
+        f"{model['results_in_flight_gib']:.1f}, driver "
+        f"{model['driver_histogram_gib'] + model['driver_coverage_gib']:.1f} "
+        f"({destripe.N_ANOMALY_BINS} bins of {destripe.ANOMALY_BIN_C} C)"
+    )
+    memory_guard(model, args.target_memory_gib, args.force)
     if args.dry_run:
         return 0
 
@@ -527,6 +621,11 @@ def main(argv=None) -> int:  # noqa: C901
         },
         {
             "schema_version": PREP_SCHEMA_VERSION,
+            # The scene set these offsets were fitted over. A slice recomputes
+            # it from its own item list and refuses a prep file that does not
+            # match, because two prep files built from different scene lists
+            # under identical settings are otherwise indistinguishable.
+            "scene_digest": destripe.scene_digest(scene_ids, window),
             "tile": args.tile,
             "bbox": list(bbox),
             "pixels_per_degree": args.pixels_per_degree,
@@ -545,12 +644,7 @@ def main(argv=None) -> int:  # noqa: C901
             "blocks": {"planned": len(blocks), "run": len(stats)},
             "block_stats": stats[:200],
             "inventory": run_provenance,
-            "window": {
-                "start": args.start,
-                "end": args.end,
-                "platforms": args.platforms,
-                "cloud_cover_lt": args.cloud_cover_lt,
-            },
+            "window": window,
         },
     )
     print(f"written       {args.out_dir / 'tile-prep.npz'}")

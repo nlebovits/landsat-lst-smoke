@@ -2273,15 +2273,24 @@ records the same count for one that would rather read a file.
   both.
 - **The seam corrections are built and have never run on real pixels.**
   `destripe.py` defines both rules, `tile_prep.py` estimates what they need once
-  per tile, and `shard_lst_p95.py` applies them. 56 unit tests cover the
-  numerics, including the claim the whole design rests on: splitting the tile
-  into blocks does not move a scene offset, so the estimate costs one source
-  traversal rather than the two `nlebovits/landsat-lst` pays. Every one of
-  those tests runs against a synthetic stack. No tile has been prepped, no
-  shard has been composited with a correction on, and `measure_seam.py` has
-  produced no numbers. Until it does, the seam removal and the variance
-  retained quoted here are the sibling repository's measurements on its own
-  grid, not this one's.
+  per tile, and `shard_lst_p95.py` applies them. 87 unit tests cover the
+  numerics and the wiring, including the claim the whole design rests on:
+  splitting the tile into blocks does not move a scene offset, so the estimate
+  costs one source traversal rather than the two `nlebovits/landsat-lst` pays.
+  Every one of those tests runs against a synthetic stack. No tile has been
+  prepped, no shard has been composited with a correction on, and
+  `measure_seam.py` has produced no numbers. Until it does, the seam removal
+  and the variance retained quoted in the docstrings are the sibling
+  repository's measurements on its own grid, not this one's.
+- **One assumption in `destripe.py` no synthetic loader can check.** Every
+  per-scene value reaches a loaded stack by matching
+  `destripe.timestamp_of(item)` against the `time` coordinate `odc.stac`
+  produced. The unit tests replace `stac_load` with a fixture built to return
+  those stamps, so they assert the assumption back at themselves.
+  `tests/test_time_axis_join.py` checks it against real scenes, and it is
+  `s3`-marked and has not been run. If odc-stac ever stops taking the item
+  datetime as its group timestamp, `align_to_time` raises and every shard of
+  the tile stops at once. That is the right failure and it is still a failure.
 - **The swath comes from the data, and that is a departure.**
   `nlebovits/landsat-lst` rasterises the imaged parallelogram Earth Search
   publishes. This repository reads the USGS bulk metadata, whose corner columns
@@ -2290,12 +2299,14 @@ records the same count for one that would rather read a file.
   the seam. Counting valid observations per `(path, row)` quad answers the same
   question from the pixels instead. Comparing the two definitions on real ground
   is still owed.
-- **Neighbouring tiles can disagree about a swath.** A quad's swath is the
-  ground where at least half its scenes produced a valid observation, and the
-  inventory assigns only some of that quad's scenes to each tile, so the
-  denominator differs across a tile border. The 1 degree
-  prep margin makes the swath edges inside a tile real acquisition edges, and
-  it does not make two tiles agree about an edge near their shared border.
+- **Neighbouring tiles can disagree about both an offset and a swath.** Both
+  are measured over one tile plus a 1 degree margin and no wider. So a scene that two
+  tiles share gets a different offset in each, because the median anomaly is
+  taken over different ground. A quad's swath moves for a second
+  reason: the inventory assigns only some of that quad's scenes to each tile,
+  so the half-the-scenes threshold has a different denominator. The margin
+  makes the swath edges inside a tile real acquisition edges. It does not make
+  two tiles agree about an edge near their shared border.
   `nlebovits/landsat-lst` has the same limit, and no merged pair of tiles has
   been inspected.
 - **The prep resolution factor has no measurement behind it.** It defaults to
@@ -2303,14 +2314,28 @@ records the same count for one that would rather read a file.
   0.002 C and rejected factor 4 at a maximum of 0.546 C against a
   pre-registered 0.5 C gate, on a different grid and a different loader. This
   repository owes its own sweep.
+- **The sparse floor is a placeholder with a citation that does not fit it.**
+  `DESTRIPE_MIN_PREP_SAMPLES = 200` comes from `nlebovits/landsat-lst`, where
+  it screened a factor-2 grid over a 5 degree tile. `tile_prep` estimates on a
+  factor-4 grid over the tile plus a margin, which holds roughly a fifth as
+  many pixels per scene, so 200 screens a different thing here. It needs what the
+  15 C cap got there, which is a sweep of the rejected share against the floor
+  on a real tile.
 - **The 15 C offset cap was calibrated somewhere else.** One mid-latitude
   agricultural AOI, at a 21.8% rejected share. A humid tropical tile may not
   behave that way, and the rejected share is the number to watch per tile.
-- **The memory model has not been re-measured with the corrections on.**
+- **The shard memory model has not been re-measured with the corrections on.**
   `SHARD_BYTES_PER_PIXEL_SCENE = 15` should hold or fall: the per-path
   percentile partitions each path's subset in place, where the pooled one
   partitions a copy of the whole stack. No measurement backs that reasoning yet,
   and `worker_memory_guard` refuses runs on the constant.
+- **The prep memory model is arithmetic, not a measurement.**
+  `tile_prep.memory_model` names five resident terms and `--target-memory-gib`
+  refuses a run that exceeds them, the way `worker_memory_guard` does for a
+  shard. The shard constant was calibrated against six committed sweeps. This
+  one counts array shapes and has never been checked against an RSS series. The
+  term worth watching is the histogram a block returns whole to the driver, at
+  104 KB a scene, so a block seeing 2,000 scenes hands back 208 MB.
 - **The mask has been measured on one tile.** S30W065 is interior South
   America, entirely land, with no coastline for the water rule to cut and a
   0.24% gap share. A coastal or tropical tile would exercise both rules

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -112,6 +113,12 @@ def seam_step(field, down, right):
 def compare(fields: dict, down, right) -> tuple[dict, dict]:
     """Every arm against the pooled baseline, on the pixels all four share.
 
+    De-striping discards scenes, so a pixel the pooled arm resolves can be
+    nodata once the offsets are applied. Every number here is computed on the
+    intersection, which makes the four arms comparable and makes none of them
+    the raster that arm would ship on its own. `n_valid_px` against the shard
+    size says how much that cost.
+
     Returns `(summary, rows)`. They are returned apart rather than nested so the
     caller can iterate the rows without unpacking a dict of mixed value types.
     """
@@ -140,21 +147,50 @@ def compare(fields: dict, down, right) -> tuple[dict, dict]:
 
     summary = {
         "n_valid_px": int(valid.sum()),
+        "n_px": int(valid.size),
+        "valid_share": round(float(valid.mean()), 4),
         "pooled_variance_c2": round(base_var, 4),
         "pooled_seam": base,
     }
     return summary, rows
 
 
-def pick_shard(shards, weight_of):
-    """The planned shard with the most swath boundary in it."""
+def pick_shard(shards, prep):
+    """The planned shard with the most swath boundary in it.
+
+    Counted once on the prep file's own swath grid, then read per shard by
+    slicing that one array. Resampling every shard's weights to answer this
+    would be two `reproject` calls per path for each of 1,296 shards, which
+    takes minutes to answer a question one array already holds.
+    """
+    import numpy as np
+    from rasterio.transform import rowcol
+
+    if prep.inside.size == 0:
+        raise SystemExit("this prep file found no WRS path with a swath.")
+    down, right = boundary_edges(prep.inside.astype("float32"))
+    edge = np.zeros(prep.inside.shape[1:], dtype="uint8")
+    edge[:-1, :] |= down
+    edge[:, :-1] |= right
+    integral = np.pad(edge.astype("int64").cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    transform = destripe.prep_transform(prep)
+    height, width = edge.shape
+
+    def count(shard):
+        west, south, east, north = shard.bbox
+        r0, c0 = rowcol(transform, west, north, op=math.floor)
+        r1, c1 = rowcol(transform, east, south, op=math.ceil)
+        r0, c0 = max(int(r0), 0), max(int(c0), 0)
+        r1, c1 = min(int(r1), height), min(int(c1), width)
+        if r1 <= r0 or c1 <= c0:
+            return 0
+        return int(
+            integral[r1, c1] - integral[r0, c1] - integral[r1, c0] + integral[r0, c0]
+        )
+
     best, best_edges = None, -1
     for shard in shards:
-        weight = weight_of(shard)
-        if weight is None:
-            continue
-        down, right = boundary_edges(weight)
-        edges = int(down.sum() + right.sum())
+        edges = count(shard)
         if edges > best_edges:
             best, best_edges = shard, edges
     if best is None or best_edges <= 0:
@@ -162,7 +198,10 @@ def pick_shard(shards, weight_of):
             "no planned shard of this tile holds a swath boundary. Every shard "
             "is the interior case, and there is no seam here to measure."
         )
-    print(f"chosen        shard row {best.row} col {best.col}, {best_edges} edges")
+    print(
+        f"chosen        shard row {best.row} col {best.col}, "
+        f"{best_edges} swath cells on a boundary"
+    )
     return best
 
 
@@ -228,7 +267,7 @@ def main(argv=None) -> int:
             (shard.ny, shard.nx),
         )
 
-    shard = pick_shard(shards, weight_of) if args.auto else shards[args.shard_index]
+    shard = pick_shard(shards, prep) if args.auto else shards[args.shard_index]
     idx = items_for_shard(shard, boxes)
     if not idx:
         raise SystemExit(f"shard row {shard.row} col {shard.col} holds no scene")
@@ -269,7 +308,8 @@ def main(argv=None) -> int:
         fields[name] = decode(out["lst_p95"])
         print(
             f"{name:<14}{timings[name]:7.2f}s  "
-            f"{out['n_scenes']} scenes, {out['n_rejected']} rejected"
+            f"{out['n_scenes']} scenes loaded, "
+            f"{out['n_scenes_kept']} kept, {out['n_rejected']} rejected"
         )
 
     down, right = boundary_edges(weight_of(shard))

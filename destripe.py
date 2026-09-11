@@ -68,6 +68,14 @@ DESTRIPE_MIN_SCENE_PIXELS = 500
 #: It replaces the native floor rather than scaling into it. A coarse valid
 #: count cannot be converted back: a single valid native pixel read through a
 #: nodata-ignoring average reports as a whole coarse pixel.
+#:
+#: **This number is carried over, not calibrated here, and the two grids are
+#: not the same one.** `nlebovits/landsat-lst` set it on a factor-2 grid over a
+#: 5 degree tile. `tile_prep` estimates on a factor-4 grid over the tile plus a
+#: 1 degree margin, which holds roughly a fifth as many pixels per scene, so 200
+#: screens a different thing here than it did there. It is a placeholder with a
+#: citation that does not apply to it. `scripts` owes a sweep of the rejected
+#: share against this floor on a real tile, the way the cap was swept.
 DESTRIPE_MIN_PREP_SAMPLES = 200
 
 #: Width of one anomaly histogram bin, in Celsius. This is the output encoding
@@ -800,6 +808,30 @@ def feathered_percentile(celsius, path_of_scene, paths, weight, q=95.0):
     return np.where(covered, numerator / safe, np.float32(np.nan)).astype("float32")
 
 
+def scene_digest(scene_ids, window: dict) -> str:
+    """A fingerprint of the scene set and the window an offset was fitted over.
+
+    Two prep files built from different scene lists under identical settings are
+    otherwise indistinguishable, and a composite built against the wrong one
+    finishes and looks ordinary. `nlebovits/landsat-lst` reaches the same place
+    by hashing the scene ids into its cache key. Its cache is gone from this
+    port and this is what replaces the protection the key was giving.
+
+    Scene ids are sorted because a catalogue returns them in no fixed order.
+    """
+    import hashlib
+
+    material = "\n".join(
+        [
+            *(f"{key}={window[key]}" for key in sorted(window)),
+            f"lst_valid_min={LST_VALID_MIN_C}",
+            f"lst_valid_max={LST_VALID_MAX_C}",
+            *sorted(str(s) for s in scene_ids),
+        ]
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
 @dataclass(frozen=True)
 class Prep:
     """What `tile_prep` measured for one tile, as a slice reads it back.
@@ -818,6 +850,18 @@ class Prep:
     offset: dict[str, float]
     n_valid: dict[str, int]
     meta: dict
+
+    @property
+    def digest(self) -> str:
+        return str(self.meta.get("scene_digest", ""))
+
+    @property
+    def window(self) -> dict:
+        return dict(self.meta.get("window", {}))
+
+    @property
+    def inventory(self) -> dict:
+        return dict(self.meta.get("inventory", {}))
 
 
 def load_prep(path) -> Prep:

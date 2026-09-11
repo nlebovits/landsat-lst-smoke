@@ -422,6 +422,7 @@ def rehearse_shard(
         "lst_p95": dn,
         "qa_count": qa,
         "n_scenes": n,
+        "n_scenes_kept": n,
         "n_rejected": 0,
         "load_s": 0.0,
         "reduce_s": 0.0,
@@ -523,7 +524,11 @@ def process_shard(
         "x0": shard.x0,
         "lst_p95": dn_out,
         "qa_count": qa_count,
-        "n_scenes": int(lst.shape[0]) - n_rejected,
+        # Scenes loaded, which is what this key has always meant and what the
+        # memory model in `shard_bytes` is stated against. Survivors are a
+        # separate key rather than a quieter redefinition of this one.
+        "n_scenes": int(lst.shape[0]),
+        "n_scenes_kept": int(lst.shape[0]) - n_rejected,
         "n_rejected": n_rejected,
         "load_s": t_load,
         "reduce_s": t_reduce,
@@ -730,6 +735,7 @@ def drive_shards(
 
     t_submit = time.perf_counter()
     marks["first_submit_s"] = t_submit - t0
+
     def task_args(shard, idx):
         """The submitted argument list, with the correction only if there is one.
 
@@ -1238,35 +1244,68 @@ def mask_rule(args, counts, ged_provenance=None) -> dict | None:
     return rule
 
 
-def load_tile_prep(args, tile_id: str):
-    """The prep artifact, checked against the tile this run is building.
+def load_tile_prep(args, tile_id: str, item_dicts, run_provenance):
+    """The prep artifact, checked against the run that is about to use it.
 
     Returns None when the run was not given one, which composites pooled.
 
+    Five checks, and each one guards a failure that produces a finished raster
+    rather than an error. Compositing against another tile's offsets, another
+    grid's weights, or another scene list's estimates all look ordinary in the
+    output.
+
+    `item_dicts` must be the list the shards will actually load, after
+    `staging.drop_scenes_without_thermal`, because that is the list `tile_prep`
+    hashed.
+
     Raises:
-        SystemExit: if the artifact describes a different tile or a layout this
-            version does not know. Compositing against the wrong tile's offsets
-            would finish and look ordinary.
+        SystemExit: on any mismatch, naming the command that rebuilds the file.
     """
     if args.tile_prep is None:
         return None
     prep = destripe.load_prep(args.tile_prep)
-    if prep.tile != tile_id:
-        raise SystemExit(
-            f"{args.tile_prep} was written for tile {prep.tile}, and this run "
-            f"is building {tile_id}. Run tile_prep.py --tile {tile_id}."
-        )
+    rebuild = f"Rebuild it with tile_prep.py --tile {tile_id}."
+
     if prep.meta.get("schema_version") != tile_prep_schema_version():
         raise SystemExit(
             f"{args.tile_prep} carries schema version "
             f"{prep.meta.get('schema_version')} and this version reads "
-            f"{tile_prep_schema_version()}. Rebuild it."
+            f"{tile_prep_schema_version()}. {rebuild}"
+        )
+    if prep.tile != tile_id:
+        raise SystemExit(
+            f"{args.tile_prep} was written for tile {prep.tile}, and this run "
+            f"is building {tile_id}. {rebuild}"
         )
     if prep.pixels_per_degree != args.pixels_per_degree:
         raise SystemExit(
             f"{args.tile_prep} was built on a 1/{prep.pixels_per_degree} degree "
             f"grid and this run is on 1/{args.pixels_per_degree}. The weights "
-            f"would land on the wrong ground."
+            f"would land on the wrong ground. {rebuild}"
+        )
+
+    window = {
+        "start": args.start,
+        "end": args.end,
+        "platforms": args.platforms,
+        "cloud_cover_lt": args.cloud_cover_lt,
+    }
+    mine = destripe.scene_digest((destripe.scene_id_of(d) for d in item_dicts), window)
+    if prep.digest != mine:
+        raise SystemExit(
+            f"{args.tile_prep} was fitted over a different scene set or a "
+            f"different window: it carries digest {prep.digest or 'none'} and "
+            f"this run computes {mine}. Its window was {prep.window} against "
+            f"{window} here, over {len(prep.offset)} scenes against "
+            f"{len(item_dicts)}. {rebuild}"
+        )
+    if prep.inventory and run_provenance and prep.inventory != run_provenance:
+        raise SystemExit(
+            f"{args.tile_prep} was built from a different inventory artifact:\n"
+            f"  prep: {prep.inventory}\n"
+            f"  run:  {run_provenance}\n"
+            f"The digests match, so the same scenes are named, and a rebuilt "
+            f"artifact can still move a footprint or a href. {rebuild}"
         )
     return prep
 
@@ -1307,6 +1346,11 @@ def correction_rule(args, prep) -> dict | None:
         return None
     return {
         "prep_schema_version": prep.meta.get("schema_version"),
+        # The scene set the offsets were fitted over. Without it two parts
+        # built against different prep files compare equal on every parameter
+        # and merge into one raster carrying two different corrections.
+        "prep_scene_digest": prep.digest,
+        "prep_window": prep.window,
         "prep_tile": prep.tile,
         "prep_bbox": list(prep.bbox),
         "prep_factor": prep.meta.get("prep_factor"),
@@ -1695,10 +1739,36 @@ def main(argv=None) -> int:  # noqa: C901
     # rehearsal fakes them, so nothing here converts a pystac object.
     item_dicts = items
 
-    # Before the first GET, like the mask and the disk guard. A prep file for
-    # the wrong tile or the wrong grid is a run that finishes and looks
-    # ordinary, so it is refused here rather than discovered in the pixels.
-    prep = None if args.rehearse else load_tile_prep(args, tile_id)
+    # L2SR products carry no thermal band, load as fill, and reach neither the
+    # percentile nor the monthly counts. Dropping them is output-neutral and
+    # buys back a layer on the time axis of every shard they touch, which is
+    # what caps shard size at 94% of the worker memory limit. Skipped under
+    # --rehearse, where the synthetic items carry no assets at all.
+    dropped_no_thermal = 0
+    if not args.rehearse and not args.keep_scenes_without_thermal:
+        item_dicts, item_bboxes, dropped_no_thermal = (
+            staging.drop_scenes_without_thermal(item_dicts, item_bboxes)
+        )
+        if dropped_no_thermal:
+            print(
+                f"              {dropped_no_thermal} of {len(items)} carry no "
+                f"thermal band; dropped"
+            )
+        if not item_dicts:
+            return no_thermal_coverage(
+                args, tile_id, bbox, len(items), dropped_no_thermal, run_provenance
+            )
+
+    # After the thermal filter, because that is the list the shards will load
+    # and the list `tile_prep` hashed. Before the first GET, like the mask and
+    # the disk guard: a prep file for the wrong tile, grid, or scene set is a
+    # run that finishes and looks ordinary, so it is refused here rather than
+    # discovered in the pixels.
+    prep = (
+        None
+        if args.rehearse
+        else load_tile_prep(args, tile_id, item_dicts, run_provenance)
+    )
     if prep is not None:
         kept = destripe.keep_mask(
             np.array([prep.offset.get(s, np.nan) for s in prep.offset]),
@@ -1722,26 +1792,6 @@ def main(argv=None) -> int:  # noqa: C901
             "prep          none: pooled percentile, no scene offsets. The WRS "
             "seam stays in the output"
         )
-
-    # L2SR products carry no thermal band, load as fill, and reach neither the
-    # percentile nor the monthly counts. Dropping them is output-neutral and
-    # buys back a layer on the time axis of every shard they touch, which is
-    # what caps shard size at 94% of the worker memory limit. Skipped under
-    # --rehearse, where the synthetic items carry no assets at all.
-    dropped_no_thermal = 0
-    if not args.rehearse and not args.keep_scenes_without_thermal:
-        item_dicts, item_bboxes, dropped_no_thermal = (
-            staging.drop_scenes_without_thermal(item_dicts, item_bboxes)
-        )
-        if dropped_no_thermal:
-            print(
-                f"              {dropped_no_thermal} of {len(items)} carry no "
-                f"thermal band; dropped"
-            )
-        if not item_dicts:
-            return no_thermal_coverage(
-                args, tile_id, bbox, len(items), dropped_no_thermal, run_provenance
-            )
 
     # Slice the PLAN, never the filtered list. Shards with no overlapping
     # scenes drop out of `work_idx`, so slicing after filtering shifts every index
@@ -1890,7 +1940,15 @@ def main(argv=None) -> int:  # noqa: C901
             del pooled
         stat = {
             k: res_d.get(k)
-            for k in ("row", "col", "n_scenes", "n_rejected", "load_s", "reduce_s")
+            for k in (
+                "row",
+                "col",
+                "n_scenes",
+                "n_scenes_kept",
+                "n_rejected",
+                "load_s",
+                "reduce_s",
+            )
         }
         del res_d, a, q
         peak["rss"] = max(peak["rss"], proc.memory_info().rss / GIB)

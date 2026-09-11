@@ -339,6 +339,57 @@ class TestWeights:
         assert weight.size == 0
         assert inside.size == 0
 
+    def test_a_swath_touching_the_grid_edge_does_not_ramp_toward_it(self):
+        """The grid border is not an acquisition edge.
+
+        A swath read off the data is cut wherever the grid stops, so the border
+        joins the polygon boundary and the cross-fade falls toward the corner of
+        the raster instead of toward the place the path stops contributing. Two
+        neighbouring tiles would then disagree along their shared border, which
+        trades the WRS seam for a seam on the tile grid.
+        """
+        masks = two_paths()
+        _paths, weight, _inside = destripe.path_weights(
+            masks, grid_transform(), factor=1
+        )
+        # The overlap runs the full height, so every row carries the same ramp.
+        # With the border in the boundary the first and last rows would measure
+        # their distance to it instead, and fall toward 0.
+        column = weight[0, :, OVERLAP.start + 4]
+        assert np.ptp(column) < 0.01
+        assert np.allclose(column, column[len(column) // 2], atol=0.01)
+        # What remains is an endpoint effect, not a ramp: the clipped segment
+        # stops one cell short of the grid, so a point in the outermost row is
+        # half a cell past its end and measures a fraction further. Measured
+        # here at 0.0009 of a weight, against 0.09 of one DN in the output.
+        assert np.ptp(column) > 0.0
+
+    def test_the_coarse_ramp_survives_a_corner(self):
+        """Where the padded coarse mask meets the clipped boundary.
+
+        `_block_any` grows a mask at the grid edge and `_boundaries` cuts that
+        edge out of the linework. Each is right alone. This is the corner where
+        both act at once.
+        """
+        height, width = 256, 256
+        masks = {}
+        west = np.zeros((height, width), dtype=bool)
+        west[:, :160] = True
+        east = np.zeros((height, width), dtype=bool)
+        east[:, 96:] = True
+        masks[WEST], masks[EAST] = west, east
+        transform = transform_for((-5.0, 0.0, 5.0, 10.0), width // 10)
+
+        _paths, weight, inside = destripe.path_weights(masks, transform, factor=4)
+        covered = inside.any(axis=0)
+        total = weight.sum(axis=0)
+        assert np.allclose(total[covered], 1.0, atol=1e-5)
+        assert (weight >= 0).all()
+        # No cell falls to the equal-share tie-break, which is what the coarse
+        # containment band used to produce along the whole boundary.
+        multi = inside.sum(axis=0) >= 2
+        assert not np.isclose(weight[0][multi], 0.5, atol=1e-6).all()
+
     def test_a_grid_too_small_to_coarsen_uses_the_exact_ramp(self):
         """Six rows cannot carry a ramp on one and a half cells."""
         coarse = destripe.path_weights(two_paths(), grid_transform(), factor=8)
