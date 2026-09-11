@@ -19,11 +19,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import shard_lst_p95  # noqa: E402
-from cog_catalog import DEFAULT_COLLECTION_ID  # noqa: E402
+from cog_catalog import collection_id_for_window  # noqa: E402
 from lst_qa import encode_celsius  # noqa: E402
 
 BBOX = (-65.0, -32.5, -64.5, -32.0)
 NEIGHBOUR_BBOX = (-65.0, -32.0, -64.5, -31.5)
+#: What the 2021-2025 window the fixture records must derive to.
+COLLECTION_ID = "lst-p95-2021-2025"
 PIXELS_PER_DEGREE = 1200
 SIZE = 600
 ITEM_ID = "S32W065"
@@ -81,7 +83,7 @@ class TestTheMergeWritesACatalog:
         assert merge(write_parts(tmp_path / "part0"), out) == 0
         assert (out / "lst_p95_dn.npy").is_file()
         assert (out / "qa_count.npy").is_file()
-        item = out / "catalog" / DEFAULT_COLLECTION_ID / ITEM_ID
+        item = out / "catalog" / COLLECTION_ID / ITEM_ID
         assert (item / "lst_p95.tif").is_file()
         assert (item / "qa_count.tif").is_file()
 
@@ -96,9 +98,7 @@ class TestTheMergeWritesACatalog:
         out = tmp_path / "tile"
         merge(write_parts(tmp_path / "part0"), out)
         item = json.loads(
-            (
-                out / "catalog" / DEFAULT_COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json"
-            ).read_text()
+            (out / "catalog" / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
         )
         assert item["properties"]["start_datetime"] == "2021-01-01T00:00:00Z"
         assert item["properties"]["end_datetime"] == "2025-12-31T23:59:59Z"
@@ -156,6 +156,34 @@ class TestTheMergeFailsBeforeItWorks:
         assert "does not cover" in message
 
 
+class TestTheCollectionIdCarriesTheWindow:
+    def test_a_multi_year_window_spans_its_first_and_last_year(self):
+        assert (
+            collection_id_for_window({"start": "2021-01-01", "end": "2025-12-31"})
+            == "lst-p95-2021-2025"
+        )
+
+    def test_a_single_year_window_names_that_year_once(self):
+        assert (
+            collection_id_for_window({"start": "2024-01-01", "end": "2024-12-31"})
+            == "lst-p95-2024"
+        )
+
+    def test_the_merge_derives_it_with_no_flag(self, tmp_path):
+        # The window the parts recorded decides the directory. Two windows
+        # therefore cannot collect into one collection by omission.
+        out = tmp_path / "tile"
+        merge(write_parts(tmp_path / "part0"), out)
+        assert (out / "catalog" / COLLECTION_ID / "collection.json").is_file()
+
+    @pytest.mark.parametrize("missing", ["start", "end"])
+    def test_a_part_with_no_window_earns_no_id(self, missing):
+        window = {"start": "2021-01-01", "end": "2025-12-31"}
+        del window[missing]
+        with pytest.raises(ValueError, match=missing):
+            collection_id_for_window(window)
+
+
 class TestCatalogFlags:
     def test_the_identity_flags_reach_the_collection(self, tmp_path):
         out = tmp_path / "tile"
@@ -199,7 +227,7 @@ class TestOneCatalogForEveryTile:
         return catalog
 
     def test_both_tiles_are_items_of_one_collection(self, two_tiles):
-        collection_dir = two_tiles / DEFAULT_COLLECTION_ID
+        collection_dir = two_tiles / COLLECTION_ID
         assert (collection_dir / ITEM_ID / "lst_p95.tif").is_file()
         assert (collection_dir / NEIGHBOUR_ID / "lst_p95.tif").is_file()
         collection = json.loads((collection_dir / "collection.json").read_text())
@@ -208,7 +236,7 @@ class TestOneCatalogForEveryTile:
 
     def test_the_collection_extent_spans_both(self, two_tiles):
         collection = json.loads(
-            (two_tiles / DEFAULT_COLLECTION_ID / "collection.json").read_text()
+            (two_tiles / COLLECTION_ID / "collection.json").read_text()
         )
         assert collection["extent"]["spatial"]["bbox"][0] == [
             -65.0,

@@ -316,6 +316,26 @@ overviews, the statistics, and the decoding rule against what it asked for. A
 scale the driver dropped is the one failure that leaves a file which reads as
 valid and decodes to nonsense, so it is checked rather than assumed.
 
+The STAC says the same thing through the extensions that already define it. The
+item declares raster v2.0.0 and render v2.0.0, and the band states the decoding
+rule as `raster:scale` and `raster:offset`, beside the `unit`, the `nodata`, and
+the statistics. No `lst:`-prefixed property restates any of it. Portolan reuses
+an established extension wherever one applies, and every field here has a
+registered home.
+
+`statistics`, `nodata`, and the render's `rescale` are all the stored digital
+numbers. That is the domain the COG header reports, and the one a reader meets
+before it applies `raster:scale`. Decoding them in the STAC would invite a
+client that honours the scale to apply it twice. `unit` names what a pixel means
+once decoded, which is the one field describing the far side of the transform.
+
+A collection id includes the window its pixels came from, so 2021-2025 writes
+`lst-p95-2021-2025`. The id is also the directory name. A shared id would put a
+second window's tiles in the first window's collection, and the later merge would
+then widen the temporal extent over pixels nobody asked about. So the id comes
+from `part-meta.json` rather than from a default, and `--collection-id` overrides
+it.
+
 ## Architecture: shard, do not tune
 
 ### The catalogue is read once for the whole fleet

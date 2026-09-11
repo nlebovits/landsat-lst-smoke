@@ -50,13 +50,13 @@ import masks
 import staging
 from aster_ged import DEFAULT_NUMOBS_URI
 from cog_catalog import (
-    DEFAULT_COLLECTION_ID,
     DEFAULT_HOST_NAME,
     DEFAULT_HOST_URL,
     DEFAULT_LICENSE,
     MONTH_NAMES,
     catalog_provenance,
     check_catalog_inputs,
+    collection_id_for_window,
     write_catalog,
 )
 from lst_qa import (
@@ -849,7 +849,14 @@ def parse_args(argv=None):
         help="where the catalog lives; defaults to <out-dir>/catalog. Point "
         "every tile's merge at one path to collect them in one catalog",
     )
-    p.add_argument("--collection-id", default=DEFAULT_COLLECTION_ID)
+    p.add_argument(
+        "--collection-id",
+        default=None,
+        help="the published collection id, which is also its directory name. "
+        "Defaults to the window the parts were composited over, so "
+        "2021-2025 gives lst-p95-2021-2025 and two windows cannot collect "
+        "into one collection by omission",
+    )
     p.add_argument(
         "--host-name",
         default=DEFAULT_HOST_NAME,
@@ -1036,7 +1043,7 @@ def _write_catalog(out_dir: Path, lst, qa, meta: dict, args) -> Path:
     single tile wants. Several tiles pointed at one `--catalog-dir` land in
     one collection, an item each.
     """
-    collection_id = args.collection_id
+    collection_id = args.collection_id or collection_id_for_window(meta)
     root = write_catalog(
         args.catalog_dir or out_dir / "catalog",
         lst,

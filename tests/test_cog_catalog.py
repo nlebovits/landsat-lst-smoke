@@ -26,6 +26,8 @@ from cog_catalog import (  # noqa: E402
     LST_ASSET_KEY,
     MONTH_NAMES,
     QA_ASSET_KEY,
+    RASTER_EXTENSION,
+    RENDER_EXTENSION,
     STATISTICS_KEYS,
     THUMBNAIL_FILENAME,
     VALID_PERCENT_KEY,
@@ -318,6 +320,107 @@ class TestPairedReader:
         assert encoding["block_shape"] == [BLOCK_SIZE, BLOCK_SIZE]
         assert encoding["overviews"]
         assert set(STATISTICS_KEYS) <= set(encoding["statistics"][0])
+
+
+class TestTheBandsCarryTheDecodingRule:
+    """Scale and offset belong to the raster extension, not a custom prefix.
+
+    Portolan reuses an established extension wherever one applies rather than
+    re-encoding the same fact. Every field here has a registered home, so none
+    of them needs an `lst:` twin in the item properties.
+    """
+
+    def test_the_temperature_band_declares_its_scale_and_offset(self, catalog):
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        band = item["assets"][LST_ASSET_KEY]["bands"][0]
+        assert band["raster:scale"] == LST_SCALE
+        assert band["raster:offset"] == LST_OFFSET
+        assert band["unit"] == "celsius"
+        assert band["nodata"] == LST_NODATA_DN
+
+    def test_the_statistics_stay_in_the_stored_digital_numbers(self, catalog):
+        # The COG header reports raw DN, and a reader meets them before it
+        # applies raster:scale. Decoding them here would invite a client that
+        # honours the scale to apply it twice.
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        band = item["assets"][LST_ASSET_KEY]["bands"][0]
+        assert band["statistics"]["minimum"] > 1000.0
+
+    def test_the_counts_declare_no_scale_to_decode(self, catalog):
+        # An identity scale on a count would invite a reader to decode it.
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        for band in item["assets"][QA_ASSET_KEY]["bands"]:
+            assert "raster:scale" not in band
+            assert "raster:offset" not in band
+
+    def test_every_band_says_a_pixel_covers_an_area(self, catalog):
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        for key in (LST_ASSET_KEY, QA_ASSET_KEY):
+            for band in item["assets"][key]["bands"]:
+                assert band["raster:sampling"] == "area"
+
+    def test_the_item_declares_the_extension_its_fields_come_from(self, catalog):
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        assert RASTER_EXTENSION in item["stac_extensions"]
+        assert RENDER_EXTENSION in item["stac_extensions"]
+
+    def test_no_custom_prefix_restates_what_the_bands_already_say(self, catalog):
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        assert not [key for key in item["properties"] if key.startswith("lst:")]
+
+
+class TestTheItemDescribesItself:
+    def test_the_counts_carry_the_role_a_reader_filters_on(self, catalog):
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        assert item["assets"][QA_ASSET_KEY]["roles"] == ["data", "quality"]
+        assert item["assets"][LST_ASSET_KEY]["roles"] == ["data"]
+
+    def test_the_counts_say_what_a_zero_means(self, catalog):
+        # The band has no nodata value, so nothing else in the asset does.
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        assert (
+            "masking removed every observation"
+            in (item["assets"][QA_ASSET_KEY]["description"])
+        )
+
+    def test_the_title_names_the_tile_and_the_window(self, catalog):
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        assert item["properties"]["title"] == (
+            f"{ITEM_ID} land surface temperature, 2021-2025"
+        )
+
+    def test_the_item_draws_itself_without_the_collection(self, catalog):
+        # A client that opens one tile never reads the collection, so the item
+        # carries the ramp for its own pixels.
+        item = json.loads(
+            (catalog / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        render = item["properties"]["renders"][LST_ASSET_KEY]
+        assert render["assets"] == [LST_ASSET_KEY]
+        low, high = render["rescale"][0]
+        band = item["assets"][LST_ASSET_KEY]["bands"][0]
+        assert (low, high) == (
+            band["statistics"]["minimum"],
+            band["statistics"]["maximum"],
+        )
 
 
 class TestCatalogStructure:

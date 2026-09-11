@@ -113,6 +113,7 @@ PORTOLAN_EXTENSION = "https://schemas.portolan-sdi.org/portolan/v0.2.0/schema.js
 FILE_EXTENSION = "https://stac-extensions.github.io/file/v2.1.0/schema.json"
 PROJECTION_EXTENSION = "https://stac-extensions.github.io/projection/v2.0.0/schema.json"
 RENDER_EXTENSION = "https://stac-extensions.github.io/render/v2.0.0/schema.json"
+RASTER_EXTENSION = "https://stac-extensions.github.io/raster/v2.0.0/schema.json"
 
 COG_MEDIA_TYPE = "image/tiff; application=geotiff; profile=cloud-optimized"
 PARQUET_MEDIA_TYPE = "application/vnd.apache.parquet"
@@ -140,7 +141,10 @@ DEFAULT_HOST_URL = "https://github.com/nlebovits/landsat-lst-smoke"
 #: Landsat Collection 2 carries no use restrictions, which CC0-1.0 states in
 #: SPDX terms. The collection README records the USGS citation request.
 DEFAULT_LICENSE = "CC0-1.0"
-DEFAULT_COLLECTION_ID = "lst-p95-composite"
+
+#: The stem every derived collection id starts with. The window follows it, so
+#: `collection_id_for_window` builds `lst-p95-2021-2025`.
+COLLECTION_ID_STEM = "lst-p95"
 
 #: EPSG:4326 is the only coherent grid here: the shard plan is anchored to
 #: whole degrees and sized in pixels per degree.
@@ -150,6 +154,14 @@ LST_ASSET_KEY = "lst_p95"
 QA_ASSET_KEY = "qa_count"
 LST_FILENAME = "lst_p95.tif"
 QA_FILENAME = "qa_count.tif"
+LST_TITLE = "95th percentile land surface temperature"
+#: Why a zero in `qa_count` is data rather than an absence. The band has no
+#: nodata value, so nothing else in the asset says this.
+QA_DESCRIPTION = (
+    "Cloud-free observations entering the percentile, one band per calendar "
+    "month pooled across the window. A zero means masking removed every "
+    "observation for that month, which differs from a masked pixel."
+)
 THUMBNAIL_FILENAME = "thumbnail.png"
 MIRROR_FILENAME = "items.parquet"
 
@@ -471,8 +483,18 @@ def stac_bands(path: Path, unit: str, description: str) -> list[dict[str, Any]]:
     Reading the file rather than the arrays keeps the metadata and the pixels
     from drifting: whatever a client would find in the header is what the STAC
     says it will find.
+
+    STAC 1.1 folded per-band raster metadata into the core `bands` array, and
+    raster v2.0.0 followed: it defines only `raster:`-prefixed fields, so the
+    data type, nodata, and statistics sit on the band itself while the scale,
+    the offset, and the sampling keep the prefix.
+
+    `statistics` and `nodata` are the stored digital numbers, which is the
+    domain the COG header reports and the one a reader meets before applying
+    `raster:scale`. `unit` names what a pixel means once decoded.
     """
     encoding = read_cog_encoding(path)
+    scale, offset = encoding["scale"], encoding["offset"]
     bands: list[dict[str, Any]] = []
     for index, tags in enumerate(encoding["statistics"]):
         band: dict[str, Any] = {
@@ -487,7 +509,15 @@ def stac_bands(path: Path, unit: str, description: str) -> list[dict[str, Any]]:
                 "stddev": float(tags["STATISTICS_STDDEV"]),
                 "valid_percent": float(tags[VALID_PERCENT_KEY]),
             },
+            # A pixel carries the whole cell it covers, not a reading at its
+            # centre: the percentile and the count both summarise an area.
+            "raster:sampling": "area",
         }
+        # Declared only where the file carries a real transform. An identity
+        # scale on `qa_count` would invite a reader to decode a count.
+        if scale is not None and offset is not None and (scale, offset) != (1.0, 0.0):
+            band["raster:scale"] = scale
+            band["raster:offset"] = offset
         if encoding["nodata"] is not None:
             band["nodata"] = encoding["nodata"]
         bands.append(band)
@@ -613,6 +643,12 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _window_label(start: str, end: str) -> str:
+    """`2021-2025` for a five-year window, `2024` for one year."""
+    first, last = str(start)[:4], str(end)[:4]
+    return first if first == last else f"{first}-{last}"
+
+
 # --------------------------------------------------------------------------
 # STAC objects.
 # --------------------------------------------------------------------------
@@ -628,20 +664,33 @@ def build_item(
     end: str,
     crs: str,
 ) -> dict[str, Any]:
-    """The tile item: one footprint, one acquisition window, two COGs."""
+    """The tile item: one footprint, one acquisition window, two COGs.
+
+    The item carries its own `renders`, stretched over its own statistics. An
+    item describes the tile a reader opened, and a client that draws one tile
+    alone never reads the collection. The collection's ramp spans every tile,
+    which is what a mosaic of them needs, so the two differ by design.
+    """
     return {
         "type": "Feature",
         "stac_version": STAC_VERSION,
-        "stac_extensions": [FILE_EXTENSION, PROJECTION_EXTENSION],
+        "stac_extensions": [
+            FILE_EXTENSION,
+            PROJECTION_EXTENSION,
+            RASTER_EXTENSION,
+            RENDER_EXTENSION,
+        ],
         "id": item_id,
         "collection": collection_id,
         "geometry": bbox_geometry(bbox),
         "bbox": [float(v) for v in bbox],
         "properties": {
+            "title": f"{item_id} land surface temperature, {_window_label(start, end)}",
             "datetime": None,
             "start_datetime": _rfc3339(start),
             "end_datetime": _rfc3339(end),
             "proj:code": crs,
+            "renders": _renders([{"assets": assets}]),
         },
         "assets": assets,
         "links": [
@@ -695,7 +744,7 @@ def _renders(items: list[dict[str, Any]]) -> dict[str, Any]:
     high = max(high for _low, high in ranges) if ranges else float(LST_MAX_DN)
     return {
         LST_ASSET_KEY: {
-            "title": "95th percentile land surface temperature",
+            "title": LST_TITLE,
             "assets": [LST_ASSET_KEY],
             "rescale": [[low, high]],
             "colormap_name": "magma",
@@ -1036,6 +1085,25 @@ def catalog_provenance(meta: dict[str, Any], *, collection_id: str) -> dict[str,
     }
 
 
+def collection_id_for_window(meta: dict[str, Any]) -> str:
+    """The collection id the tile's own window earns, e.g. `lst-p95-2021-2025`.
+
+    The window belongs in the id because the id is also the directory name. Two
+    windows aimed at one catalog would otherwise land in one collection, and
+    the later merge would widen the temporal extent over pixels from a window
+    nobody asked about. A single-year window reads `lst-p95-2024`.
+    """
+    missing = [key for key in ("start", "end") if key not in meta]
+    if missing:
+        msg = (
+            f"part-meta.json states no {', '.join(missing)}, so the collection "
+            f"id has no window to carry; rerun the --shard-slice that wrote it, "
+            f"or pass --collection-id"
+        )
+        raise ValueError(msg)
+    return f"{COLLECTION_ID_STEM}-{_window_label(meta['start'], meta['end'])}"
+
+
 def check_catalog_inputs(meta: dict[str, Any]) -> None:
     """Fail before a long merge rather than after it.
 
@@ -1044,7 +1112,7 @@ def check_catalog_inputs(meta: dict[str, Any]) -> None:
     a message in under a second, and it leaves the `.npy` arrays a merge has
     already earned alone.
     """
-    provenance = catalog_provenance(meta, collection_id=DEFAULT_COLLECTION_ID)
+    provenance = catalog_provenance(meta, collection_id=collection_id_for_window(meta))
     if provenance["crs"] != SUPPORTED_CRS:
         msg = f"the degree grid needs {SUPPORTED_CRS}, got {provenance['crs']}"
         raise ValueError(msg)
@@ -1124,10 +1192,14 @@ def _item_assets(lst_path: Path, qa_path: Path, crs: str) -> dict[str, Any]:
         qa_path,
         "Valid observations per calendar month (COG)",
         COG_MEDIA_TYPE,
-        ["data"],
+        # `quality` alongside `data`: the counts are the evidence behind every
+        # surviving percentile, which is what a reader filtering on the role
+        # is looking for.
+        ["data", "quality"],
     )
     qa_asset["bands"] = qa_bands
     qa_asset["proj:code"] = crs
+    qa_asset["description"] = QA_DESCRIPTION
     return {LST_ASSET_KEY: lst_asset, QA_ASSET_KEY: qa_asset}
 
 
@@ -1179,7 +1251,7 @@ def write_catalog(
     qa,
     meta: dict[str, Any],
     *,
-    collection_id: str = DEFAULT_COLLECTION_ID,
+    collection_id: str | None = None,
     host_name: str = DEFAULT_HOST_NAME,
     host_url: str = DEFAULT_HOST_URL,
     license_id: str = DEFAULT_LICENSE,
@@ -1189,10 +1261,14 @@ def write_catalog(
     `meta` is the `part-meta.json` payload: the bbox, the CRS, the pixels per
     degree, and the composite window. Everything else follows from the arrays.
 
+    `collection_id` defaults to the one the tile's own window earns, so two
+    windows cannot collect into one collection by omission.
+
     The tile becomes an item. The collection, the root catalog, the thumbnail,
     and the item mirror are then rebuilt from every item on disk, so calling
     this for a second tile describes both rather than replacing the first.
     """
+    collection_id = collection_id or collection_id_for_window(meta)
     provenance = catalog_provenance(meta, collection_id=collection_id)
     bbox, crs = provenance["bbox"], provenance["crs"]
     item_id = tile_id(bbox)
