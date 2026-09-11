@@ -5,6 +5,7 @@
 #   "planetary-computer", "xarray", "numpy", "geopandas",
 #   "psutil", "rich", "boto3", "pyarrow>=16",
 #   "rasterio", "shapely", "pyogrio",
+#   "stac-geoparquet", "matplotlib",
 # ]
 # ///
 """Sharded p95 LST composite. One shard, one task, no shuffle.
@@ -48,6 +49,16 @@ import aster_ged
 import masks
 import staging
 from aster_ged import DEFAULT_NUMOBS_URI
+from cog_catalog import (
+    DEFAULT_HOST_NAME,
+    DEFAULT_HOST_URL,
+    DEFAULT_LICENSE,
+    MONTH_NAMES,
+    catalog_provenance,
+    check_catalog_inputs,
+    collection_id_for_window,
+    write_catalog,
+)
 from lst_qa import (
     LST_NODATA_DN,
     LST_OFFSET,
@@ -95,20 +106,9 @@ READ_SOURCES = ("earth-search", "planetary-computer")
 #: The only source the sharded path can read. See `configure_read_env`.
 SUPPORTED_READ_SOURCE = "earth-search"
 
-MONTHS = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-]
+#: Band order of the qa_count asset, and the report's column order. Defined
+#: once in cog_catalog, because the COG band descriptions have to match.
+MONTHS = MONTH_NAMES
 GIB = 1024.0**3
 
 
@@ -837,6 +837,42 @@ def parse_args(argv=None):
         "the default drops them",
     )
     p.add_argument(
+        "--no-catalog",
+        action="store_true",
+        help="skip the COGs and the STAC catalog that --merge writes, leaving "
+        "only the .npy arrays",
+    )
+    p.add_argument(
+        "--catalog-dir",
+        type=Path,
+        default=None,
+        help="where the catalog lives; defaults to <out-dir>/catalog. Point "
+        "every tile's merge at one path to collect them in one catalog",
+    )
+    p.add_argument(
+        "--collection-id",
+        default=None,
+        help="the published collection id, which is also its directory name. "
+        "Defaults to the window the parts were composited over, so "
+        "2021-2025 gives lst-p95-2021-2025 and two windows cannot collect "
+        "into one collection by omission",
+    )
+    p.add_argument(
+        "--host-name",
+        default=DEFAULT_HOST_NAME,
+        help="the organization maintaining the published catalog",
+    )
+    p.add_argument(
+        "--host-url",
+        default=DEFAULT_HOST_URL,
+        help="a page where the catalog maintainer can be reached",
+    )
+    p.add_argument(
+        "--license",
+        default=DEFAULT_LICENSE,
+        help="SPDX identifier recorded in collection.json",
+    )
+    p.add_argument(
         "--force",
         action="store_true",
         help="run even if slots x read-threads oversubscribes the cores, or "
@@ -883,30 +919,47 @@ def parse_args(argv=None):
     return args
 
 
-def mask_rule(args, counts) -> dict | None:
+def mask_rule(args, counts, ged_provenance=None) -> dict | None:
     """The rule a part was masked under, for a merge to compare across parts.
 
     None under `--no-output-mask`, which is itself a rule a merge has to see:
     one unmasked part beside three masked ones is a raster no single rule
     describes.
+
+    The inputs are named by identity, not by path. An absolute path on the
+    machine that masked the part tells a reader of the published catalog
+    nothing, and it carries the operator's home directory into a public file.
+    The DOI and the two checksums say which artifact was used, which is the
+    question a consumer and a merge both ask. `summary.json` keeps the paths,
+    because an operator rerunning one slice does want them.
     """
     if counts is None:
         return None
-    return {
-        "numobs_uri": str(args.numobs_uri),
-        "land_geometry_uri": str(args.land_geometry_uri),
+    rule: dict = {
         "gap_buffer_cells": counts.get("gap_buffer_cells"),
         "gap_hot_threshold_c": counts.get("gap_hot_threshold_c"),
+        "land_geometry_sha256": masks.geometry_checksum(args.land_geometry_uri),
     }
+    if ged_provenance:
+        rule["aster_ged"] = ged_provenance
+    return rule
 
 
-def merge_parts(dirs, out_dir: Path) -> int:
+def merge_parts(dirs, out_dir: Path, args) -> int:
     """Assemble one tile from the parts written by --shard-slice runs.
 
     The merge applies no mask. Every part was masked by the machine that wrote
     it, over that machine's own slice, so the pixels arrive already screened.
     What the merge does check is that they were screened the same way: it reads
     every part's meta rather than the first, and stops when two disagree.
+
+    The `.npy` arrays stay: the measurement scripts read them, and they are the
+    cheapest way to reopen a merge. The COGs and the catalog beside them are
+    what a client consumes.
+
+    Whatever the catalog needs from `part-meta.json` is checked before the
+    merge starts, so a run that cannot produce one says so in a second rather
+    than after the arrays are assembled.
     """
     import numpy as np
 
@@ -929,6 +982,11 @@ def merge_parts(dirs, out_dir: Path) -> int:
         )
 
     meta = next(iter(metas.values()))
+    if not args.no_catalog:
+        try:
+            check_catalog_inputs(meta)
+        except ValueError as exc:
+            raise SystemExit(f"cannot write a catalog for this tile: {exc}") from exc
     h, w = meta["raster"]
     lst = np.zeros((h, w), dtype="uint16")
     qa = np.zeros((12, h, w), dtype="uint8")
@@ -965,24 +1023,54 @@ def merge_parts(dirs, out_dir: Path) -> int:
         )
     np.save(out_dir / "lst_p95_dn.npy", lst)
     np.save(out_dir / "qa_count.npy", qa)
-    (out_dir / "merge.json").write_text(
-        json.dumps(
-            {
-                "shards": n,
-                "parts": len(parts),
-                "coverage": covered,
-                "raster": [h, w],
-                "meta": meta,
-                # The rule every part agreed on, hoisted so a reader of the
-                # merged tile does not have to open a part to find it.
-                "mask_rule": meta.get("mask_rule"),
-            },
-            indent=2,
-            default=str,
-        )
-    )
+
+    record: dict = {
+        "shards": n,
+        "parts": len(parts),
+        "coverage": covered,
+        "raster": [h, w],
+        "meta": meta,
+        # The rule every part agreed on, hoisted so a reader of the
+        # merged tile does not have to open a part to find it.
+        "mask_rule": meta.get("mask_rule"),
+    }
+    # The record lands before the catalog, so a merge that took an hour is on
+    # disk whatever the catalog writer then does.
+    merge_json = out_dir / "merge.json"
+    merge_json.write_text(json.dumps(record, indent=2, default=str))
+    if not args.no_catalog:
+        record["catalog"] = str(_write_catalog(out_dir, lst, qa, meta, args))
+        merge_json.write_text(json.dumps(record, indent=2, default=str))
     print(f"artifacts     {out_dir.resolve()}")
     return 0 if covered == 1.0 else 2
+
+
+def _write_catalog(out_dir: Path, lst, qa, meta: dict, args) -> Path:
+    """Write the COGs and the STAC catalog for one merged tile.
+
+    The catalog defaults to a directory beside the arrays, which is what a
+    single tile wants. Several tiles pointed at one `--catalog-dir` land in
+    one collection, an item each.
+    """
+    collection_id = args.collection_id or collection_id_for_window(meta)
+    root = write_catalog(
+        args.catalog_dir or out_dir / "catalog",
+        lst,
+        qa,
+        meta,
+        collection_id=collection_id,
+        host_name=args.host_name,
+        host_url=args.host_url,
+        license_id=args.license,
+    )
+    provenance = catalog_provenance(meta, collection_id=collection_id)
+    print(f"catalog       {root.resolve()}")
+    print(
+        f"encoding      lst_p95 uint16 scale {provenance['lst_scale']} "
+        f"offset {provenance['lst_offset']} nodata {provenance['lst_nodata']}; "
+        f"qa_count uint8 12 bands, no nodata"
+    )
+    return root
 
 
 # The CLI entry point: plan, filter, submit, gather, write, and the merge and
@@ -990,7 +1078,7 @@ def merge_parts(dirs, out_dir: Path) -> int:
 def main(argv=None) -> int:  # noqa: C901
     args = parse_args(argv)
     if args.merge:
-        return merge_parts(args.merge, args.out_dir)
+        return merge_parts(args.merge, args.out_dir, args)
     bbox, tile_id = resolve_area(args)
     res = 1.0 / args.pixels_per_degree
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -1517,7 +1605,11 @@ def main(argv=None) -> int:  # noqa: C901
                     # it across parts, because two machines that masked the
                     # same tile differently produce one raster that no single
                     # rule describes.
-                    "mask_rule": mask_rule(args, mask_counts),
+                    "mask_rule": mask_rule(args, mask_counts, ged_provenance),
+                    # The merge turns these into the item's datetime interval,
+                    # so a catalog states the window its pixels came from.
+                    "start": args.start,
+                    "end": args.end,
                 },
                 indent=2,
             )

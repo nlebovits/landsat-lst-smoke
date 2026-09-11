@@ -69,6 +69,7 @@ hooks = [
     # matters.
     args = [
       "aster_ged.py",
+      "cog_catalog.py",
       "compare_qa_masks.py",
       "cost_report.py",
       "fleet_plan.py",

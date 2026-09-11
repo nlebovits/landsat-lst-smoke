@@ -166,6 +166,37 @@ Do not pair it with `--shard 360`: the small shard is chosen for memory once
 staging has removed the request cost, and unstaged it multiplies that cost
 instead. See `Shard size is a memory decision once staging is on`.
 
+The merge writes `lst_p95_dn.npy` and `qa_count.npy` for the analysis scripts,
+and `tile/catalog/` for everyone else: two COGs on a STAC item, inside a
+Portolan collection with its thumbnail, its item mirror, and its two Markdown
+documents. Pass `--no-catalog` to skip the rasters and keep only the arrays.
+Check the result with the Portolan validator:
+
+```bash
+uv tool install rashid
+rashid check ./tile/catalog --all
+```
+
+Every tile becomes one item of one catalog. Point each tile's merge at the
+same `--catalog-dir`, and each run adds its item, then rebuilds the
+collection, the thumbnail, and the item mirror from every item on disk:
+
+```bash
+uv run shard_lst_p95.py --merge part0 --out-dir ./tile-a \
+  --catalog-dir ./catalog
+uv run shard_lst_p95.py --merge part1 --out-dir ./tile-b \
+  --catalog-dir ./catalog
+```
+
+A tile is named for its north and west edges, fraction included, so the
+5-degree grid reads `S30W065` and a half-degree tile reads `S32.5W062.5`. Two
+tiles can then never take one directory.
+
+Whatever the catalog needs from `part-meta.json` is checked before the merge
+starts. A run that cannot produce a catalog says so in a second instead of
+after the arrays are assembled, and `merge.json` reaches disk before the
+catalog writer runs, so an hour of merging is recorded either way.
+
 The shard plan is deterministic and anchors to whole degrees, so a shard covers
 the same pixels whichever request produced it. Machines need no coordination
 beyond the slice index. Rehearse the same fleet on a laptop first, where
@@ -255,6 +286,72 @@ whatever the retrieval did with the observations it counted.
 
 A consumer that needs the three apart has the tile's `summary.json`, which
 counts each of them, and the mask's own inputs, which are named in it.
+
+The published item states the rules instead of the counts. `processing:lineage`
+names both output rules, the one-cell buffer, and the 70 C threshold, and
+`sci:publications` cites the ASTER GED DOI. The inputs are identified by
+checksum rather than by path: an absolute path on the machine that masked a part
+tells a reader of the catalog nothing, and it would carry the operator's home
+directory into a public file. `summary.json` keeps the paths, because an operator
+rerunning one slice does want them. Because a raster cannot contain its own
+digest, that field is empty whenever the sidecar holding it is absent, and an
+empty string still reads as a checksum a consumer could compare against, so the
+writer omits the digest instead of publishing a blank one.
+
+The generated `AGENTS.md` used to say a nodata pixel meant no observation
+survived cloud, shadow, snow, cirrus, and range masking. Over the ocean that was
+false, and inside an ASTER gap it was false the other way: the pixel had clear
+observations and the retrieval failed. Both documents now state all three
+meanings, and the README quotes what the emissivity rule removed on S30W065.
+
+The merge writes this encoding into two Cloud Optimized GeoTIFFs, so a reader
+gets the rule from the file rather than from this table. `lst_p95.tif` records
+the scale and the offset in its band metadata, which QGIS, `gdalinfo`, and
+rioxarray all read:
+
+```python
+import rioxarray
+
+da = rioxarray.open_rasterio("lst_p95.tif", masked=True)
+
+# The file states its own decoding rule.
+scale, offset = da.rio.scales[0], da.rio.offsets[0]  # 0.01, -50.0
+celsius = da * scale + offset
+```
+
+Both files belong to a Portolan catalog written beside the merged arrays. The
+internal tiles are 512 by 512 pixels. Internal overviews let a client draw the
+tile without reading full-resolution pixels. Each band records its minimum,
+maximum, mean, standard deviation, and valid percent in the header, not in an
+`.aux.xml` sidecar. A sidecar is a second file, and a range request over the
+raster returns none of it. `cog_catalog.py` writes all of this, and
+`tests/test_cog_catalog.py` refuses a tree that `rashid`, the Portolan
+validator, reports an error on.
+
+The writer reopens every COG it produces and checks the block size, the
+overviews, the statistics, and the decoding rule against what it asked for. A
+scale the driver dropped is the one failure that leaves a file which reads as
+valid and decodes to nonsense, so it is checked rather than assumed.
+
+The STAC says the same thing through the extensions that already define it. The
+item declares raster v2.0.0 and render v2.0.0, and the band states the decoding
+rule as `raster:scale` and `raster:offset`, beside the `unit`, the `nodata`, and
+the statistics. No `lst:`-prefixed property restates any of it. Portolan reuses
+an established extension wherever one applies, and every field here has a
+registered home.
+
+`statistics`, `nodata`, and the render's `rescale` are all the stored digital
+numbers. That is the domain the COG header reports, and the one a reader meets
+before it applies `raster:scale`. Decoding them in the STAC would invite a
+client that honours the scale to apply it twice. `unit` names what a pixel means
+once decoded, which is the one field describing the far side of the transform.
+
+A collection id includes the window its pixels came from, so 2021-2025 writes
+`lst-p95-2021-2025`. The id is also the directory name. A shared id would put a
+second window's tiles in the first window's collection, and the later merge would
+then widen the temporal extent over pixels nobody asked about. So the id comes
+from `part-meta.json` rather than from a default, and `--collection-id` overrides
+it.
 
 ## Architecture: shard, do not tune
 
@@ -2268,6 +2365,7 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `shard_lst_p95.py` | the sharded pipeline, the slicer, and the merge |
 | `profile_lst_p95.py` | the array-graph profiling harness |
 | `lst_qa.py` | the QA, fill, range, and nodata rules both P95 paths call |
+| `cog_catalog.py` | writes the COGs and the Portolan catalog the merge emits |
 | `stac_window.py` | the composite window, and the cache identity it fixes |
 | `land_tiles.py` | the buffered land geometry and the generated tile list |
 | `masks.py` | the pixel rules: water, and the ASTER emissivity gap |
