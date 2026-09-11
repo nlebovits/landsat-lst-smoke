@@ -2341,6 +2341,17 @@ records the same count for one that would rather read a file.
   has been prepped. Watch it beside the rejected share. A high one says the
   swath definition described less ground than the scenes cover, so the
   cross-fade describes less of the tile than the composite implies.
+- **A capped prep run counted its swaths against the wrong denominator.**
+  `--max-blocks` truncates the work list before any coverage accumulates, and
+  `swath_masks` still divides each quad's per-cell count by every scene the
+  inventory gave that quad. So a smoke run measured coverage over part of the
+  tile, compared it against all of the tile's scenes, and wrote the small
+  swaths that follow as an ordinary artifact. Every one of `load_tile_prep`'s
+  refusals passed it. The meta recorded `{"planned": len(blocks), "run":
+  len(stats)}`, which could not signal this either: `planned` counted the
+  barren blocks that were never going to run, so an uncapped run also showed
+  `run` below `planned`. The pair is now `with_scenes` against `run`, beside
+  `max_blocks` and a `partial` flag, and a slice refuses a partial artifact.
 - **The prep memory model is arithmetic, not a measurement.**
   `tile_prep.memory_model` names five resident terms and `--target-memory-gib`
   refuses a run that exceeds them, the way `worker_memory_guard` does for a

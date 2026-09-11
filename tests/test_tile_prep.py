@@ -109,19 +109,62 @@ def loaded(monkeypatch):
     return items
 
 
+BLOCK = tile_prep.DEFAULT_BLOCK
+
+
 class TestTheGrid:
     def test_a_factor_that_does_not_divide_the_output_grid_is_refused(self):
         with pytest.raises(SystemExit, match="does not divide"):
-            tile_prep.check_grid(3600, 7, 8)
+            tile_prep.check_grid(3600, 7, 8, BLOCK)
 
     def test_a_swath_cell_may_not_straddle_two_prep_blocks(self):
         with pytest.raises(SystemExit, match="does not divide by swath grid"):
-            tile_prep.check_grid(3600, 16, 8)
+            tile_prep.check_grid(3600, 16, 8, BLOCK)
 
     def test_the_ratio_is_the_prep_grid_over_the_swath_grid(self):
-        assert tile_prep.check_grid(3600, 4, 8) == 2
-        assert tile_prep.check_grid(3600, 1, 8) == 8
-        assert tile_prep.check_grid(3600, 8, 8) == 1
+        assert tile_prep.check_grid(3600, 4, 8, BLOCK) == 2
+        assert tile_prep.check_grid(3600, 1, 8, BLOCK) == 8
+        assert tile_prep.check_grid(3600, 8, 8, BLOCK) == 1
+
+    def test_a_block_that_is_not_whole_swath_cells_is_refused(self):
+        """The one ragged ratio `check_grid` used to let through.
+
+        `plan_shards` starts block n at `n * block`, and `prep_block` reports
+        its coarse origin as `block.y0 // ratio`. At ratio 4 and block 510,
+        block 1 lands on coarse cell 127 where its origin is 127.5, so two
+        blocks write the same coarse row and `accumulate` counts it twice.
+        """
+        with pytest.raises(SystemExit, match="not a whole number of swath cells"):
+            tile_prep.check_grid(3600, 4, 16, 510)
+
+    def test_the_default_block_divides_the_default_ratio(self):
+        assert tile_prep.check_grid(3600, 4, 8, tile_prep.DEFAULT_BLOCK) == 2
+
+    def test_a_message_names_every_problem_at_once(self):
+        # An operator fixing one flag should not have to rerun to find the
+        # next, which is why `check_grid` collects before it raises.
+        with pytest.raises(SystemExit) as caught:
+            tile_prep.check_grid(3600, 7, 7, 510)
+        assert str(caught.value).count(";") >= 1
+
+    def test_a_swath_grid_that_would_drop_a_row_is_refused(self):
+        """`swath_shape` floors, and `accumulate` clamps to it.
+
+        A remainder therefore discards the last row of swath cells without a
+        word, and a path whose only cell is in there loses its swath. MEASURED
+        at `--margin-deg 0.125` on a 7 degree tile at prep factor 4: 6,525 prep
+        rows against a ratio of 2.
+        """
+        with pytest.raises(SystemExit, match="the swath grid would drop"):
+            tile_prep.check_swath_grid(6525, 6300, 2)
+
+    def test_a_grid_the_ratio_divides_passes(self):
+        assert tile_prep.check_swath_grid(8100, 8100, 2) is None
+
+    def test_the_message_names_the_flag_that_moves_the_remainder(self):
+        with pytest.raises(SystemExit) as caught:
+            tile_prep.check_swath_grid(6525, 6300, 2)
+        assert "--margin-deg" in str(caught.value)
 
     def test_the_margin_runs_the_grid_past_the_tile(self):
         assert tile_prep.prep_bbox((-65.0, -30.0, -60.0, -25.0), 1.0) == (

@@ -1306,10 +1306,10 @@ def load_tile_prep(args, tile_id: str, item_dicts, run_provenance):
 
     Returns None when the run was not given one, which composites pooled.
 
-    Five checks, and each one guards a failure that produces a finished raster
+    Six checks, and each one guards a failure that produces a finished raster
     rather than an error. Compositing against another tile's offsets, another
-    grid's weights, or another scene list's estimates all look ordinary in the
-    output.
+    grid's weights, another scene list's estimates, or a smoke run's partial
+    coverage all look ordinary in the output.
 
     `item_dicts` must be the list the shards will actually load, after
     `staging.drop_scenes_without_thermal`, because that is the list `tile_prep`
@@ -1322,6 +1322,17 @@ def load_tile_prep(args, tile_id: str, item_dicts, run_provenance):
         return None
     prep = destripe.load_prep(args.tile_prep)
     rebuild = f"Rebuild it with tile_prep.py --tile {tile_id}."
+
+    blocks = prep.meta.get("blocks") or {}
+    if blocks.get("partial"):
+        raise SystemExit(
+            f"{args.tile_prep} was built from {blocks.get('run')} of "
+            f"{blocks.get('with_scenes')} blocks holding scenes, under "
+            f"--max-blocks {blocks.get('max_blocks')}. Each quad's swath was "
+            f"counted over part of the tile and divided by all of its scenes, "
+            f"so the swaths are too small and the offsets rest on too few "
+            f"pixels. Rerun tile_prep.py without --max-blocks."
+        )
 
     if prep.meta.get("schema_version") != tile_prep_schema_version():
         raise SystemExit(

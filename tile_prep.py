@@ -169,11 +169,21 @@ def prep_bbox(tile_bbox, margin_deg: float):
     )
 
 
-def check_grid(pixels_per_degree: int, prep_factor: int, swath_factor: int) -> int:
+def check_grid(
+    pixels_per_degree: int, prep_factor: int, swath_factor: int, block: int
+) -> int:
     """The prep-to-swath ratio, refusing any combination that leaves a remainder.
 
     A ragged ratio would put a swath cell across two prep blocks, and the two
     blocks would then disagree about whether a path reached it.
+
+    The block size is the third way to get one. `plan_shards` starts every
+    block at an exact multiple of `block`, and `prep_block` returns its coarse
+    origin as `block.y0 // ratio`. A block that is not a whole number of swath
+    cells truncates that division, so neighbouring blocks write overlapping
+    coarse rows and `accumulate` counts one cell twice while the far edge
+    drifts. MEASURED at `--block 510 --swath-factor 16`: ratio 4, and block 1
+    lands on coarse cell 127 where its true origin is 127.5.
     """
     problems = []
     for name, factor in (("prep", prep_factor), ("swath", swath_factor)):
@@ -187,9 +197,43 @@ def check_grid(pixels_per_degree: int, prep_factor: int, swath_factor: int) -> i
         problems.append(
             f"prep grid {prep_ppd} does not divide by swath grid {swath_ppd}"
         )
+    ratio = prep_ppd // swath_ppd if swath_ppd else 0
+    if ratio and block % ratio:
+        problems.append(
+            f"block {block} is not a whole number of swath cells: it spans "
+            f"{block / ratio} cells at a ratio of {ratio}"
+        )
     if problems:
         raise SystemExit("; ".join(problems))
-    return prep_ppd // swath_ppd
+    return ratio
+
+
+def check_swath_grid(height: int, width: int, ratio: int) -> None:
+    """Refuse a prep grid the swath grid cannot cover.
+
+    `swath_shape` is the prep grid floored by the ratio, and `accumulate`
+    clamps a block's coverage to it. A remainder therefore drops the last row
+    or column of swath cells, and a path whose only cell is in there loses its
+    swath without a word. MEASURED at `--margin-deg 0.125` on a 7 degree tile
+    at prep factor 4: a height of 6,525 prep rows against a ratio of 2.
+
+    The margin is what usually causes it, because the tile edges are whole
+    degrees and the margin need not be.
+
+    Raises:
+        SystemExit: naming the remainder and the flag that moves it.
+    """
+    problems = [
+        f"the prep grid is {size:,} {name} against a swath ratio of {ratio}, "
+        f"leaving {size % ratio} that the swath grid would drop"
+        for size, name in ((height, "rows"), (width, "columns"))
+        if size % ratio
+    ]
+    if problems:
+        raise SystemExit(
+            "; ".join(problems) + ". Choose a --margin-deg whose pixels divide "
+            "by the ratio, or a --swath-factor that divides the grid."
+        )
 
 
 def swath_transform(bbox, pixels_per_degree: int, swath_factor: int):
@@ -531,13 +575,16 @@ def main(argv=None) -> int:  # noqa: C901
     import numpy as np
 
     args = parse_args(argv)
-    ratio = check_grid(args.pixels_per_degree, args.prep_factor, args.swath_factor)
+    ratio = check_grid(
+        args.pixels_per_degree, args.prep_factor, args.swath_factor, args.block
+    )
     bbox = prep_bbox(tile_bounds(args.tile), args.margin_deg)
     prep_ppd = args.pixels_per_degree // args.prep_factor
     swath_ppd = args.pixels_per_degree // args.swath_factor
     resolution = 1.0 / prep_ppd
 
     blocks, height, width = plan_shards(bbox, prep_ppd, args.block)
+    check_swath_grid(height, width, ratio)
     swath_shape = (height // ratio, width // ratio)
     print(f"tile          {args.tile}  margin {args.margin_deg} deg -> {bbox}")
     print(
@@ -560,8 +607,20 @@ def main(argv=None) -> int:  # noqa: C901
     }
     per_block = [items_for_shard(b, boxes) for b in blocks]
     work = [(b, idx) for b, idx in zip(blocks, per_block, strict=True) if idx]
+    # Blocks with no scene were never going to contribute coverage, so they are
+    # not what `--max-blocks` takes away. This is the denominator the artifact
+    # records, and the one the truncation is measured against.
+    with_scenes = len(work)
     if args.max_blocks:
         work = work[: args.max_blocks]
+    partial = len(work) < with_scenes
+    if partial:
+        print(
+            f"WARNING       --max-blocks runs {len(work)} of {with_scenes} "
+            f"blocks with scenes. Every quad's swath is counted over part of "
+            f"the tile and divided by all of its scenes, so the swaths come "
+            f"out small. A slice refuses this artifact."
+        )
     slots = args.workers * args.threads_per_worker
     model = memory_model(
         args.block,
@@ -671,7 +730,17 @@ def main(argv=None) -> int:  # noqa: C901
             "n_scenes": len(items),
             "scenes_without_thermal": dropped,
             "offsets": diagnostics,
-            "blocks": {"planned": len(blocks), "run": len(stats)},
+            # `planned` counted every block, barren ones included, so an
+            # ordinary run showed `run` below it and the pair said nothing
+            # about truncation. `with_scenes` is the number that was going to
+            # run, and `partial` is the flag a slice refuses on.
+            "blocks": {
+                "planned": len(blocks),
+                "with_scenes": with_scenes,
+                "run": len(stats),
+                "max_blocks": args.max_blocks,
+                "partial": partial,
+            },
             "block_stats": stats[:200],
             "inventory": run_provenance,
             "window": window,

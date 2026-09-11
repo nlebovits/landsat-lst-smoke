@@ -171,6 +171,56 @@ class TestLoadingThePrepFile:
                 {"schema_version": 1, "built_at": "2026-09-10"},
             )
 
+    def test_a_smoke_run_artifact_is_refused(self, tmp_path):
+        """`--max-blocks` measures coverage over part of the tile.
+
+        Every quad's swath is counted from the blocks that ran and divided by
+        all of that quad's scenes, so the half-the-scenes threshold has the
+        wrong denominator and the swaths come out small. The offsets rest on
+        too few pixels for the same reason. A run against it finishes and
+        writes an ordinary-looking raster.
+        """
+        write_prep(
+            tmp_path,
+            items(),
+            blocks={
+                "planned": 412,
+                "with_scenes": 412,
+                "run": 8,
+                "max_blocks": 8,
+                "partial": True,
+            },
+        )
+        with pytest.raises(SystemExit, match="8 of 412 blocks"):
+            shard_lst_p95.load_tile_prep(run_args(tmp_path), TILE, items(), PROVENANCE)
+
+    def test_a_whole_run_carries_no_partial_flag(self, tmp_path):
+        write_prep(
+            tmp_path,
+            items(),
+            blocks={
+                "planned": 412,
+                "with_scenes": 400,
+                "run": 400,
+                "max_blocks": None,
+                "partial": False,
+            },
+        )
+        prep = shard_lst_p95.load_tile_prep(
+            run_args(tmp_path), TILE, items(), PROVENANCE
+        )
+        assert prep is not None
+
+    def test_an_artifact_with_no_block_record_still_loads(self, tmp_path):
+        # `blocks` is absent from a file written before the key existed, and
+        # absent is not partial. Refusing on a missing key would reject every
+        # prep file the earlier version wrote.
+        write_prep(tmp_path, items())
+        assert (
+            shard_lst_p95.load_tile_prep(run_args(tmp_path), TILE, items(), PROVENANCE)
+            is not None
+        )
+
     def test_the_scene_order_cannot_change_the_digest(self):
         forward = [destripe.scene_id_of(d) for d in items(5)]
         assert destripe.scene_digest(forward, WINDOW) == destripe.scene_digest(
