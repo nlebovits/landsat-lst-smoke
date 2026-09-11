@@ -14,6 +14,7 @@ tree the writer produced and reports every Portolan requirement it breaks.
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -25,9 +26,11 @@ from cog_catalog import (  # noqa: E402
     BLOCK_SIZE,
     LST_ASSET_KEY,
     MONTH_NAMES,
+    PROCESSING_EXTENSION,
     QA_ASSET_KEY,
     RASTER_EXTENSION,
     RENDER_EXTENSION,
+    SCIENTIFIC_EXTENSION,
     STATISTICS_KEYS,
     THUMBNAIL_FILENAME,
     VALID_PERCENT_KEY,
@@ -37,6 +40,7 @@ from cog_catalog import (  # noqa: E402
     band_statistics,
     catalog_provenance,
     check_raster_shape,
+    mask_lineage,
     multihash_sha256,
     read_cog_encoding,
     read_items,
@@ -421,6 +425,90 @@ class TestTheItemDescribesItself:
             band["statistics"]["minimum"],
             band["statistics"]["maximum"],
         )
+
+
+ASTER_GED: dict[str, Any] = {
+    "short_name": "AG1km",
+    "version": "003",
+    "doi": "10.5067/COMMUNITY/ASTER_GED/AG1KM.003",
+    "granule_count": 14128,
+    "raster_sha256": "6c3b0f845242bdf5",
+}
+MASK_RULE: dict[str, Any] = {
+    "gap_buffer_cells": 1,
+    "gap_hot_threshold_c": 70.0,
+    "land_geometry_sha256": "35170d2371beacac",
+    "aster_ged": ASTER_GED,
+}
+
+
+class TestTheMaskExplainsItself:
+    """A nodata pixel means one of three things, and the raster says which.
+
+    Water, a failed emissivity retrieval inside an ASTER GED gap, and no usable
+    observation all read as DN 0. The item states the rules instead, and names
+    the artifacts they read by checksum rather than by a path on the machine
+    that ran the mask.
+    """
+
+    def test_the_lineage_names_both_output_rules(self):
+        lineage = mask_lineage(MASK_RULE)["processing:lineage"]
+        assert "Water:" in lineage
+        assert "Emissivity:" in lineage
+        assert "70.0 C or hotter" in lineage
+        assert "lies 1 cell from such a cell" in lineage
+
+    def test_the_lineage_names_the_artifacts_by_checksum(self):
+        lineage = mask_lineage(MASK_RULE)["processing:lineage"]
+        assert "6c3b0f845242bdf5" in lineage
+        assert "35170d2371beacac" in lineage
+        assert "AG1km v003" in lineage
+
+    def test_the_aster_doi_is_cited(self):
+        publications = mask_lineage(MASK_RULE)["sci:publications"]
+        assert publications[0]["doi"] == "10.5067/COMMUNITY/ASTER_GED/AG1KM.003"
+
+    def test_an_empty_digest_is_left_out_rather_than_published(self):
+        # A raster cannot hold its own digest, so it is empty whenever the
+        # sidecar carrying it is absent. An empty one reads as a checksum a
+        # consumer can compare against, which is worse than none.
+        rule = MASK_RULE | {"aster_ged": ASTER_GED | {"raster_sha256": ""}}
+        lineage = mask_lineage(rule)["processing:lineage"]
+        assert "raster sha256" not in lineage
+        assert "14,128 granules." in lineage
+
+    def test_an_unmasked_tile_says_the_gaps_are_still_there(self):
+        lineage = mask_lineage(None)
+        assert "No output mask ran" in lineage["processing:lineage"]
+        # Nothing read ASTER GED, so nothing cites it.
+        assert "sci:publications" not in lineage
+
+    def test_no_path_from_the_masking_machine_reaches_the_item(self, tmp_path):
+        # An absolute path tells a reader of a published catalog nothing, and
+        # it carries the operator's home directory into a public file.
+        _lst = encode_celsius(np.full((SIZE, SIZE), 30.0, dtype="float32"))
+        qa = np.zeros((12, SIZE, SIZE), dtype="uint8")
+        meta = meta_for(BBOX) | {"mask_rule": MASK_RULE}
+        root = write_catalog(
+            tmp_path / "catalog", _lst, qa, meta, collection_id=COLLECTION_ID
+        )
+        for path in root.rglob("*.json"):
+            assert "/home/" not in path.read_text()
+        for path in root.rglob("*.md"):
+            assert "/home/" not in path.read_text()
+
+    def test_the_item_declares_the_extensions_the_lineage_needs(self, tmp_path):
+        _lst = encode_celsius(np.full((SIZE, SIZE), 30.0, dtype="float32"))
+        qa = np.zeros((12, SIZE, SIZE), dtype="uint8")
+        meta = meta_for(BBOX) | {"mask_rule": MASK_RULE}
+        root = write_catalog(
+            tmp_path / "catalog", _lst, qa, meta, collection_id=COLLECTION_ID
+        )
+        item = json.loads(
+            (root / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        assert PROCESSING_EXTENSION in item["stac_extensions"]
+        assert SCIENTIFIC_EXTENSION in item["stac_extensions"]
 
 
 class TestCatalogStructure:

@@ -287,6 +287,23 @@ whatever the retrieval did with the observations it counted.
 A consumer that needs the three apart has the tile's `summary.json`, which
 counts each of them, and the mask's own inputs, which are named in it.
 
+The published item states the rules instead of the counts. `processing:lineage`
+names both output rules, the one-cell buffer, and the 70 C threshold, and
+`sci:publications` cites the ASTER GED DOI. The inputs are identified by
+checksum rather than by path: an absolute path on the machine that masked a part
+tells a reader of the catalog nothing, and it would carry the operator's home
+directory into a public file. `summary.json` keeps the paths, because an operator
+rerunning one slice does want them. Because a raster cannot contain its own
+digest, that field is empty whenever the sidecar holding it is absent, and an
+empty string still reads as a checksum a consumer could compare against, so the
+writer omits the digest instead of publishing a blank one.
+
+The generated `AGENTS.md` used to say a nodata pixel meant no observation
+survived cloud, shadow, snow, cirrus, and range masking. Over the ocean that was
+false, and inside an ASTER gap it was false the other way: the pixel had clear
+observations and the retrieval failed. Both documents now state all three
+meanings, and the README quotes what the emissivity rule removed on S30W065.
+
 The merge writes this encoding into two Cloud Optimized GeoTIFFs, so a reader
 gets the rule from the file rather than from this table. `lst_p95.tif` records
 the scale and the offset in its band metadata, which QGIS, `gdalinfo`, and

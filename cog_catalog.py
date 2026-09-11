@@ -114,6 +114,11 @@ FILE_EXTENSION = "https://stac-extensions.github.io/file/v2.1.0/schema.json"
 PROJECTION_EXTENSION = "https://stac-extensions.github.io/projection/v2.0.0/schema.json"
 RENDER_EXTENSION = "https://stac-extensions.github.io/render/v2.0.0/schema.json"
 RASTER_EXTENSION = "https://stac-extensions.github.io/raster/v2.0.0/schema.json"
+SCIENTIFIC_EXTENSION = "https://stac-extensions.github.io/scientific/v1.0.0/schema.json"
+#: Absent from the Portolan profile registry, which is allowed. PTL-CNF-004
+#: governs only what the registry lists: "Extensions absent from the registry
+#: are ignored: the registry governs what it lists, not what a publisher adds."
+PROCESSING_EXTENSION = "https://stac-extensions.github.io/processing/v1.2.0/schema.json"
 
 COG_MEDIA_TYPE = "image/tiff; application=geotiff; profile=cloud-optimized"
 PARQUET_MEDIA_TYPE = "application/vnd.apache.parquet"
@@ -663,6 +668,7 @@ def build_item(
     start: str,
     end: str,
     crs: str,
+    mask_rule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The tile item: one footprint, one acquisition window, two COGs.
 
@@ -670,16 +676,25 @@ def build_item(
     item describes the tile a reader opened, and a client that draws one tile
     alone never reads the collection. The collection's ramp spans every tile,
     which is what a mosaic of them needs, so the two differ by design.
+
+    The mask lineage is on the item for the same reason. The rules ran over
+    this tile's pixels, and a tile masked against a different ASTER GED build
+    says so itself rather than inheriting a collection-wide claim.
     """
+    lineage = mask_lineage(mask_rule)
+    extensions = [
+        FILE_EXTENSION,
+        PROJECTION_EXTENSION,
+        RASTER_EXTENSION,
+        RENDER_EXTENSION,
+        PROCESSING_EXTENSION,
+    ]
+    if "sci:publications" in lineage:
+        extensions.append(SCIENTIFIC_EXTENSION)
     return {
         "type": "Feature",
         "stac_version": STAC_VERSION,
-        "stac_extensions": [
-            FILE_EXTENSION,
-            PROJECTION_EXTENSION,
-            RASTER_EXTENSION,
-            RENDER_EXTENSION,
-        ],
+        "stac_extensions": extensions,
         "id": item_id,
         "collection": collection_id,
         "geometry": bbox_geometry(bbox),
@@ -691,6 +706,7 @@ def build_item(
             "end_datetime": _rfc3339(end),
             "proj:code": crs,
             "renders": _renders([{"assets": assets}]),
+            **lineage,
         },
         "assets": assets,
         "links": [
@@ -997,6 +1013,24 @@ def _collection_readme(
         f"`{QA_ASSET_KEY}` has no nodata value by design. A value of 0 means "
         "that no valid observation survived masking for that month. Keeping "
         "zero visible lets you tell this gap apart from masked data.\n\n"
+        "## Limitations\n\n"
+        f"A nodata `{LST_ASSET_KEY}` pixel means one of three things, and the "
+        "raster separates none of them: no usable observation, water, or an "
+        "emissivity retrieval that failed inside an ASTER GED coverage gap. "
+        "Only the first would improve with a wider window. Each item's "
+        "`processing:lineage` states the rules that produced its pixels and "
+        "names the artifacts they read by checksum.\n\n"
+        "Where ASTER GED caught no clear sky between 2000 and 2008, the USGS "
+        "interpolates emissivity from neighbouring cells and retrieves a "
+        "temperature anyway, and some of those retrievals fail upward. A pixel "
+        "is removed only where its cell reports zero observations, or lies one "
+        "cell from such a cell, and the pixel also reads 70 C or hotter. "
+        "Masking the gap geometry alone was measured on S30W065 to remove "
+        "701,839 valid pixels to remove 4,588 bad ones; the pair removes "
+        "5,432 and reaches more of the tail. 503 hot pixels survive on that "
+        "tile, in cells that did have observations. The 70 C threshold is a "
+        "screen calibrated on one tile with no published source, so it makes "
+        "no claim about the hottest land surface.\n\n"
         "## Decoding\n\n"
         f"{_decode_snippet(f'{item_id}/{LST_FILENAME}')}\n"
         "If you already know the constants:\n\n"
@@ -1029,9 +1063,23 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
         "the tile without touching full-resolution pixels.\n\n"
         "## Decoding temperature\n\n"
         f"{_decode_snippet(f'{item_id}/{LST_FILENAME}')}\n"
-        f"DN {LST_NODATA_DN} is nodata. It marks a pixel where no observation "
-        "survived cloud, shadow, snow, cirrus, and range masking, so treat it "
-        "as absent rather than cold.\n\n"
+        f"DN {LST_NODATA_DN} is nodata. Treat it as absent rather than cold.\n\n"
+        "## What a nodata pixel means\n\n"
+        "Three different facts, and the raster separates none of them:\n\n"
+        "| Meaning | Rule | Would a wider window fix it |\n"
+        "|---|---|---|\n"
+        "| No usable observation | every scene was cloudy, or the pixel is "
+        "off every footprint | yes |\n"
+        "| Water | outside the buffered land geometry | no |\n"
+        "| Failed emissivity retrieval | hot inside an ASTER GED coverage "
+        "gap | no |\n\n"
+        "Do not read a nodata pixel as missing data over the ocean: the water "
+        "rule zeroes `qa_count` with the temperature, so a count of 0 beside "
+        "a nodata pixel is the signature of sea rather than of cloud. The "
+        "emissivity rule leaves `qa_count` alone, so a nodata pixel with a "
+        "count above 0 was screened rather than never seen. The item's "
+        "`processing:lineage` states both rules and names the artifacts they "
+        "read by checksum.\n\n"
         "## Reading the observation counts\n\n"
         f"`{QA_ASSET_KEY}` has 12 bands, January through December. Band `m` "
         "counts the clear observations that entered the percentile for that "
@@ -1051,6 +1099,73 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
 
 #: What `part-meta.json` has to state before a catalog can describe the tile.
 REQUIRED_META_KEYS = ("bbox", "crs", "pixels_per_degree", "start", "end")
+
+#: Why the per-scene QA screen alone does not explain a nodata pixel.
+_QA_LINEAGE = (
+    "Per-scene screening removes cloud, cloud shadow, snow, cirrus, and "
+    "out-of-range pixels before the percentile. A pixel with no surviving "
+    "observation is nodata."
+)
+
+
+def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
+    """The properties that say which pixels the output mask removed, and why.
+
+    A nodata `lst_p95` pixel carries three meanings: no usable observation,
+    water, or an emissivity retrieval that failed inside an ASTER GED coverage
+    gap. Nothing in the raster separates them, so the item states the rules it
+    was masked under and names the artifacts by DOI and checksum.
+
+    `processing:lineage` and `sci:publications` are the registered homes for
+    this. No `lst:`-prefixed property restates any of it.
+    """
+    if not mask_rule:
+        return {
+            "processing:lineage": (
+                f"{_QA_LINEAGE} No output mask ran, so sea pixels and ASTER "
+                "GED emissivity gaps are present in this tile."
+            )
+        }
+    buffer_cells = mask_rule.get("gap_buffer_cells")
+    threshold = mask_rule.get("gap_hot_threshold_c")
+    ged = mask_rule.get("aster_ged") or {}
+    sentences = [
+        _QA_LINEAGE,
+        "Two further rules then run over the assembled tile. Water: a pixel "
+        "outside the buffered land geometry becomes nodata, and its qa_count "
+        "becomes 0, so the two bands cannot disagree about a pixel that was "
+        "never this product's subject.",
+        f"Emissivity: a pixel whose ASTER GED cell reports no clear-sky "
+        f"observation, or lies {buffer_cells} cell from such a cell, becomes "
+        f"nodata when it reads {threshold} C or hotter. Its qa_count is left "
+        f"alone, because the count of clear observations stays true whatever "
+        f"the retrieval did with them.",
+    ]
+    if ged.get("short_name"):
+        read_from = (
+            f"Emissivity coverage read from {ged['short_name']} v"
+            f"{ged.get('version')}, {ged.get('granule_count'):,} granules"
+        )
+        # An empty digest is worse than an absent one: it reads as a checksum
+        # a consumer can compare against. A raster cannot hold its own digest,
+        # so it stays empty whenever the sidecar that carries it is absent.
+        if ged.get("raster_sha256"):
+            read_from += f", raster sha256 {ged['raster_sha256']}"
+        sentences.append(f"{read_from}.")
+    if mask_rule.get("land_geometry_sha256"):
+        sentences.append(f"Land geometry sha256 {mask_rule['land_geometry_sha256']}.")
+    properties: dict[str, Any] = {"processing:lineage": " ".join(sentences)}
+    if ged.get("doi"):
+        properties["sci:publications"] = [
+            {
+                "doi": ged["doi"],
+                "citation": (
+                    f"ASTER Global Emissivity Dataset {ged['short_name']} v"
+                    f"{ged.get('version')}. NASA LP DAAC."
+                ),
+            }
+        ]
+    return properties
 
 
 def catalog_provenance(meta: dict[str, Any], *, collection_id: str) -> dict[str, Any]:
@@ -1290,6 +1405,7 @@ def write_catalog(
         start=provenance["start"],
         end=provenance["end"],
         crs=crs,
+        mask_rule=meta.get("mask_rule"),
     )
     _dump(item_dir / f"{item_id}.json", item)
 

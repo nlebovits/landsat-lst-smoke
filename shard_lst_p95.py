@@ -919,21 +919,30 @@ def parse_args(argv=None):
     return args
 
 
-def mask_rule(args, counts) -> dict | None:
+def mask_rule(args, counts, ged_provenance=None) -> dict | None:
     """The rule a part was masked under, for a merge to compare across parts.
 
     None under `--no-output-mask`, which is itself a rule a merge has to see:
     one unmasked part beside three masked ones is a raster no single rule
     describes.
+
+    The inputs are named by identity, not by path. An absolute path on the
+    machine that masked the part tells a reader of the published catalog
+    nothing, and it carries the operator's home directory into a public file.
+    The DOI and the two checksums say which artifact was used, which is the
+    question a consumer and a merge both ask. `summary.json` keeps the paths,
+    because an operator rerunning one slice does want them.
     """
     if counts is None:
         return None
-    return {
-        "numobs_uri": str(args.numobs_uri),
-        "land_geometry_uri": str(args.land_geometry_uri),
+    rule: dict = {
         "gap_buffer_cells": counts.get("gap_buffer_cells"),
         "gap_hot_threshold_c": counts.get("gap_hot_threshold_c"),
+        "land_geometry_sha256": masks.geometry_checksum(args.land_geometry_uri),
     }
+    if ged_provenance:
+        rule["aster_ged"] = ged_provenance
+    return rule
 
 
 def merge_parts(dirs, out_dir: Path, args) -> int:
@@ -1596,7 +1605,7 @@ def main(argv=None) -> int:  # noqa: C901
                     # it across parts, because two machines that masked the
                     # same tile differently produce one raster that no single
                     # rule describes.
-                    "mask_rule": mask_rule(args, mask_counts),
+                    "mask_rule": mask_rule(args, mask_counts, ged_provenance),
                     # The merge turns these into the item's datetime interval,
                     # so a catalog states the window its pixels came from.
                     "start": args.start,

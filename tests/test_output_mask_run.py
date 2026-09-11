@@ -119,10 +119,26 @@ class TestAMaskedRun:
 
     def test_it_names_the_artifacts_that_decided(self, run):
         # A masked tile is only reproducible if the two artifacts are named.
+        # `summary.json` is the operator's record and keeps the paths, because
+        # an operator rerunning one slice does want them.
         _, summary, _ = run
         assert summary["mask"]["numobs_uri"]
         assert summary["mask"]["land_geometry_uri"]
         assert summary["mask"]["aster_ged"]["short_name"] == "AG1km"
+
+    def test_the_part_names_the_artifacts_by_identity_not_by_path(self, run):
+        # `part-meta.json` reaches the published catalog, and an absolute path
+        # on the masking machine tells a reader of it nothing. It would also
+        # carry the operator's home directory into a public file.
+        _, _, out = run
+        rule = json.loads((out / "part-meta.json").read_text())["mask_rule"]
+        assert "numobs_uri" not in rule
+        assert "land_geometry_uri" not in rule
+        assert rule["land_geometry_sha256"]
+        assert rule["aster_ged"]["doi"].startswith("10.5067/")
+        # The digest rides along, empty here: a raster cannot hold its own, and
+        # this fixture writes no sidecar to carry it.
+        assert "raster_sha256" in rule["aster_ged"]
 
     def test_the_statistics_describe_the_masked_product(self, run):
         # The mask goes on before anything is measured. A summary computed
