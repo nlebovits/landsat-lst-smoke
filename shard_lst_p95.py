@@ -430,30 +430,25 @@ def rehearse_shard(
     }
 
 
-def process_shard(
-    shard: Shard,
-    item_dicts,
-    crs: str,
-    resolution: float,
-    read_threads: int = 4,
-    correction=None,
-) -> dict:
-    """Load, mask, reduce and encode one shard. Returns small arrays only.
+def load_shard(
+    shard: Shard, item_dicts, crs: str, resolution: float, read_threads: int = 4
+):
+    """Read one shard's scenes. The only part of a shard that touches S3.
 
-    Deliberately eager: no dask inside. The whole point is that this fits in
-    memory, so a lazy graph would only reintroduce the rechunk we are avoiding.
+    Split out of `process_shard` so a caller can reduce one stack more than
+    once. `measure_seam.py` composites four arms over the same pixels, and
+    calling `process_shard` per arm read the same objects four times.
 
-    `correction` is what `destripe.shard_correction` cut out of the tile's prep
-    artifact for this shard: one offset and one keep flag per item, and the
-    cross-fade weights already resampled onto this shard's grid. Passing None
-    composites the pooled percentile this repository built before either
-    correction existed, which is what `--no-destripe --no-feather` asks for.
+    The returned dataset holds the source DN at uint16, not decoded Celsius.
+    `masked_celsius` allocates its own float32 array and never writes back, so
+    each reduction can decode a fresh stack from this one. That matters because
+    `destripe.apply_to_stack` de-biases in place: a second arm handed the first
+    arm's array would reduce a stack already shifted.
 
-    Both corrections happen on the stack already in memory. The de-biasing is a
-    scalar subtraction per scene, and the per-path percentiles reduce disjoint
-    slices of the same array, so neither adds a read and neither adds a pass.
+    Returns:
+        `(data, items, load_s)`. `items` are the parsed pystac objects, which
+        the reduction needs to join per-scene values to the time axis.
     """
-    import numpy as np
     import pystac
     from odc.geo import CRS
     from odc.stac import stac_load
@@ -479,7 +474,52 @@ def process_shard(
         groupby="landsat:scene_id",
         chunks={"time": 1, ydim: -1, xdim: -1},
     ).compute(scheduler="threads", num_workers=read_threads)
-    t_load = time.perf_counter() - t0
+    return data, items, time.perf_counter() - t0
+
+
+def process_shard(
+    shard: Shard,
+    item_dicts,
+    crs: str,
+    resolution: float,
+    read_threads: int = 4,
+    correction=None,
+) -> dict:
+    """Load, mask, reduce and encode one shard. Returns small arrays only.
+
+    Deliberately eager: no dask inside. The whole point is that this fits in
+    memory, so a lazy graph would only reintroduce the rechunk we are avoiding.
+
+    `correction` is what `destripe.shard_correction` cut out of the tile's prep
+    artifact for this shard: one offset and one keep flag per item, and the
+    cross-fade weights already resampled onto this shard's grid. Passing None
+    composites the pooled percentile this repository built before either
+    correction existed, which is what `--no-destripe --no-feather` asks for.
+
+    Both corrections happen on the stack already in memory. The de-biasing is a
+    scalar subtraction per scene, and the per-path percentiles reduce disjoint
+    slices of the same array, so neither adds a read and neither adds a pass.
+
+    This is `load_shard` then `reduce_shard`, and it keeps the signature and
+    the return contract it has always had. Four test modules and
+    `measure_shard_memory.py` call it directly.
+    """
+    return reduce_shard(
+        shard,
+        *load_shard(shard, item_dicts, crs, resolution, read_threads),
+        correction=correction,
+    )
+
+
+def reduce_shard(shard: Shard, data, items, load_s: float, correction=None) -> dict:
+    """Mask, reduce and encode one loaded stack. Reads nothing.
+
+    Decodes its own Celsius stack from `data`, so calling it twice over one
+    load gives two independent reductions. `destripe.apply_to_stack` writes NaN
+    into that stack and subtracts the offsets in place, which is why the decode
+    cannot be hoisted out with the read.
+    """
+    import numpy as np
 
     # One definition of a usable observation, shared with the array-graph path
     # in profile_lst_p95. It drops source fill, QA_PIXEL bits 1 to 5, and any
@@ -538,7 +578,7 @@ def process_shard(
         # share says the swath definition missed ground the scenes did reach,
         # which is the number to watch per tile.
         "n_pooled_fallback": n_pooled_fallback,
-        "load_s": t_load,
+        "load_s": load_s,
         "reduce_s": t_reduce,
     }
     if pooled is not None:

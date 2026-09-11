@@ -10,7 +10,9 @@
 
 Four composites from one load: pooled, de-striped only, feathered only, and
 both. Same scenes, same worker code, same reads, so every difference between
-the four rasters is the correction and nothing else.
+the four rasters is the correction and nothing else. One `stac_load`, one warp,
+and four reductions over it. The Celsius decode repeats per arm, because
+de-biasing writes into the stack it corrects.
 
     uv run measure_seam.py --tile S30W065 --tile-prep ./tile-prep \\
         --out-dir ./seam
@@ -52,9 +54,10 @@ from shard_lst_p95 import (
     DEFAULT_STAGE_DIR,
     configure_read_env,
     items_for_shard,
+    load_shard,
     load_tile_items,
     plan_shards,
-    process_shard,
+    reduce_shard,
 )
 from stac_window import (
     DEFAULT_CLOUD_COVER_LT,
@@ -282,6 +285,21 @@ def main(argv=None) -> int:
             f"{report['get_requests']:,} billable GETs"
         )
 
+    # One read for all four arms. Reading per arm made the comparison cost four
+    # times what it measures, because the load is 94% of a shard. The decode
+    # still repeats: `destripe.apply_to_stack` de-biases in place, so an arm
+    # handed the previous arm's array would reduce a stack already shifted.
+    # Decoding from the uint16 source holds one float32 stack at a time, where
+    # keeping four pristine copies would hold four.
+    data, items, load_s = load_shard(
+        shard,
+        item_dicts,
+        args.crs,
+        1.0 / args.pixels_per_degree,
+        args.read_threads,
+    )
+    print(f"load          {load_s:.2f}s for {len(items)} scenes, once for four arms")
+
     fields = {}
     timings = {}
     for name, debias, feather in ARMS:
@@ -296,20 +314,14 @@ def main(argv=None) -> int:
             feather=feather,
         )
         t0 = time.perf_counter()
-        out = process_shard(
-            shard,
-            item_dicts,
-            args.crs,
-            1.0 / args.pixels_per_degree,
-            args.read_threads,
-            correction,
-        )
+        out = reduce_shard(shard, data, items, load_s, correction)
         timings[name] = round(time.perf_counter() - t0, 2)
         fields[name] = decode(out["lst_p95"])
         print(
             f"{name:<14}{timings[name]:7.2f}s  "
             f"{out['n_scenes']} scenes loaded, "
-            f"{out['n_scenes_kept']} kept, {out['n_rejected']} rejected"
+            f"{out['n_scenes_kept']} kept, {out['n_rejected']} rejected, "
+            f"{out['n_pooled_fallback']} px pooled"
         )
 
     down, right = boundary_edges(weight_of(shard))
