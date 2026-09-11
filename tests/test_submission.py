@@ -60,6 +60,13 @@ def echo(shard, table_path, indices, crs, resolution, read_threads=4):
     }
 
 
+def echo_correction(shard, table_path, indices, crs, resolution, read_threads, corr):
+    """`echo` with the seam correction, returned so a test can see which one."""
+    return echo(shard, table_path, indices, crs, resolution, read_threads) | {
+        "correction": corr,
+    }
+
+
 @pytest.fixture(scope="module")
 def client():
     """One real cluster. Two workers is enough to schedule."""
@@ -100,6 +107,61 @@ class TestDriveShards:
         assert submit_s >= 0.0
         assert marks["first_submit_s"] <= marks["last_submit_s"]
         assert marks["first_result_s"] <= marks["last_result_s"]
+
+    def test_a_run_without_a_prep_file_submits_no_correction_argument(self, client):
+        """The argument list a pooled run sends is the one it always sent.
+
+        `correction_of` is None without `--tile-prep`, and a task that takes
+        six arguments still runs. `echo` is that task, and it would raise a
+        TypeError on a seventh.
+        """
+        work_idx = work_for(items(2), [[0], [1]])
+
+        stats, _ = shard_lst_p95.drive_shards(
+            client,
+            echo,
+            work_idx,
+            None,
+            "EPSG:4326",
+            1 / 3600,
+            1,
+            assemble=lambda f: f.result(),
+            marks={},
+            t0=time.perf_counter(),
+            correction_of=None,
+        )
+
+        assert sorted(s["row"] for s in stats) == [0, 1]
+
+    def test_each_shard_gets_its_own_correction(self, client):
+        """The weights are cut to one shard's window, so the wrong one is wrong.
+
+        A shard carries a path and positions, and the scene table resolves the
+        items inside the worker. The correction cannot travel that way: it is
+        resampled onto the shard's own grid in the driver. This pins that each
+        shard receives the one built for it.
+        """
+        work_idx = work_for(items(6), [[0, 1], [2, 3], [4, 5]])
+
+        stats, _ = shard_lst_p95.drive_shards(
+            client,
+            echo_correction,
+            work_idx,
+            None,
+            "EPSG:4326",
+            1 / 3600,
+            1,
+            assemble=lambda f: f.result(),
+            marks={},
+            t0=time.perf_counter(),
+            correction_of=lambda shard, idx: {"row": shard.row, "idx": list(idx)},
+        )
+
+        assert {s["row"]: s["correction"] for s in stats} == {
+            0: {"row": 0, "idx": [0, 1]},
+            1: {"row": 1, "idx": [2, 3]},
+            2: {"row": 2, "idx": [4, 5]},
+        }
 
 
 @pytest.mark.timeout(300)
