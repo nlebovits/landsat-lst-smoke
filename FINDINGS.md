@@ -159,12 +159,13 @@ uv run shard_lst_p95.py ... --shard-slice 1875:2500 --out-dir ./part3
 uv run shard_lst_p95.py --merge part0 part1 part2 part3 --out-dir ./tile
 ```
 
-Staging is on by default. `--no-stage` reads every shard from S3 instead, which
-is the path `measure_s3_requests.py` prices and the one that costs 739 requests
-per object, or $2.31 a tile against $0.0031. It exists to measure against.
-Do not pair it with `--shard 360`: the small shard is chosen for memory once
-staging has removed the request cost, and unstaged it multiplies that cost
-instead. See `Shard size is a memory decision once staging is on`.
+Every run stages. There is no flag that skips it, and
+`tests/test_staging.py` asserts the parsers reject one. Reading each shard from
+S3 instead costs about 739 requests per object against one, because roughly 155
+shards open each scene and every open is 4.77 requests. Across the fleet that
+is 4.2 billion GETs against 5.8 million, or $1,681 against $2.32, and it also
+runs about twice as slow. `measure_s3_requests.py` still prices the unstaged
+path, because knowing what staging saves needs the number it saves against.
 
 The merge writes `lst_p95_dn.npy` and `qa_count.npy` for the analysis scripts,
 and `tile/catalog/` for everyone else: two COGs on a STAC item, inside a
@@ -1220,13 +1221,13 @@ It used to be a request-cost lever worth 2.8x. Staging removed that: one GET
 per object whatever the shard edge. What remains is memory, which falls with
 the square of the edge, against compute, which does not.
 
-Unstaged the lever is still there, and a smaller shard pulls it the wrong way.
-MEASURED from the inventory by `--dry-run --search-in-dry-run` on `S30W065`: the
-2,500-shard plan at 360 px makes **1,264,988** shard-scene reads against
-**690,659** for the 1,296-shard plan at 512 px. That is 265 opens per object
-against 145, and unstaged every open is billed and pays a fresh round trip. So a
-360 px shard with `--no-stage` takes the memory-optimised edge and the unstaged
-request bill together, which is the worst of the four pairings.
+A smaller shard would pull the lever the wrong way if a run could skip
+staging. MEASURED from the inventory by `--dry-run --search-in-dry-run` on
+`S30W065`: the 2,500-shard plan at 360 px makes **1,264,988** shard-scene reads
+against **690,659** for the 1,296-shard plan at 512 px. That is 265 opens per
+object against 145, and every open would be billed and pay a fresh round trip.
+Pairing the memory-optimised edge with the unstaged request bill was the worst
+of the four pairings, and removing the flag removed the pairing.
 
 MEASURED by `measure_shard_memory.py --mode timing` over ten staged scenes:
 
@@ -1498,6 +1499,38 @@ The department-scale phase, across five EC2 sessions, eight completed
 department runs, one 200-scene quarter-tile smoke run, and two quarter-tile
 attempts that never finished, cost about **$4.45**. The full-tile fleet cost
 **$4.27** on top of it. The staged and memory-sweep instances are unpriced.
+
+### The unstaged path is gone
+
+`--no-stage` read every shard straight from S3, as the pipeline did before
+staging existed. It was kept to measure against. Planning the real fleet
+against the full 895-tile inventory priced what keeping it risked.
+
+| | staged | unstaged |
+|---|---|---|
+| GETs, 769 tiles | 5,811,750 | 4,202,430,817 |
+| S3 line | **$2.32** | **$1,680.97** |
+| read speed | 11 s / 4 shards | 21 s / 4 shards |
+
+The request count is the whole difference: staging fetches each object once, so
+GETs are two per scene whatever the shard grid does. Unstaged, roughly 155
+shards open each scene and every open is 4.77 requests, which is about 739 per
+object. The S3 line then exceeds the EC2 line for the whole fleet.
+
+The speed row is MEASURED in PR #7, commit `c771f27`, over four shards run
+twice in one process. Reading local files runs about twice as fast as
+`/vsis3` for the same pixels, so the flag cost roughly half the wall clock as
+well as $1,679.
+
+A flag that cannot be set correctly is not an option, it is a way to lose a
+fleet run. `shard_lst_p95.py`, `tile_prep.py` and `measure_seam.py` no longer
+accept it, `staging.disk_guard` names a larger volume or a smaller slice
+instead of offering S3, and `tests/test_staging.py` asserts the parsers reject
+`--no-stage` rather than trusting a reviewer to catch one coming back.
+
+`measure_s3_requests.py` still reads unstaged, because measuring what staging
+saves needs the number it saves against. It is a measurement script and it
+composites nothing.
 
 ### How to price a run
 

@@ -750,12 +750,6 @@ def stage_scenes_for(args, item_dicts, work_idx):
     if args.rehearse:
         print("stage         skipped: the rehearsal reads no objects")
         return None
-    if args.no_stage:
-        print(
-            "stage         skipped: --no-stage. Every shard reads from S3, and "
-            "about 155 shards touch each scene"
-        )
-        return None
     report = staging.stage_scenes(
         item_dicts,
         sorted({i for _, idx in work_idx for i in idx}),
@@ -1153,14 +1147,6 @@ def parse_args(argv=None):
         "fetch writes at up to 922 MB/s while the shards read the files it "
         "has already landed at about 358 MB/s. Pass --no-overlap to put the "
         "two back in sequence",
-    )
-    p.add_argument(
-        "--no-stage",
-        action="store_true",
-        help="read every shard straight from S3, as the pipeline did before "
-        "staging existed. About 155 shards touch each scene and each open "
-        "costs 4.77 requests, so this is the expensive path and it is kept "
-        "for measuring against",
     )
     p.add_argument(
         "--stage-threads",
@@ -2176,7 +2162,7 @@ def main(argv=None) -> int:  # noqa: C901
     if stage_report is not None and not args.keep_staged:
         staging.cleanup(args.stage_dir, owned=stage_report.get("owns_stage_dir", True))
     elif table_path is not None and not args.keep_staged:
-        # --no-stage writes the table and stages nothing, so `cleanup` never
+        # A rehearsal writes the table and stages nothing, so `cleanup` never
         # runs and 7.8 MB would be left behind on every run.
         Path(table_path).unlink(missing_ok=True)
 

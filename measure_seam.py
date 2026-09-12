@@ -237,7 +237,6 @@ def parse_args(argv=None):
     p.add_argument("--platforms", default=DEFAULT_PLATFORMS)
     p.add_argument("--source", default="earth-search")
     p.add_argument("--stage-dir", type=Path, default=DEFAULT_STAGE_DIR)
-    p.add_argument("--no-stage", action="store_true")
     args = p.parse_args(argv)
     if args.shard_index is None and not args.auto:
         raise SystemExit("pass --shard-index N or --auto")
@@ -278,12 +277,11 @@ def main(argv=None) -> int:
     print(f"shard         {shard.bbox}  {len(item_dicts)} scenes")
 
     configure_read_env(args.source)
-    if not args.no_stage:
-        report = staging.stage_scenes(items, idx, args.stage_dir)
-        print(
-            f"stage         {report['objects']:,} objects, "
-            f"{report['get_requests']:,} billable GETs"
-        )
+    report = staging.stage_scenes(items, idx, args.stage_dir)
+    print(
+        f"stage         {report['objects']:,} objects, "
+        f"{report['get_requests']:,} billable GETs"
+    )
 
     # One read for all four arms. Reading per arm made the comparison cost four
     # times what it measures, because the load is 94% of a shard. The decode

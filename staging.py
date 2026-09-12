@@ -218,9 +218,10 @@ def disk_guard(manifest, stage_dir: Path) -> int:
     """Refuse to start a fetch that cannot finish.
 
     Runs before the first GET, off the estimate rather than a HEAD per object,
-    because HEAD is billable too. The message names both figures and the escape,
-    since the operator's next decision is whether to resize the volume or fall
-    back to reading from S3.
+    because HEAD is billable too. The message names both figures and the two
+    escapes, which are a larger volume or a smaller slice. Reading from S3
+    instead is no longer one of them: the unstaged path costs about 739
+    requests per object against one, and runs about twice as slow.
 
     Returns:
         The estimated bytes, so the caller can report what it reserved.
@@ -232,8 +233,8 @@ def disk_guard(manifest, stage_dir: Path) -> int:
             f"staging {len(manifest):,} objects needs about "
             f"{need / 1024**3:.1f} GiB and {stage_dir} has "
             f"{free / 1024**3:.1f} GiB free. Point --stage-dir at a larger "
-            f"volume, or pass --no-stage to read from S3 instead, which costs "
-            f"about 739 requests per object."
+            f"volume, or cut the work with --shard-slice and run the slices "
+            f"in sequence. There is no unstaged path to fall back to."
         )
         raise StagingError(msg)
     return need

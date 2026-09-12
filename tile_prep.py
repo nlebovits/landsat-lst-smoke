@@ -486,7 +486,6 @@ def parse_args(argv=None):
     p.add_argument("--read-threads", type=int, default=4)
     p.add_argument("--max-blocks", type=int, default=None, help="cap, for smoke runs")
     p.add_argument("--stage-dir", type=Path, default=DEFAULT_STAGE_DIR)
-    p.add_argument("--no-stage", action="store_true")
     p.add_argument(
         "--target-memory-gib",
         type=float,
@@ -647,16 +646,15 @@ def main(argv=None) -> int:  # noqa: C901
         return 0
 
     configure_read_env(args.source)
-    if not args.no_stage:
-        with span("stage"):
-            report = staging.stage_scenes(
-                items, sorted({i for _, idx in work for i in idx}), args.stage_dir
-            )
-            print(
-                f"              {report['objects']:,} objects, "
-                f"{report['bytes'] / GIB:.1f} GiB, "
-                f"{report['get_requests']:,} billable GETs"
-            )
+    with span("stage"):
+        report = staging.stage_scenes(
+            items, sorted({i for _, idx in work for i in idx}), args.stage_dir
+        )
+        print(
+            f"              {report['objects']:,} objects, "
+            f"{report['bytes'] / GIB:.1f} GiB, "
+            f"{report['get_requests']:,} billable GETs"
+        )
 
     hist = np.zeros((len(items), destripe.N_ANOMALY_BINS), dtype="uint32")
     n_valid = np.zeros(len(items), dtype="int64")

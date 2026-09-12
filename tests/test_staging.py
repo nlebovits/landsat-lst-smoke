@@ -462,11 +462,35 @@ class TestDiskGuard:
         with pytest.raises(staging.StagingError) as exc:
             staging.disk_guard(manifest, tmp_path)
 
-        # Both figures and the escape, because the next decision is whether to
-        # resize the volume or to read from S3.
+        # Both figures and both escapes, because the next decision is whether
+        # to resize the volume or to cut the slice. Reading from S3 is not one:
+        # the unstaged path is gone.
         message = str(exc.value)
         assert f"{need / 1024**3:.1f} GiB" in message
-        assert "--no-stage" in message
+        assert "--stage-dir" in message
+        assert "--shard-slice" in message
+        assert "--no-stage" not in message
+
+    def test_no_entry_point_can_be_told_to_skip_staging(self):
+        """There is no unstaged path, and there is no flag that makes one.
+
+        Unstaged reads cost about 739 requests per object against one, because
+        roughly 155 shards open each scene and every open is 4.77 requests.
+        MEASURED across the fleet inventory: 4.2 billion GETs against 5.8
+        million, which is $1,681 against $2.32. It is also about twice as slow.
+        MEASURED in PR #7, commit `c771f27`, over four shards run twice in one
+        process: 11 s staged against 21 s unstaged.
+
+        A flag worth $1,679 and half the wall clock is not a flag. This asserts
+        the parsers reject it rather than trusting a reviewer to notice one
+        coming back.
+        """
+        import shard_lst_p95
+        import tile_prep
+
+        for module in (shard_lst_p95, tile_prep):
+            with pytest.raises(SystemExit):
+                module.parse_args(["--tile", "S30W065", "--no-stage"])
 
     def test_it_passes_when_the_volume_is_large_enough(self, tmp_path, monkeypatch):
         manifest = [("id", "lwir11", "s3://b/k.TIF")]
