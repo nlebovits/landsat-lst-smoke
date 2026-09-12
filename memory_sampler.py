@@ -4,15 +4,14 @@
 # ///
 """Sample memory for a client process and its worker children.
 
-The number this exists to produce is worker RSS at fleet width. `shard_bytes`
-predicts it, and until this module was wired into `shard_lst_p95.py` nothing on
-a production run measured it. `FINDINGS.md` carried a worst-shard figure in a
-MEASURED table that was `shard_bytes` output, read back as evidence the model
-held. A model cannot check itself.
+The number this exists to produce is worker RSS at fleet width.
+`composite.block_bytes` predicts it, and until this module was wired into
+`shard_lst_p95.py` nothing on a production run measured it. `FINDINGS.md`
+carried a worst-case figure in a MEASURED table that was the block model's own
+output, read back as evidence the model held. A model cannot check itself.
 
-Shared by `profile_lst_p95.py`, which has always sampled, and by
-`shard_lst_p95.py`, which now does. Every fleet run writes a `memory.csv` and a
-peak beside its summary, so the next instance that dies of memory leaves the
+`shard_lst_p95.py` samples every run, so each one writes a `memory.csv` and a
+peak beside its summary and the next instance that dies of memory leaves the
 measurement behind rather than a prediction.
 
 The sampler runs in its own process and must not be a thread. The client holds

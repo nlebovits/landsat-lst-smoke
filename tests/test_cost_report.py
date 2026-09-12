@@ -81,13 +81,27 @@ class TestFullTileCost:
     def test_ebs_and_ipv4_stay_under_a_cent_and_a_half(self, priced):
         report, _ = priced
         assert report["derived"]["ebs_usd"] == pytest.approx(0.012, abs=0.001)
-        assert report["derived"]["ipv4_usd"] == pytest.approx(0.014, abs=0.001)
+        assert report["derived"]["ipv4_usd"] == pytest.approx(0.0036, abs=0.0005)
+
+    def test_the_address_line_counts_each_instance_once(self, priced):
+        """One address per instance, and the count is already in the seconds.
+
+        `total_instance_seconds` sums every instance's lifetime, so
+        multiplying by the instance count again charges the fleet once per
+        machine squared. At four machines that read $0.014 against $0.0036 and
+        nobody noticed. Priced across 3,076 machines it reads $8,437 against
+        $2.74, which is most of a fleet estimate.
+        """
+        report, _ = priced
+        hours = report["measured"]["total_instance_seconds"] / 3600
+        rate = report["rates"]["ipv4_hr"]
+        assert report["derived"]["ipv4_usd"] == pytest.approx(hours * rate)
 
     def test_the_total_is_the_published_figure(self, priced):
         report, _ = priced
         d = report["derived"]
         total = d["ec2_usd"] + d["s3_usd"] + d["ebs_usd"] + d["ipv4_usd"]
-        assert total == pytest.approx(4.28, abs=0.005)
+        assert total == pytest.approx(4.27, abs=0.005)
 
     def test_s3_exceeds_ec2(self, priced):
         """FINDINGS.md rests a recommendation on this ordering."""

@@ -130,11 +130,16 @@ def run_script(work, *args, timeout=900):
 
 class TestShardRuntimeResolves:
     def test_the_load_path_runs_on_the_inline_block_alone(self, tmp_path):
-        """`--search-in-dry-run` is the cheapest path through `load_tile_items`.
+        """The inventory read, which is where the missing `pyarrow` bit.
 
-        It reads the manifest, checks it, reads the row group, and builds the
-        items, which is every import the fleet needs before it touches S3. It
-        starts no cluster and reads no scene, so it costs nothing to run.
+        There is no longer a flag that reads the inventory and stops, because
+        `--dry-run` plans the blocks from the bbox alone. So the run is given a
+        window the artifact does not cover: `load_tile_items` reads the
+        manifest through `pyarrow.parquet` and then refuses it, which is every
+        import the fleet needs before it touches S3, and no GET.
+
+        The failure is therefore expected. What must not appear is the other
+        kind: a module the inline block never declared.
         """
         work = fresh_checkout(tmp_path)
         proc = run_script(
@@ -144,26 +149,33 @@ class TestShardRuntimeResolves:
             TILE,
             "--inventory-uri",
             "artifacts/inventory_slice.parquet",
+            "--start",
+            "2019-01-01",
+            "--no-output-mask",
             "--out-dir",
             str(tmp_path / "out"),
-            "--dry-run",
-            "--search-in-dry-run",
         )
-        assert proc.returncode == 0, (
+        assert "ModuleNotFoundError" not in proc.stderr, (
             f"shard_lst_p95.py cannot run on its own dependencies:\n"
             f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
         )
-        assert "ModuleNotFoundError" not in proc.stderr
-        assert "total shard-scene reads" in proc.stdout
+        assert "InventoryError" in proc.stderr, (
+            f"the run stopped somewhere other than the manifest gate:\n"
+            f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        )
 
     def test_the_rehearsal_runs_on_the_inline_block_alone(self, tmp_path):
-        """The rehearsal starts a real cluster, so it covers the submit path.
+        """The rehearsal starts a real cluster, so it covers the whole graph.
 
         It builds the output mask too, which is the newest reason this test
         exists. The mask reads a GeoPackage and a GeoTIFF, so the fleet's
         inline block has to declare rasterio, geopandas, shapely and pyogrio.
         A block that forgot one would pass every other test in the suite,
         because the suite runs inside the union of every block.
+
+        It writes the catalog as well, and that is deliberate: `rio.to_raster`
+        needs rioxarray and the item mirror needs stac-geoparquet, and neither
+        is reached by any shorter path.
         """
         work = fresh_checkout(tmp_path, with_mask=True)
         proc = run_script(
@@ -172,9 +184,11 @@ class TestShardRuntimeResolves:
             "--tile",
             TILE,
             "--rehearse",
-            "40",
-            "--max-shards",
             "8",
+            "--pixels-per-degree",
+            "120",
+            "--chunk",
+            "100",
             "--workers",
             "2",
             "--threads-per-worker",

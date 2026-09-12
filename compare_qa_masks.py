@@ -1,18 +1,19 @@
 # /// script
 # requires-python = ">=3.12,<3.15"
 # dependencies = [
-#   "odc-stac", "pystac-client", "xarray", "numpy", "dask",
-#   "matplotlib",
+#   "odc-stac", "odc-geo", "pystac", "pystac-client", "xarray", "dask",
+#   "numpy", "rasterio", "matplotlib",
 # ]
 # ///
-"""What the QA and nodata change does to one real shard.
+"""What the QA and nodata change does to one real window of the archive.
 
-Runs one fixed shard twice over the same scenes, the same bounds, and the same
+Runs one fixed window twice over the same scenes, the same bounds, and the same
 resolution. The first pass applies the mask this repository shipped before:
 QA_PIXEL bits 3 and 4, an exact `dn != 0` fill test, and an encoder whose floor
-is DN 1. The second applies `lst_qa`: QA_PIXEL bits 1 to 5, the fill test, a
-`[-50, 80]` C plausibility range before the percentile, and an encoder whose
-floor is `LST_MIN_TRUSTED_DN`.
+is DN 1. The second is `composite.build_graph`, the graph the pipeline runs,
+which applies `lst_qa`: QA_PIXEL bits 1 to 5, the fill test, a `[-50, 80]` C
+plausibility range before the percentile, and an encoder whose floor is
+`LST_MIN_TRUSTED_DN`.
 
 Only the mask changes between the two passes. The window stays on the window
 the earlier measurements used, so the year change cannot be confused with the
@@ -21,10 +22,16 @@ count separately.
 
     uv run compare_qa_masks.py --max-scenes 120 --out ./qa-parity
 
-The scene cap is the spend control. It samples evenly across the shard's items,
-so a capped run still crosses WRS boundaries and still holds every rejection
-reason. Requester-pays reads cost money; a 120-scene 512 px shard is about
-1,150 GET requests.
+The window is one block, and the graph runs under the synchronous scheduler in
+this process, so the comparison stays one process and no cluster starts. Both
+rasters are written as GeoTIFFs on the window's own grid beside the JSON
+report, so they open in QGIS next to a published COG.
+
+The scene cap is the spend control. It samples evenly across the window's
+items, so a capped run still crosses WRS boundaries and still holds every
+rejection reason. Requester-pays reads cost money, and the window is read
+twice, once raw for the legacy pass and once by the graph: 120 scenes over a
+512 px window is about 2,300 GET requests between them.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ from pathlib import Path
 
 import numpy as np
 
+import destripe
 from lst_qa import (
     LST_MAX_DN,
     LST_MIN_DN,
@@ -50,7 +58,6 @@ from lst_qa import (
     QA_CLOUD_SHADOW_BIT,
     QA_DILATED_CLOUD_BIT,
     QA_SNOW_BIT,
-    encode_celsius,
     in_trusted_range,
     masked_celsius,
     qa_clear,
@@ -219,22 +226,35 @@ def write_images(out_dir: Path, old_dn, new_dn) -> None:
     plt.close(fig)
 
 
-def load_shard(shard, item_dicts, crs: str, resolution: float, read_threads: int):
-    import pystac
-    from odc.geo import CRS
-    from odc.stac import stac_load
+def write_raster(path: Path, dn, bbox, crs: str) -> None:
+    """One encoded raster of the window, as a GeoTIFF.
 
-    ydim, xdim = ("y", "x") if CRS(crs).projected else ("latitude", "longitude")
-    items = [pystac.Item.from_dict(d) for d in item_dicts]
-    return stac_load(
-        items,
-        bands=("lwir11", "qa_pixel"),
+    This used to leave two `.npy` arrays, which carry no grid, no nodata and no
+    decoding rule, so nothing but this script could read them back. A GeoTIFF
+    carries all three and opens beside a published COG.
+    """
+    import rasterio
+    from rasterio.transform import from_bounds
+
+    height, width = dn.shape
+    west, south, east, north = bbox
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=height,
+        width=width,
+        count=1,
+        dtype="uint16",
         crs=crs,
-        resolution=resolution,
-        bbox=shard.bbox,
-        groupby="landsat:scene_id",
-        chunks={"time": 1, ydim: -1, xdim: -1},
-    ).compute(scheduler="threads", num_workers=read_threads)
+        transform=from_bounds(west, south, east, north, width, height),
+        nodata=LST_NODATA_DN,
+        tiled=True,
+        compress="deflate",
+    ) as dst:
+        dst.scales = (LST_SCALE,)
+        dst.offsets = (LST_OFFSET,)
+        dst.write(dn, 1)
 
 
 def parse_args(argv=None):
@@ -242,11 +262,18 @@ def parse_args(argv=None):
         description=__doc__,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--bbox", default="-62.5,-35.0,-60.0,-32.5")
+    # 512 px square at 3,600 px/degree, the ground FINDINGS.md records this
+    # comparison over. Holding the bbox holds the comparison comparable.
+    p.add_argument("--bbox", default="-62.5,-32.642222,-62.357778,-32.5")
     p.add_argument("--pixels-per-degree", type=int, default=3600)
     p.add_argument("--crs", default="EPSG:4326")
-    p.add_argument("--shard", type=int, default=512)
-    p.add_argument("--shard-index", type=int, default=0, help="which planned shard")
+    p.add_argument(
+        "--chunk",
+        type=int,
+        default=512,
+        help="block edge in pixels. The default covers the window in one "
+        "block, so the graph reduces it in a single task",
+    )
     # Deliberately the old window. The masking change has to be measured with
     # every other input held fixed, the year window included.
     p.add_argument("--start", default="2020-01-01")
@@ -254,12 +281,11 @@ def parse_args(argv=None):
     p.add_argument("--cloud-cover-lt", type=int, default=100)
     p.add_argument("--platforms", default="landsat-8,landsat-9")
     p.add_argument("--source", default="earth-search")
-    p.add_argument("--read-threads", type=int, default=8)
     p.add_argument(
         "--max-scenes",
         type=int,
         default=120,
-        help="cap, sampled evenly across the shard's items; the spend control",
+        help="cap, sampled evenly across the window's items; the spend control",
     )
     p.add_argument("--out", type=Path, default=Path("./qa-parity"))
     p.add_argument("--no-image", action="store_true")
@@ -268,7 +294,10 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    from shard_lst_p95 import configure_read_env, items_for_shard, plan_shards
+    import dask
+
+    import composite
+    from shard_lst_p95 import configure_read_env
 
     # The catalogue query lives in stac_reference now. This is a measurement
     # tool, so it describes what the old runtime did; the runtime itself reads
@@ -277,10 +306,10 @@ def main(argv=None) -> int:
 
     configure_read_env(args.source)
     bbox = tuple(float(v) for v in args.bbox.split(","))
-    shards, _, _ = plan_shards(bbox, args.pixels_per_degree, args.shard)
-    shard = shards[args.shard_index]
+    resolution = 1.0 / args.pixels_per_degree
+    height, width = composite.raster_shape(bbox, args.pixels_per_degree)
 
-    items, item_bboxes = search_items(
+    items, _ = search_items(
         bbox,
         start=args.start,
         end=args.end,
@@ -288,28 +317,31 @@ def main(argv=None) -> int:
         cloud_cover_lt=args.cloud_cover_lt,
         source=args.source,
     )
-    idx = items_for_shard(shard, item_bboxes)
-    if not idx:
-        raise SystemExit(f"shard {args.shard_index} has no scenes")
-    n_intersecting = len(idx)
+    if not items:
+        raise SystemExit(f"no scene intersects {bbox}")
+    n_intersecting = len(items)
     if args.max_scenes and n_intersecting > args.max_scenes:
         pick = np.linspace(0, n_intersecting - 1, args.max_scenes).round().astype(int)
-        idx = [idx[i] for i in sorted(set(pick.tolist()))]
-    item_dicts = [items[i].to_dict() for i in idx]
+        items = [items[i] for i in sorted(set(pick.tolist()))]
+    item_dicts = [item.to_dict() for item in items]
 
-    print(f"shard         r{shard.row} c{shard.col} {shard.ny}x{shard.nx} {shard.bbox}")
-    print(f"window        {args.start}/{args.end}  (held fixed across both passes)")
-    print(
-        f"scenes        {len(item_dicts)} loaded of {n_intersecting} "
-        f"intersecting, {len(items)} in the bbox"
-    )
+    print(f"window        {height} x {width} px {bbox}")
+    print(f"period        {args.start}/{args.end}  (held fixed across both passes)")
+    print(f"scenes        {len(item_dicts)} loaded of {n_intersecting} intersecting")
 
+    # The synchronous scheduler throughout: one process, one block, no
+    # cluster, and a traceback that points at the kernel that raised.
     t0 = time.perf_counter()
-    data = load_shard(
-        shard, item_dicts, args.crs, 1.0 / args.pixels_per_degree, args.read_threads
-    )
-    dn = data["lwir11"].values
-    qa = data["qa_pixel"].values
+    with dask.config.set(scheduler="sync"):
+        stack = composite.open_stack(
+            item_dicts,
+            bbox,
+            crs=args.crs,
+            resolution=resolution,
+            chunk=args.chunk,
+        ).compute()
+    dn = stack["lwir11"].values
+    qa = stack["qa_pixel"].values
     print(f"loaded        {dn.shape} in {time.perf_counter() - t0:.1f}s")
 
     census = rejection_census(dn, qa)
@@ -318,19 +350,27 @@ def main(argv=None) -> int:
     old_p95, old_counts = p95_and_counts(old_c, old_valid)
     old_dn = legacy_encode(old_p95)
 
-    new_c, new_valid = masked_celsius(dn.copy(), qa)
-    new_p95, new_counts = p95_and_counts(new_c, new_valid)
-    new_dn = encode_celsius(new_p95)
+    # The second pass is the pipeline itself, not a restatement of it. With no
+    # prep artifact the graph composites the pooled percentile, which is what
+    # the legacy pass computes too, so the mask is the only difference left.
+    t1 = time.perf_counter()
+    graph = composite.build_graph(
+        item_dicts, bbox, crs=args.crs, resolution=resolution, chunk=args.chunk
+    )
+    with dask.config.set(scheduler="sync"):
+        shipped = graph.compute()
+    new_dn = shipped["lst_p95"].values
+    new_counts = shipped["qa_count"].values.sum(axis=0, dtype="int32")
+    print(f"graph         {new_dn.shape} in {time.perf_counter() - t1:.1f}s")
 
     report = {
         "inputs": {
             "bbox": list(bbox),
-            "shard_index": args.shard_index,
-            "shard_bbox": list(shard.bbox),
-            "shard_pixels": [int(shard.ny), int(shard.nx)],
+            "window_pixels": [height, width],
+            "chunk": args.chunk,
             "crs": args.crs,
             "pixels_per_degree": args.pixels_per_degree,
-            "resolution_deg": 1.0 / args.pixels_per_degree,
+            "resolution_deg": resolution,
             "start": args.start,
             "end": args.end,
             "platforms": args.platforms,
@@ -338,27 +378,32 @@ def main(argv=None) -> int:
             "source": args.source,
             "n_scenes_loaded": int(dn.shape[0]),
             "n_scenes_intersecting": n_intersecting,
-            "n_scenes_in_bbox": len(items),
         },
         "rejections": census,
         "valid_observations": {
             "before": int(old_valid.sum()),
-            "after": int(new_valid.sum()),
-            "removed": int(old_valid.sum() - new_valid.sum()),
+            "after": int(new_counts.sum()),
+            "removed": int(old_valid.sum() - new_counts.sum()),
             "observation_count_pixels_changed": int((old_counts != new_counts).sum()),
             "pixels_with_zero_observations_before": int((old_counts == 0).sum()),
             "pixels_with_zero_observations_after": int((new_counts == 0).sum()),
         },
         "output": compare(old_dn, new_dn),
     }
-    lst_finite = np.asarray(in_trusted_range(new_p95))
+    # The encoded raster cannot tell a value the encoder refused from ground
+    # nothing observed, and that distinction is what the nodata change is
+    # about. So the two shipped kernels the graph calls run once more over the
+    # stack already in memory, for this one count and nothing else.
+    shipped_c, _ = masked_celsius(dn.copy(), qa)
+    shipped_p95 = destripe.pooled_percentile(shipped_c)
+    lst_finite = np.asarray(in_trusted_range(shipped_p95))
     report["output"]["p95_outside_trusted_range_before_encoding"] = int(
-        (np.isfinite(new_p95) & ~lst_finite).sum()
+        (np.isfinite(shipped_p95) & ~lst_finite).sum()
     )
 
     args.out.mkdir(parents=True, exist_ok=True)
-    np.save(args.out / "lst_p95_dn_before.npy", old_dn)
-    np.save(args.out / "lst_p95_dn_after.npy", new_dn)
+    write_raster(args.out / "lst_p95_before.tif", old_dn, bbox, args.crs)
+    write_raster(args.out / "lst_p95_after.tif", new_dn, bbox, args.crs)
     (args.out / "qa_parity.json").write_text(json.dumps(report, indent=2))
     if not args.no_image:
         write_images(args.out, old_dn, new_dn)

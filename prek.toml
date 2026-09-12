@@ -11,7 +11,7 @@ fail_fast = true
 
 # Measurement artifacts. The whitespace hooks would rewrite committed
 # evidence, and none of it is handwritten.
-exclude = "^(dryrun/(?!.*\\.py$)|ec2-results/|full/|fulltile/|s3-requests/|shard-run/|smoke/|smoke2/|split/|sweep/|.*\\.log$)"
+exclude = "^(ec2-results/|fulltile/|s3-requests/|shard-run/|smoke/|smoke2/|split/|sweep/|.*\\.log$)"
 
 # =============================================================================
 # Built-in hooks (native Rust, no network fetch required)
@@ -37,12 +37,11 @@ hooks = [
   {
     id = "check-added-large-files",
     args = ["--maxkb=500"],
-    # Two committed memory series predate this config: a 100 ms psutil
-    # sample over a 139 s run and over an 18.6 min one. They are the
-    # evidence behind the memory findings and no summary replaces them.
-    # Excluded by exact path, so the 500 KB ceiling still catches a COG
-    # or a parquet committed by accident.
-    exclude = { glob = ["full/memory.csv", "ec2-results/quartertile/qt-v2/memory.csv"] },
+    # One committed memory series predates this config: a 100 ms psutil
+    # sample over an 18.6 min run. It is the evidence behind the memory
+    # findings and no summary replaces it. Excluded by exact path, so the
+    # 500 KB ceiling still catches a COG or a parquet committed by accident.
+    exclude = { glob = ["ec2-results/quartertile/qt-v2/memory.csv"] },
   },
 ]
 
@@ -71,27 +70,25 @@ hooks = [
       "aster_ged.py",
       "cog_catalog.py",
       "compare_qa_masks.py",
+      "composite.py",
       "cost_report.py",
+      "destripe.py",
       "fleet_plan.py",
-      "item_table.py",
       "land_tiles.py",
       "masks.py",
       "measure_ged_registration.py",
       "measure_land_defects.py",
       "measure_s3_requests.py",
-      "measure_submit_cost.py",
       "measure_scene_centre.py",
-      "measure_shard_memory.py",
       "memory_sampler.py",
-      "profile_lst_p95.py",
+      "observe.py",
       "shard_lst_p95.py",
       "stac_reference.py",
       "stac_window.py",
       "staging.py",
-      "sweep_throughput.py",
       "tile_inventory.py",
+      "tile_prep.py",
       "usgs_inventory.py",
-      "dryrun",
       "vulture_whitelist.py",
       "--min-confidence",
       "80",

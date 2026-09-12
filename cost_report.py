@@ -7,7 +7,7 @@ felt: this repo once reported $10.70 for a run that cost about $3, because the
 lifetime was inferred from a polling loop rather than read from LaunchTime.
 
     ./cost_report.py --tag purpose=lst-benchmark --region us-west-2 \
-        --profile radiant-earth --requests-per-read 3.1 --shard-scene-reads 605617
+        --profile radiant-earth --requests-per-read 3.1 --block-scene-reads 605617
 
 Omit --requests-per-read and S3 charges are reported UNKNOWN rather than
 guessed. Use measure_s3_requests.py to obtain it.
@@ -150,11 +150,15 @@ def main() -> int:  # noqa: C901
     p.add_argument(
         "--ebs-gb", type=int, default=None, help="override the EBS size the API reports"
     )
+    # `--shard-scene-reads` is the name the recorded invocations in
+    # FINDINGS.md carry, from before the pipeline reduced blocks instead of
+    # shards. It still parses, so a figure quoted there can be re-priced.
     p.add_argument(
+        "--block-scene-reads",
         "--shard-scene-reads",
         type=int,
         default=None,
-        help="MEASURED count of shard x scene reads, from the shard plan",
+        help="MEASURED count of block x scene reads, from the block plan",
     )
     p.add_argument("--bands", type=int, default=2)
     p.add_argument(
@@ -170,7 +174,7 @@ def main() -> int:  # noqa: C901
         help="MEASURED total GETs, from the staging.json a staged run writes. "
         "Staging fetches each object once, so the run counts its own "
         "requests and nothing has to be derived from a sample. Takes "
-        "precedence over --shard-scene-reads",
+        "precedence over --block-scene-reads",
     )
     p.add_argument(
         "--recorded",
@@ -264,7 +268,11 @@ def main() -> int:  # noqa: C901
         print(f"  WARNING rate not pinned for: {', '.join(missing_rate)}")
 
     ebs = ebs_gb_sec / SEC_PER_MONTH * EBS_GP3_GB_MONTH
-    ip4 = total_sec / 3600 * IPV4_HR * n_instances
+    # One address per instance, and `total_sec` already sums every instance's
+    # lifetime, so the count is in the seconds. Multiplying by it again read
+    # 4x high on a four-machine run, which hid at $0.014, and 3,076x high on a
+    # fleet-sized estimate, where it reached $8,437 against $2.74.
+    ip4 = total_sec / 3600 * IPV4_HR
     if have_ec2:
         print("\n=== DERIVED: storage and address ===")
         print(
@@ -283,21 +291,21 @@ def main() -> int:  # noqa: C901
         print(
             f"  DERIVED    {a.s3_get_requests:,} / 1000 x ${S3_GET_PER_1000} = ${s3:.4f}"
         )
-    elif a.shard_scene_reads is None:
-        print("  UNKNOWN: --shard-scene-reads not given")
+    elif a.block_scene_reads is None:
+        print("  UNKNOWN: --block-scene-reads not given")
     elif a.requests_per_read is None:
         print(
-            f"  MEASURED   shard-scene reads : {a.shard_scene_reads:,} x {a.bands} bands"
+            f"  MEASURED   block-scene reads : {a.block_scene_reads:,} x {a.bands} bands"
         )
         print("  UNKNOWN    requests per read : not measured")
         print("  UNKNOWN    S3 request charge : run measure_s3_requests.py first")
         print("             Do NOT substitute a guess. At this read pattern the")
         print("             charge can rival EC2, so a guess can invert a decision.")
     else:
-        gets = a.shard_scene_reads * a.bands * a.requests_per_read
+        gets = a.block_scene_reads * a.bands * a.requests_per_read
         s3 = gets / 1000 * S3_GET_PER_1000
         print(
-            f"  MEASURED   reads x bands x req/read = {a.shard_scene_reads:,} x {a.bands}"
+            f"  MEASURED   reads x bands x req/read = {a.block_scene_reads:,} x {a.bands}"
             f" x {a.requests_per_read} = {gets:,.0f} GETs"
         )
         print(f"  DERIVED    {gets:,.0f} / 1000 x ${S3_GET_PER_1000} = ${s3:.4f}")
@@ -330,7 +338,7 @@ def main() -> int:  # noqa: C901
                         for r in rows
                     ],
                     "total_instance_seconds": total_sec,
-                    "shard_scene_reads": a.shard_scene_reads,
+                    "block_scene_reads": a.block_scene_reads,
                     "s3_get_requests": a.s3_get_requests,
                 },
                 "derived": {

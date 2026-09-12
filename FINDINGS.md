@@ -17,18 +17,18 @@ this document disagree, read the PR.
 - **No section here is a recommended configuration.** The `Headline` run is four
   unstaged `c6i.16xlarge` at a 512 px shard under the old QA mask. Steady state
   is one staged `m6id.16xlarge` a tile at `--shard 360`. See `What to run`.
-- **No figure here is a per-tile price.** The $4.28 below bought one tile on
+- **No figure here is a per-tile price.** The $4.27 below bought one tile on
   four machines that read every shard from S3. A staged tile is $1.68 to $1.87
   and 26 to 29 minutes on one instance. See `Cost`.
 
 ## Headline
 
 Four `c6i.16xlarge` instances built the full tile `S30W065`, 18,000 x 18,000 px
-over 3,910 scenes, in **4.8 minutes of wall clock** for **$4.28**.
+over 3,910 scenes, in **4.8 minutes of wall clock** for **$4.27**.
 
 Read every number in this section as one tile on four machines, reading every
 shard from S3, at a 512 px shard, on 2026-09-08. The 4.8 minutes is the slowest
-of four parallel slices, not the time one machine takes. The $4.28 is the whole
+of four parallel slices, not the time one machine takes. The $4.27 is the whole
 tile, not a per-machine or per-hour rate. Staging, the 360 px shard, and the
 current mask all postdate it, and `What to run` has the configuration that
 replaced it.
@@ -55,7 +55,7 @@ sits below the trusted minimum and 90.6 C sits above any land skin temperature,
 so both become nodata. The figures stand as what was measured. They are not what
 the pipeline would write today.
 
-S3 requester-pays requests are 54% of that $4.28 and EC2 is 45%. That run read
+S3 requester-pays requests are 54% of that $4.27 and EC2 is 45%. That run read
 every shard straight from S3, which opens each scene about 155 times at 4.77
 requests an open. Staging fetches each object once instead, which takes the
 per-tile S3 line from **$2.31 to $0.0031** and the 769-tile total from
@@ -159,12 +159,13 @@ uv run shard_lst_p95.py ... --shard-slice 1875:2500 --out-dir ./part3
 uv run shard_lst_p95.py --merge part0 part1 part2 part3 --out-dir ./tile
 ```
 
-Staging is on by default. `--no-stage` reads every shard from S3 instead, which
-is the path `measure_s3_requests.py` prices and the one that costs 739 requests
-per object, or $2.31 a tile against $0.0031. It exists to measure against.
-Do not pair it with `--shard 360`: the small shard is chosen for memory once
-staging has removed the request cost, and unstaged it multiplies that cost
-instead. See `Shard size is a memory decision once staging is on`.
+Every run stages. There is no flag that skips it, and
+`tests/test_staging.py` asserts the parsers reject one. Reading each shard from
+S3 instead costs about 739 requests per object against one, because roughly 155
+shards open each scene and every open is 4.77 requests. Across the fleet that
+is 4.2 billion GETs against 5.8 million, or $1,681 against $2.32, and it also
+runs about twice as slow. `measure_s3_requests.py` still prices the unstaged
+path, because knowing what staging saves needs the number it saves against.
 
 The merge writes `lst_p95_dn.npy` and `qa_count.npy` for the analysis scripts,
 and `tile/catalog/` for everyone else: two COGs on a STAC item, inside a
@@ -609,7 +610,7 @@ cost per tile does not change as wall time falls.
 
 Those three figures project from compute time alone, excluding boot, install,
 the catalogue search, and every S3 request charge. The measured fleet cost $1.94
-of EC2 time and $4.28 in total. `c6i` outperformed the `r6i` of the early
+of EC2 time and $4.27 in total. `c6i` outperformed the `r6i` of the early
 measurements on both axes, because the 26.5 GiB peak of 96 means the
 memory-optimised instance rented RAM the job never touched.
 
@@ -783,10 +784,10 @@ Elastic Block Store (EBS) line covers four 150 GB root volumes.
 |---|---|---|
 | S3 GET requests | 605,617 x 2 x 4.77 / 1000 x $0.0004 | **$2.31** |
 | EC2, full-tile fleet | 2,568 s / 3600 x $2.72 | **$1.94** |
-| Public IPv4 | 0.7133 instance-hours x $0.005 | $0.014 |
+| Public IPv4 | 0.7133 instance-hours x $0.005 | $0.004 |
 | EBS | 4 x 150 GB x 642 s / 2,628,000 x $0.08 | $0.012 |
 | S3 to EC2 transfer, same region | | $0.00 |
-| **total** | | **$4.28** |
+| **total** | | **$4.27** |
 
 The S3 line exceeds the compute. Earlier versions of this document guessed at it
 instead of counting it. The $2.72/hr rate now has a **VERIFIED** label against
@@ -1220,13 +1221,13 @@ It used to be a request-cost lever worth 2.8x. Staging removed that: one GET
 per object whatever the shard edge. What remains is memory, which falls with
 the square of the edge, against compute, which does not.
 
-Unstaged the lever is still there, and a smaller shard pulls it the wrong way.
-MEASURED from the inventory by `--dry-run --search-in-dry-run` on `S30W065`: the
-2,500-shard plan at 360 px makes **1,264,988** shard-scene reads against
-**690,659** for the 1,296-shard plan at 512 px. That is 265 opens per object
-against 145, and unstaged every open is billed and pays a fresh round trip. So a
-360 px shard with `--no-stage` takes the memory-optimised edge and the unstaged
-request bill together, which is the worst of the four pairings.
+A smaller shard would pull the lever the wrong way if a run could skip
+staging. MEASURED from the inventory by `--dry-run --search-in-dry-run` on
+`S30W065`: the 2,500-shard plan at 360 px makes **1,264,988** shard-scene reads
+against **690,659** for the 1,296-shard plan at 512 px. That is 265 opens per
+object against 145, and every open would be billed and pay a fresh round trip.
+Pairing the memory-optimised edge with the unstaged request bill was the worst
+of the four pairings, and removing the flag removed the pairing.
 
 MEASURED by `measure_shard_memory.py --mode timing` over ten staged scenes:
 
@@ -1471,7 +1472,7 @@ against 2 GETs staged.
 
 Per tile, the staged column is **$1.68 to $1.87** and **26 to 29 minutes** on
 one `m6id.16xlarge`. Divide either total by 769; the minutes follow from the
-EC2 line at $3.7968/hr. Quote these two for one tile. The headline's $4.28 and
+EC2 line at $3.7968/hr. Quote these two for one tile. The headline's $4.27 and
 4.8 minutes describe four unstaged machines working on one tile together.
 
 Staging cuts the total by **1.7x to 1.9x on demand and 4.6x to 5.3x on spot**.
@@ -1497,7 +1498,96 @@ worth spending memory on.
 The department-scale phase, across five EC2 sessions, eight completed
 department runs, one 200-scene quarter-tile smoke run, and two quarter-tile
 attempts that never finished, cost about **$4.45**. The full-tile fleet cost
-**$4.28** on top of it. The staged and memory-sweep instances are unpriced.
+**$4.27** on top of it. The staged and memory-sweep instances are unpriced.
+
+### The shard edge is 500, and it is a memory decision
+
+MEASURED against the full 895-tile inventory at 64 workers, on the 256 GiB
+machine the fleet runs: a 512 px edge refuses four tiles.
+
+| tile | 512 px | 500 px |
+|---|---|---|
+| N50E100 | 259.0 GiB | 247.3 GiB |
+| N50E090 | 257.8 | 246.9 |
+| N50E095 | 257.2 | 246.6 |
+| N50E115 | 256.1 | 245.1 |
+
+500 also divides an 18,000 px tile exactly, so a tile cuts into the same 1,296
+shards with no ragged edge where 512 leaves 71. The work barely moves: N50E100
+reads 3% more at 500 px and S30W065 reads 2% fewer, because a smaller shard
+sees fewer scenes and there are the same number of shards. 508 fits too and
+leaves 1.0 GiB on the worst tile, which is luck rather than margin.
+
+One edge for the fleet rather than one per tile. Per-tile edges would save
+about 4% of the compute on the tiles that do not need the smaller one, against
+a per-shard depth pass over 895 tiles in `fleet_plan.py` and a field a launcher
+has to honour. A dropped field is worse than a default chosen for the worst
+tile.
+
+The guard runs before staging, so a refused tile costs boot, install and search
+and buys no object. That is about 370 s, or $0.39. The cost of the old default
+was four machines exiting non-zero in a fleet of 769, which someone has to
+notice.
+
+### A tile staged itself twice
+
+The seam correction adds a traversal. `tile_prep.py` reads the tile, then
+`shard_lst_p95.py` reads the same scenes behind it, and each staged the same
+objects from scratch. `_fetch_one` had no skip, so pointing both at one
+`--stage-dir` fetched everything again.
+
+DERIVED from the measured staging rate of 922 MB/s and 78.5 MB a scene, on a
+mean tile of 3,779 scenes:
+
+| | |
+|---|---|
+| refetched | 297 GB |
+| time | 322 s, or 21% of a 26-minute tile |
+| GETs | 2 per scene became 4 |
+
+The fetch now skips an object already on disk. Existence is the whole test,
+because `_fetch_one` unlinks on every failure path including a short read, so
+a file that is there is complete. A HEAD would confirm it and is billable,
+which is most of what skipping saves.
+
+`staging.json` gains `reused`, and `retries` is measured against the objects
+actually fetched rather than the whole manifest. Without that a warm rerun
+reports negative retries. `estimated_bytes` takes the stage directory and
+leaves out what is present, because the guard reserves the manifest before the
+first GET and would otherwise refuse the second traversal on the one volume
+that makes it free.
+
+### The unstaged path is gone
+
+`--no-stage` read every shard straight from S3, as the pipeline did before
+staging existed. It was kept to measure against. Planning the real fleet
+against the full 895-tile inventory priced what keeping it risked.
+
+| | staged | unstaged |
+|---|---|---|
+| GETs, 769 tiles | 5,811,750 | 4,202,430,817 |
+| S3 line | **$2.32** | **$1,680.97** |
+| read speed | 11 s / 4 shards | 21 s / 4 shards |
+
+The request count is the whole difference: staging fetches each object once, so
+GETs are two per scene whatever the shard grid does. Unstaged, roughly 155
+shards open each scene and every open is 4.77 requests, which is about 739 per
+object. The S3 line then exceeds the EC2 line for the whole fleet.
+
+The speed row is MEASURED in PR #7, commit `c771f27`, over four shards run
+twice in one process. Reading local files runs about twice as fast as
+`/vsis3` for the same pixels, so the flag cost roughly half the wall clock as
+well as $1,679.
+
+A flag that cannot be set correctly is not an option, it is a way to lose a
+fleet run. `shard_lst_p95.py`, `tile_prep.py` and `measure_seam.py` no longer
+accept it, `staging.disk_guard` names a larger volume or a smaller slice
+instead of offering S3, and `tests/test_staging.py` asserts the parsers reject
+`--no-stage` rather than trusting a reviewer to catch one coming back.
+
+`measure_s3_requests.py` still reads unstaged, because measuring what staging
+saves needs the number it saves against. It is a measurement script and it
+composites nothing.
 
 ### How to price a run
 
@@ -1523,7 +1613,7 @@ aws ec2 describe-instances --region us-west-2 \
 Terminated instances stay queryable for about an hour. After that both fields
 disappear and the API can no longer supply the lifetime, so **run the report
 immediately after teardown**. The fleet here aged out first, so `--recorded`
-takes the lifetimes directly, and this command produced the $4.28 total:
+takes the lifetimes directly, and this command produced the $4.27 total:
 
 ```bash
 ./cost_report.py --tag purpose=lst-benchmark --region us-west-2 \
@@ -2271,12 +2361,94 @@ records the same count for one that would rather read a file.
 - **The department tuning covers one department at 711 scenes.** A different
   area or scene count moves the optimum, because the memory term scales with
   both.
-- **This pipeline does not destripe.** The QA and nodata rules match
-  `nlebovits/landsat-lst` at the pixel level. They are not the destriping
-  algorithm. Scene-offset correction, the monthly climatology it fits, and the
-  temporal sampling rule are all absent here, and the P95 itself is unchanged.
-  A tighter mask removes some of what feeds scene-edge artifacts. It does not
-  make this composite equal to the production one.
+- **The seam corrections are built and have never run on real pixels.**
+  `destripe.py` defines both rules, `tile_prep.py` estimates what they need once
+  per tile, and `shard_lst_p95.py` applies them. 87 unit tests cover the
+  numerics and the wiring, including the claim the whole design rests on:
+  splitting the tile into blocks does not move a scene offset, so the estimate
+  costs one source traversal rather than the two `nlebovits/landsat-lst` pays.
+  Every one of those tests runs against a synthetic stack. No tile has been
+  prepped, no shard has been composited with a correction on, and
+  `measure_seam.py` has produced no numbers. Until it does, the seam removal
+  and the variance retained quoted in the docstrings are the sibling
+  repository's measurements on its own grid, not this one's.
+- **One assumption in `destripe.py` no synthetic loader can check.** Every
+  per-scene value reaches a loaded stack by matching
+  `destripe.timestamp_of(item)` against the `time` coordinate `odc.stac`
+  produced. The unit tests replace `stac_load` with a fixture built to return
+  those stamps, so they assert the assumption back at themselves.
+  `tests/test_time_axis_join.py` checks it against real scenes, and it is
+  `s3`-marked and has not been run. If odc-stac ever stops taking the item
+  datetime as its group timestamp, `align_to_time` raises and every shard of
+  the tile stops at once. That is the right failure and it is still a failure.
+- **The swath comes from the data, and that is a departure.**
+  `nlebovits/landsat-lst` rasterises the imaged parallelogram Earth Search
+  publishes. This repository reads the USGS bulk metadata, whose corner columns
+  describe the product bounding rectangle and exceed the imaged area by about
+  46%, so rasterising the ring would put the cross-fade tens of kilometres off
+  the seam. Counting valid observations per `(path, row)` quad answers the same
+  question from the pixels instead. Comparing the two definitions on real ground
+  is still owed.
+- **Neighbouring tiles can disagree about both an offset and a swath.** Both
+  are measured over one tile plus a 1 degree margin and no wider. So a scene that two
+  tiles share gets a different offset in each, because the median anomaly is
+  taken over different ground. A quad's swath moves for a second
+  reason: the inventory assigns only some of that quad's scenes to each tile,
+  so the half-the-scenes threshold has a different denominator. The margin
+  makes the swath edges inside a tile real acquisition edges. It does not make
+  two tiles agree about an edge near their shared border.
+  `nlebovits/landsat-lst` has the same limit, and no merged pair of tiles has
+  been inspected.
+- **The prep resolution factor has no measurement behind it.** It defaults to
+  4. `nlebovits/landsat-lst` validated factor 2 at a median offset error of
+  0.002 C and rejected factor 4 at a maximum of 0.546 C against a
+  pre-registered 0.5 C gate, on a different grid and a different loader. This
+  repository owes its own sweep.
+- **The sparse floor is a placeholder with a citation that does not fit it.**
+  `DESTRIPE_MIN_PREP_SAMPLES = 200` comes from `nlebovits/landsat-lst`, where
+  it screened a factor-2 grid over a 5 degree tile. `tile_prep` estimates on a
+  factor-4 grid over the tile plus a margin, which holds roughly a fifth as
+  many pixels per scene, so 200 screens a different thing here. It needs what the
+  15 C cap got there, which is a sweep of the rejected share against the floor
+  on a real tile.
+- **The 15 C offset cap was calibrated somewhere else.** One mid-latitude
+  agricultural AOI, at a 21.8% rejected share. A humid tropical tile may not
+  behave that way, and the rejected share is the number to watch per tile.
+- **The shard memory model has not been re-measured with the corrections on.**
+  `SHARD_BYTES_PER_PIXEL_SCENE = 15` should hold or fall on a fully covered
+  shard: the per-path percentile partitions each path's subset in place, where
+  the pooled one partitions a copy of the whole stack. The pooled fallback adds
+  to it. It reduces the uncovered pixels alone, so it costs 4 bytes per
+  pixel-scene times the uncovered share: zero inside one swath, a second
+  whole-stack copy on a shard the swaths miss entirely. All of this is
+  arithmetic, and `worker_memory_guard` refuses runs on the constant.
+- **How much ground the swaths miss is unmeasured.** A quad's swath is the
+  ground where at least half its scenes produced a valid observation. A pixel
+  one path sees on a third of its passes falls outside every swath and still
+  carries temperatures. `feathered_percentile` composites those pixels
+  pooled, and `process_shard` counts them as `n_pooled_fallback`. Whether that
+  share is a rounding error or a third of a tile depends on cloud, and no tile
+  has been prepped. Watch it beside the rejected share. A high one says the
+  swath definition described less ground than the scenes cover, so the
+  cross-fade describes less of the tile than the composite implies.
+- **A capped prep run counted its swaths against the wrong denominator.**
+  `--max-blocks` truncates the work list before any coverage accumulates, and
+  `swath_masks` still divides each quad's per-cell count by every scene the
+  inventory gave that quad. So a smoke run measured coverage over part of the
+  tile, compared it against all of the tile's scenes, and wrote the small
+  swaths that follow as an ordinary artifact. Every one of `load_tile_prep`'s
+  refusals passed it. The meta recorded `{"planned": len(blocks), "run":
+  len(stats)}`, which could not signal this either: `planned` counted the
+  barren blocks that were never going to run, so an uncapped run also showed
+  `run` below `planned`. The pair is now `with_scenes` against `run`, beside
+  `max_blocks` and a `partial` flag, and a slice refuses a partial artifact.
+- **The prep memory model is arithmetic, not a measurement.**
+  `tile_prep.memory_model` names five resident terms and `--target-memory-gib`
+  refuses a run that exceeds them, the way `worker_memory_guard` does for a
+  shard. The shard constant was calibrated against six committed sweeps. This
+  one counts array shapes and has never been checked against an RSS series. The
+  term worth watching is the histogram a block returns whole to the driver, at
+  104 KB a scene, so a block seeing 2,000 scenes hands back 208 MB.
 - **The mask has been measured on one tile.** S30W065 is interior South
   America, entirely land, with no coastline for the water rule to cut and a
   0.24% gap share. A coastal or tropical tile would exercise both rules
@@ -2302,6 +2474,15 @@ records the same count for one that would rather read a file.
 
 Every entry is a claim an earlier version stated as fact. Each shares one
 mistake: it presented an estimate as a measurement.
+
+**The public IPv4 line charged each machine once per machine.**
+`cost_report.py` computed it as `total_sec / 3600 x rate x n_instances`, and
+`total_sec` already sums every instance's lifetime, so the count entered twice.
+The printed formula showed the right one, which is how it survived review. On
+the four-machine full-tile run the error is $0.014 against $0.0036 and the
+total moves from $4.28 to $4.27, so nothing caught it. Priced across
+a 3,076-machine fleet the same line reads $8,437 against $2.74, which is most
+of an estimate. Every $4.28 in this document is now $4.27.
 
 **Masking never changes a temperature.** The claim was that USGS wrote a gap
 pixel as `ST_B10` fill, `lst_qa.not_fill` rejected it, and `qa_count` already
@@ -2458,6 +2639,9 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `profile_lst_p95.py` | the array-graph profiling harness |
 | `lst_qa.py` | the QA, fill, range, and nodata rules both P95 paths call |
 | `cog_catalog.py` | writes the COGs and the Portolan catalog the merge emits |
+| `destripe.py` | the two seam rules both P95 paths call: scene offsets, and the per-path cross-fade |
+| `tile_prep.py` | one coarse pass per tile for the offsets and the swath geometry |
+| `measure_seam.py` | four composites from one load, on a shard that straddles a swath |
 | `stac_window.py` | the composite window, and the cache identity it fixes |
 | `land_tiles.py` | the buffered land geometry and the generated tile list |
 | `masks.py` | the pixel rules: water, and the ASTER emissivity gap |

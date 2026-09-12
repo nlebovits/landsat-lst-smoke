@@ -1,38 +1,29 @@
 # /// script
 # requires-python = ">=3.12,<3.15"
 # dependencies = [
-#   "frisky>=0.7.2", "dask", "odc-stac", "pystac-client",
-#   "planetary-computer", "xarray", "numpy", "geopandas",
+#   "frisky>=0.7.2", "dask", "odc-stac", "odc-geo", "pystac",
+#   "xarray", "rioxarray", "numpy", "geopandas",
 #   "psutil", "rich", "boto3", "pyarrow>=16",
 #   "rasterio", "shapely", "pyogrio",
 #   "stac-geoparquet", "matplotlib",
 # ]
 # ///
-"""Sharded p95 LST composite. One shard, one task, no shuffle.
+"""The p95 LST composite of one tile, as one lazy dask-xarray graph on frisky.
 
-The array-graph version does not scale. A p95 over a 9000x9000 area and 1765
-scenes makes dask reorganise 572 GB of float32 from time-major read blocks into
-space-major reduce blocks. Measured on EC2: `rechunk-merge` moved 182 of the
-241 GiB shuffled, 76% of all transfer, and the run spilled 1.21 TiB against a
-58 GB input. No block size avoids it, because the shuffle is inherent to
-splitting one reduction across many workers.
+`composite.build_graph` opens every scene of the tile once, chunked in space
+and never in time, and reduces each block to its p95 and its monthly counts
+inside one task. The blocks stream from the workers into two staging
+GeoTIFFs, which become the two COGs the catalog publishes. Nothing larger
+than a block returns to this process, and nothing else is written to disk.
 
-This version splits the *problem* instead of the array. Each shard is a small
-bbox processed entirely inside one worker: load, mask, reduce, encode, return.
-Nothing crosses a worker boundary, so there is no rechunk and no shuffle.
+This driver does everything around that graph: it resolves the tile, checks
+the mask artifacts and the prep artifact, stages the scene objects to local
+disk, starts the frisky cluster, computes, collects the trace, and writes the
+catalog. Every phase is a frisky client phase, so the dashboard shows what the
+driver is doing while it does it.
 
-    512 x 512 px x 1765 scenes x 15 bytes = 6.9 GB per shard
-
-Fifteen bytes, not four. The decoded float32 stack is one of five arrays live
-at once, which comes to 13, and a windowed read of a tiled COG holds about two
-bytes more that the five do not name. `shard_bytes` counted only the decoded
-stack until a fleet instance ran out of memory, and then counted 13 until a
-staged sweep at fleet depth read 8% above it. The figure stays constant as the
-area grows. A quarter tile is 324 shards and a full tile is 1,296. Frisky
-schedules 250,000-400,000 tasks/s, so the task count is free.
-
-    uv run shard_lst_p95.py --bbox=-62.5,-35.0,-60.0,-32.5 \
-        --pixels-per-degree 3600 --shard 512 --dry-run
+    uv run shard_lst_p95.py --tile S30W065 --tile-prep ./tile-prep \\
+        --stage-dir /mnt/nvme/stage --out-dir ./run
 """
 
 from __future__ import annotations
@@ -46,8 +37,10 @@ import time
 from pathlib import Path
 
 import aster_ged
-import item_table
+import composite
+import destripe
 import masks
+import observe
 import staging
 from aster_ged import DEFAULT_NUMOBS_URI
 from cog_catalog import (
@@ -55,19 +48,12 @@ from cog_catalog import (
     DEFAULT_HOST_URL,
     DEFAULT_LICENSE,
     MONTH_NAMES,
-    catalog_provenance,
     check_catalog_inputs,
-    collection_id_for_window,
     write_catalog,
-)
-from lst_qa import (
-    LST_NODATA_DN,
-    LST_OFFSET,
-    LST_SCALE,
-    encode_celsius,
-    masked_celsius,
+    write_cog,
 )
 from land_tiles import tile_bounds
+from lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE
 from memory_sampler import MemorySampler
 from stac_window import (
     DEFAULT_CLOUD_COVER_LT,
@@ -99,12 +85,10 @@ DEFAULT_STAGE_DIR = Path(tempfile.gettempdir()) / "landsat-lst-stage"
 #:
 #: `planetary-computer` is listed and then refused. Keeping it in `choices`
 #: means the run stops with a sentence that says why, rather than with
-#: argparse's "invalid choice", which would read as a typo. Removing it
-#: silently would be worse still: the flag used to select a catalogue, so a
-#: command line that carries it is asking for something this path cannot do.
+#: argparse's "invalid choice", which would read as a typo.
 READ_SOURCES = ("earth-search", "planetary-computer")
 
-#: The only source the sharded path can read. See `configure_read_env`.
+#: The only source this path can read. See `configure_read_env`.
 SUPPORTED_READ_SOURCE = "earth-search"
 
 #: Band order of the qa_count asset, and the report's column order. Defined
@@ -112,15 +96,9 @@ SUPPORTED_READ_SOURCE = "earth-search"
 MONTHS = MONTH_NAMES
 GIB = 1024.0**3
 
-#: How long `drive_shards` waits when neither staging nor the gather has
-#: anything ready. A shard runs about a second, so this costs a fraction of a
-#: core and bounds how long a freed shard sits unsubmitted.
-POLL_INTERVAL_S = 0.005
-
-#: The scene table, written beside the staged scenes rather than into the
-#: output directory. `staging.cleanup` already removes that directory, and
-#: 7.8 MB of scratch does not belong in an artifact that ships.
-ITEM_TABLE_NAME = "item-table.json"
+#: What a rehearsal prefixes to every line it prints and every file it names,
+#: so a synthetic run can never be read as a measurement.
+REHEARSAL_TAG = "REHEARSAL: "
 
 
 # --------------------------------------------------------------------------
@@ -137,12 +115,15 @@ def configure_read_env(source: str = SUPPORTED_READ_SOURCE) -> None:
     one request. A request count measured without them describes a different
     pipeline, so anything that reads scenes must call this first.
 
+    The workers are spawned processes and inherit only the environment, so
+    these have to be set before the cluster starts. frisky has no nanny to set
+    the BLAS thread caps, so they are set here too.
+
     Raises:
         SystemExit: for any source but `earth-search`. The inventory writes
             `s3://usgs-landsat` hrefs and that bucket is requester-pays, so a
             different source would skip `AWS_REQUEST_PAYER` and every read
-            would fail on a bucket the run is entitled to read. This used to
-            pass silently.
+            would fail on a bucket the run is entitled to read.
     """
     if source != SUPPORTED_READ_SOURCE:
         msg = (
@@ -164,374 +145,13 @@ def configure_read_env(source: str = SUPPORTED_READ_SOURCE) -> None:
     os.environ.setdefault(
         "AWS_DEFAULT_REGION", os.environ.get("AWS_REGION", "us-west-2")
     )
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(name, "1")
 
 
 # --------------------------------------------------------------------------
-# Shard geometry
+# Inputs
 # --------------------------------------------------------------------------
-
-
-class Shard:
-    """One tile of the output grid, addressed in pixels and in degrees."""
-
-    __slots__ = ("row", "col", "y0", "x0", "ny", "nx", "bbox")
-
-    def __init__(self, row, col, y0, x0, ny, nx, bbox):
-        self.row, self.col = row, col
-        self.y0, self.x0 = y0, x0
-        self.ny, self.nx = ny, nx
-        self.bbox = bbox
-
-    def __repr__(self):
-        return f"Shard(r{self.row} c{self.col} {self.ny}x{self.nx} {self.bbox})"
-
-
-def plan_shards(
-    bbox, pixels_per_degree: int, shard: int
-) -> tuple[list[Shard], int, int]:
-    """Cut the output grid into shard x shard pixel blocks.
-
-    The grid is anchored to whole degrees, not to the bbox, so a shard lands on
-    the same pixels no matter which request produced it. Edge shards are
-    smaller rather than overhanging.
-    """
-    w, s, e, n = bbox
-    res = 1.0 / pixels_per_degree
-    height = int(round((n - s) * pixels_per_degree))
-    width = int(round((e - w) * pixels_per_degree))
-
-    shards = []
-    for row, y0 in enumerate(range(0, height, shard)):
-        ny = min(shard, height - y0)
-        # Row 0 is the northern edge; latitude decreases as y grows.
-        north = n - y0 * res
-        south = north - ny * res
-        for col, x0 in enumerate(range(0, width, shard)):
-            nx = min(shard, width - x0)
-            west = w + x0 * res
-            east = west + nx * res
-            shards.append(Shard(row, col, y0, x0, ny, nx, (west, south, east, north)))
-    return shards, height, width
-
-
-def items_for_shard(shard: Shard, item_bboxes) -> list[int]:
-    """Indices of items whose footprint intersects this shard.
-
-    A 512 px shard at 1/3600 degree is 0.14 degrees across; a Landsat scene is
-    roughly 1.7. So most scenes miss most shards, and sending the whole item
-    list to every task would waste both memory and reads.
-    """
-    w, s, e, n = shard.bbox
-    return [
-        i
-        for i, (iw, isouth, ie, inorth) in enumerate(item_bboxes)
-        if iw < e and ie > w and isouth < n and inorth > s
-    ]
-
-
-#: Bytes per pixel-scene that one shard holds at its peak. `process_shard` has
-#: five arrays live at once, not the one an earlier version of this function
-#: counted:
-#:
-#:     dn      uint16   2      the raw thermal stack
-#:     qa      uint16   2      the QA stack
-#:     celsius float32  4      the decoded stack
-#:     valid   bool     1      the mask, kept for the monthly counts
-#:     copy    float32  4      nanpercentile partitions a copy, not in place
-#:
-#: Those five sum to 13, and 13 under-predicts. Two bytes are not in the list.
-#:
-#: MEASURED by `measure_shard_memory.py --mode memory --stage-dir` against
-#: 1,615 real staged scenes on an `m6id.16xlarge`, at the depths a fleet shard
-#: carries. Least squares puts the slope at 13.68 bytes per pixel-scene at
-#: 360 px and 14.52 at 512, and a 13-byte model reads low at 600 and 820
-#: scenes on both edges, by up to 8%:
-#:
-#:     512 px, 820 scenes:  measured 3.08 GiB, 13-byte model 2.85
-#:     360 px, 820 scenes:  measured 1.57 GiB, 13-byte model 1.54
-#:
-#: The surplus is the windowed read of a tiled COG: GDAL decodes whole blocks
-#: and `odc.stac` assembles them into the target array, which the five named
-#: arrays do not cover. It is not attributed to a specific allocation, because
-#: nothing here has profiled one. So 15 is the five named arrays plus measured
-#: read overhead, and it bounds every point of all six committed sweeps.
-#:
-#: The synthetic fixture is what made 13 look safe. It writes one untiled
-#: raster at the shard's own edge and read it whole, so it never allocates
-#: that intermediate, and it fits a slope of 12.7 to 13.2. A sweep that stops
-#: below about 280 scenes agrees with 13 as well, because the fixed term still
-#: covers the gap there. Every fleet shard runs deeper: 195 to 820.
-#:
-#: Each point runs in a fresh interpreter, and it has to. glibc does not return
-#: freed arenas promptly, so measuring a second shard in the same process
-#: reports the high-water mark of the first: two contaminated sweeps put the
-#: slope at 17 and 18 and disagreed with each other by 18% at 700 scenes.
-SHARD_BYTES_PER_PIXEL_SCENE = 15
-
-#: Per-worker overhead outside the arrays, in GiB. From the same measurement.
-SHARD_FIXED_GIB = 0.25
-
-
-def shard_bytes(shard_px: int, n_scenes: int) -> float:
-    """Peak working set for one shard, in GiB.
-
-    Counting only the float32 stack understated this by 3.9x, and every memory
-    decision in the pipeline read the low number: the dry-run budget, the shard
-    size, and the worker count a fleet instance is launched with. A run
-    configured from it put 64 workers wanting 97 GiB on a 128 GiB box that had
-    just written 78 GB of staged scenes into page cache, and the workers died
-    at cluster start.
-
-    `FINDINGS.md` recorded the symptom before the model was fixed: memory ran
-    at 94% of a 1.6 GiB limit that this function called 0.39 GiB.
-    """
-    arrays = shard_px * shard_px * n_scenes * SHARD_BYTES_PER_PIXEL_SCENE / GIB
-    return arrays + SHARD_FIXED_GIB
-
-
-#: Bytes the client holds per output pixel while it gathers. `lst_out` is
-#: uint16 at height by width, `qa_out` is uint8 at 12 by height by width, and
-#: the output mask is two bools at height by width. A full tile at 18,000 px
-#: square is 4.8 GiB of it.
-#:
-#: Both masks are built before staging, not after the gather, so that a tile
-#: the water rule empties costs nothing. They are therefore live for the whole
-#: run and the budget has to name them. Fourteen bytes here put 0.6 GiB of
-#: array outside the model on the largest tile the fleet runs.
-CLIENT_BYTES_PER_OUTPUT_PIXEL = 2 + 12 + 2
-
-
-def client_bytes(width: int, height: int) -> float:
-    """The full-tile arrays the client holds while it gathers, in GiB."""
-    return width * height * CLIENT_BYTES_PER_OUTPUT_PIXEL / GIB
-
-
-def worker_memory_guard(
-    shard_px: int,
-    depths,
-    workers: int,
-    width: int,
-    height: int,
-    *,
-    total_bytes: int | None = None,
-) -> float:
-    """Refuse a configuration that cannot fit, before the cluster starts.
-
-    `staging.disk_guard` refuses a fetch that cannot finish. This is the same
-    guard on the other resource, and it was missing. `shard_bytes` was
-    corrected after a `c6id.16xlarge` lost ten workers to coredumps, but the
-    corrected number only ever reached a `print`. The same configuration would
-    have launched again with a larger figure on the screen.
-
-    `depths` is the scene count of every shard in this slice, and the demand is
-    their sum plus the client's two full-tile arrays, because the client gathers
-    into those while the workers are still allocating. Only the deepest
-    `workers` shards count: beyond that the slice queues rather than running
-    wider.
-
-    Multiplying the worst shard by the slot count is the reading this replaced,
-    and it over-reserved by 2.77x on the one slice that has been measured.
-    MEASURED on an `m6id.16xlarge`, 64 shards of S30W065 at 360 px running 203
-    to 820 scenes deep:
-
-        64 x worst shard        102.6 GiB
-        sum of actual depths     64.0 GiB
-        simultaneous peak        37.0 GiB, sampled at 0.5 s
-
-    The slice held one 820-scene shard and a median of 401, so the worst shard
-    is not what 63 of the workers were holding. The remaining 1.73x is peak
-    non-coincidence: the sum of each worker's own high-water mark came to
-    48.6 GiB against 37.0 ever live at once. That headroom is deliberate,
-    because a sampler cannot prove the coincident peak it never caught.
-
-    Returns:
-        The demand in GiB, so the caller can report what it checked.
-
-    Raises:
-        SystemExit: naming the demand, the machine, and both escapes. The
-            operator's next decision is a smaller shard or fewer workers, and
-            the message carries the edge that would fit.
-    """
-    if total_bytes is None:
-        import psutil
-
-        total_bytes = psutil.virtual_memory().total
-    ordered = sorted(depths, reverse=True)[:workers]
-    if not ordered:
-        return client_bytes(width, height)
-    arrays = sum(shard_bytes(shard_px, n) for n in ordered)
-    client = client_bytes(width, height)
-    demand = arrays + client
-    total = total_bytes / GIB
-    if demand <= total:
-        return demand
-    # Solve for the edge whose arrays leave the fixed terms room. Reported
-    # rather than applied, because shard size changes the output layout.
-    scene_px = sum(ordered)
-    room = total - client - len(ordered) * SHARD_FIXED_GIB
-    fits = (
-        int((room * GIB / (scene_px * SHARD_BYTES_PER_PIXEL_SCENE)) ** 0.5)
-        if room > 0
-        else 0
-    )
-    msg = (
-        f"{len(ordered)} shards at {shard_px} px, {ordered[-1]:,} to "
-        f"{ordered[0]:,} scenes deep, need {arrays:.1f} GiB between them, plus "
-        f"{client:.2f} GiB of client output. That is {demand:.1f} GiB and this "
-        f"machine has {total:.1f} GiB. Use --shard {fits} or smaller, drop "
-        f"--workers, or pass --force to run it anyway. An undersized budget is "
-        f"what killed a c6id.16xlarge mid-run."
-    )
-    raise SystemExit(msg)
-
-
-# --------------------------------------------------------------------------
-# The unit of work. Everything here happens inside one worker.
-# --------------------------------------------------------------------------
-
-
-def rehearse_shard(
-    shard: Shard, item_dicts, crs: str, resolution: float, read_threads: int = 4
-) -> dict:
-    """Same contract as process_shard, with synthetic pixels and no S3.
-
-    Exercises everything a real run does except the read: submit, the return
-    payload, gather, assembly into the output raster, part writing and merge.
-    Those are the paths that broke on billed instances, and all of them are
-    testable on a laptop for nothing.
-    """
-    import numpy as np
-
-    rng = np.random.default_rng(shard.row * 10007 + shard.col)
-    n = max(len(item_dicts), 1)
-    lst = rng.normal(45.0, 6.0, (shard.ny, shard.nx)).astype("float32")
-    dn = encode_celsius(lst)
-    qa = np.full((12, shard.ny, shard.nx), min(n // 12, 255), dtype="uint8")
-    time.sleep(0.01)
-    return {
-        "row": shard.row,
-        "col": shard.col,
-        "y0": shard.y0,
-        "x0": shard.x0,
-        "lst_p95": dn,
-        "qa_count": qa,
-        "n_scenes": n,
-        "load_s": 0.0,
-        "reduce_s": 0.0,
-    }
-
-
-def process_shard(
-    shard: Shard, item_dicts, crs: str, resolution: float, read_threads: int = 4
-) -> dict:
-    """Load, mask, reduce and encode one shard. Returns small arrays only.
-
-    Deliberately eager: no dask inside. The whole point is that this fits in
-    memory, so a lazy graph would only reintroduce the rechunk we are avoiding.
-    """
-    import numpy as np
-    import pystac
-    from odc.geo import CRS
-    from odc.stac import stac_load
-
-    ydim, xdim = ("y", "x") if CRS(crs).projected else ("latitude", "longitude")
-
-    # Items travel as plain dicts. pystac objects are heavier to pickle and we
-    # send a different subset to every shard.
-    items = [pystac.Item.from_dict(d) for d in item_dicts]
-
-    # Measured on the 8-shard probe: loading was 94% of shard time (227 s of
-    # 242 s) because chunks=None reads scenes one at a time on one thread,
-    # leaving the other three idle. One chunk per scene lets the worker's own
-    # threads read in parallel. The rechunk stays inside this process, so there
-    # is still no cross-worker shuffle, which is the whole point of sharding.
-    t0 = time.perf_counter()
-    data = stac_load(
-        items,
-        bands=("lwir11", "qa_pixel"),
-        crs=crs,
-        resolution=resolution,
-        bbox=shard.bbox,
-        groupby="landsat:scene_id",
-        chunks={"time": 1, ydim: -1, xdim: -1},
-    ).compute(scheduler="threads", num_workers=read_threads)
-    t_load = time.perf_counter() - t0
-
-    # One definition of a usable observation, shared with the array-graph path
-    # in profile_lst_p95. It drops source fill, QA_PIXEL bits 1 to 5, and any
-    # decoded value outside [-50, 80] C. The range check is what removes the
-    # reprojected scene edges, where interpolation against the DN 0 fill leaves
-    # small nonzero values that decode near -124 C and that an exact fill
-    # comparison cannot see. All of it happens before the percentile, because a
-    # value that reaches nanpercentile has already moved the answer.
-    lst, valid = masked_celsius(data["lwir11"].values, data["qa_pixel"].values)
-
-    t1 = time.perf_counter()
-    with np.errstate(all="ignore"):
-        p95 = np.nanpercentile(lst, 95, axis=0)
-    t_reduce = time.perf_counter() - t1
-
-    months = data["time"].dt.month.values
-    qa_count = np.zeros((12, p95.shape[0], p95.shape[1]), dtype="uint8")
-    for m in range(1, 13):
-        sel = months == m
-        if sel.any():
-            qa_count[m - 1] = np.minimum(valid[sel].sum(axis=0), 255).astype("uint8")
-
-    dn_out = encode_celsius(p95)
-    return {
-        "row": shard.row,
-        "col": shard.col,
-        "y0": shard.y0,
-        "x0": shard.x0,
-        "lst_p95": dn_out,
-        "qa_count": qa_count,
-        "n_scenes": int(lst.shape[0]),
-        "load_s": t_load,
-        "reduce_s": t_reduce,
-    }
-
-
-def shard_task(
-    shard: Shard,
-    table_path,
-    indices,
-    crs: str,
-    resolution: float,
-    read_threads: int = 4,
-) -> dict:
-    """What the client submits. Resolves the scene table inside the worker.
-
-    `process_shard` still takes item dicts. Four test modules and
-    `measure_shard_memory.py` call it directly, and the staged-parity test has
-    to run the same function through two href regimes, so the unit of work
-    keeps the signature it had. This wrapper is the only thing that changed
-    about how it is reached.
-
-    The saving is the argument list. A shard used to carry its own 509 item
-    dicts, 423,128 B per task and 0.55 GB across a full tile. It now carries a
-    path and a list of positions. MEASURED by `measure_submit_cost.py` against
-    a real cluster: 5.3 to 6.1 ms per submit against 0.024 to 0.031 ms.
-    """
-    return process_shard(
-        shard, item_table.select(table_path, indices), crs, resolution, read_threads
-    )
-
-
-def rehearse_task(
-    shard: Shard,
-    table_path,
-    indices,
-    crs: str,
-    resolution: float,
-    read_threads: int = 4,
-) -> dict:
-    """The rehearsal counterpart. It reads no table, because it reads nothing.
-
-    `rehearse_shard` only ever used `len(item_dicts)`, and `len(indices)` is the
-    same number.
-    """
-    return rehearse_shard(shard, indices, crs, resolution, read_threads)
 
 
 def resolve_area(args):
@@ -539,13 +159,24 @@ def resolve_area(args):
 
     `--tile` is the production form: it fixes the bbox on the shared grid, so
     two machines given the same tile cut the same pixels. `--bbox` stays for
-    dry runs and rehearsals, which plan shards without reading anything.
+    dry runs and rehearsals, which plan blocks without reading the inventory.
 
     Returns:
         The bbox as `(west, south, east, north)`, and the tile id or None.
     """
     if args.tile and args.bbox:
-        raise SystemExit("pass --tile or --bbox, not both")
+        # A window of one tile: the tile names the inventory rows and the
+        # prep artifact, the bbox names the raster. For measurements.
+        tile = tile_bounds(args.tile)
+        window = tuple(float(v) for v in args.bbox.split(","))
+        if len(window) != 4:
+            raise SystemExit("--bbox needs west,south,east,north")
+        w, s, e, n = window
+        if not (tile[0] <= w < e <= tile[2] and tile[1] <= s < n <= tile[3]):
+            raise SystemExit(
+                f"--bbox {window} does not lie inside tile {args.tile} {tile}"
+            )
+        return window, args.tile
     if args.tile:
         return tile_bounds(args.tile), args.tile
     if not args.bbox:
@@ -585,145 +216,83 @@ def load_tile_items(args, tile_id: str):
     return items, boxes, provenance(manifest)
 
 
-def stage_scenes_for(args, item_dicts, work_idx):
-    """Fetch this slice's scene objects to local disk, or say why it did not.
+def stage_scenes_for(args, item_dicts, say=print):
+    """Fetch the tile's scene objects to local disk, or say why it did not.
 
-    Runs after `--max-shards`, so a two-shard smoke run fetches what those two
-    shards need rather than the whole slice, and before the cluster starts.
-
-    That ordering was questioned and is now measured. Fetching beside the
-    shards it feeds sounds free, because the fetch is network work and the
-    shards are processor work. It is not: MEASURED on an `m6id.16xlarge`, the
+    Runs to completion before the cluster starts. Overlapping the fetch with
+    the compute it feeds was MEASURED as a loss on an `m6id.16xlarge`: the
     same 1,998 objects and 78.9 GiB stage in 91.9 s with the machine to
-    themselves and in 358.7 s beside 64 busy workers. Staging spends its time
-    on TLS, HTTP and the copy loop, all of which want a core, so 64 workers
-    take 3.9x of it away. The overlap saved 220 s of wall clock on a 250-shard
-    slice and paid 267 s for it.
+    themselves and in 358.7 s beside 64 busy workers, because staging spends
+    its time on TLS, HTTP and the copy loop, all of which want a core.
 
     Returns:
-        The staging report, or None when the run reads from S3. The report is
-        this run's S3 line, counted rather than derived from a sampled
-        requests-per-read.
+        The staging report, or None under `--rehearse`, which reads files it
+        wrote itself.
     """
     if args.rehearse:
-        print("stage         skipped: the rehearsal reads no objects")
-        return None
-    if args.no_stage:
-        print(
-            "stage         skipped: --no-stage. Every shard reads from S3, and "
-            "about 155 shards touch each scene"
-        )
+        say("stage         skipped: the rehearsal reads its own synthetic files")
         return None
     report = staging.stage_scenes(
         item_dicts,
-        sorted({i for _, idx in work_idx for i in idx}),
+        range(len(item_dicts)),
         args.stage_dir,
-        threads=args.stage_threads,
+        settings=stage_settings(args),
     )
-    report_staging(report)
+    report_staging(report, say)
     return report
 
 
-def report_staging(report) -> None:
-    """The two console lines a staged run prints about what it fetched."""
-    print(
+def stage_settings(args) -> staging.FetchSettings:
+    """The five staging flags as one object, defaults included.
+
+    Each of them is `None` unless the operator said otherwise, and
+    `FetchSettings.build` turns a row of `None` into the behaviour staging had
+    before the flags existed. That is what keeps an untuned run comparable to
+    every run already measured.
+    """
+    return staging.FetchSettings.build(
+        threads=args.stage_threads,
+        connections=args.stage_connections,
+        part_bytes=(
+            None if args.stage_part_mb is None else int(args.stage_part_mb * 1024**2)
+        ),
+        part_concurrency=args.stage_part_concurrency,
+        fsync=args.stage_fsync,
+    )
+
+
+def report_staging(report, say=print) -> None:
+    """The three console lines a staged run prints about what it fetched.
+
+    The third names the settings. A throughput figure without them cannot be
+    compared against another run, and staging is the phase most likely to be
+    swept.
+    """
+    say(
         f"stage         {report['objects']:,} objects, "
         f"{report['bytes'] / GIB:.1f} GiB in {report['seconds']:.1f}s "
         f"-> {report['stage_dir']}"
     )
-    print(
+    reused = report.get("reused", 0)
+    already = f", {reused:,} already staged" if reused else ""
+    say(
         f"              {report['get_requests']:,} billable GETs, "
-        f"{report['retries']} retries"
+        f"{report['retries']} retries{already}"
     )
+    settings = report.get("settings")
+    if settings:
+        say(
+            f"              {settings['threads']} threads, "
+            f"{settings['connections']} connections, "
+            f"{settings['part_concurrency']} x "
+            f"{settings['part_bytes'] / 1024**2:.0f} MiB parts, "
+            f"fsync {settings['fsync']}"
+        )
 
 
-def drive_shards(
-    client,
-    fn,
-    work_idx,
-    table_path,
-    crs,
-    res,
-    read_threads,
-    *,
-    assemble,
-    marks,
-    t0,
-):
-    """Submit every shard, then assemble results as they return.
-
-    Shards are submitted in batches rather than one at a time.
-    `_AsCompleted.add` clears its completion cursor, so adding singly makes the
-    next drain rescan every pending future and the gather quadratic in the
-    shard count.
-
-    Results are assembled one at a time and dropped. `client.gather` on every
-    future at once held about 1 GB of results and aborted the process with a
-    Rust panic across the PyO3 boundary at 90% completion, taking 290 finished
-    shards with it.
-
-    Returns:
-        The per-shard stats in completion order, and the seconds spent inside
-        `client.submit`.
-    """
-    import frisky  # deferred, like main's: a dry run must not need it
-
-    total = len(work_idx)
-    stats: list[dict] = []
-    completed = frisky.as_completed([], raise_errors=False)
-
-    t_submit = time.perf_counter()
-    marks["first_submit_s"] = t_submit - t0
-    completed.update(
-        [
-            client.submit(fn, shard, table_path, idx, crs, res, read_threads)
-            for shard, idx in work_idx
-        ]
-    )
-    submit_s = time.perf_counter() - t_submit
-    marks["last_submit_s"] = time.perf_counter() - t0
-
-    done = 0
-    #: Shards finished at the last checkpoint, so the line can report the rate
-    #: over the last 25 rather than since the start. The cumulative figure hides
-    #: page-cache warmup: the first wave of 64 shards runs about 59 s each and
-    #: later ones about 11 s, so a running mean reads as a slow cluster for
-    #: most of a run and as a rate for none of it.
-    last_mark = (0, time.perf_counter())
-    while done < total:
-        for future in completed.next_batch(block=True):
-            stats.append(assemble(future))
-            done += 1
-            marks.setdefault("first_result_s", time.perf_counter() - t0)
-            if done % 25 == 0 or done == total:
-                now = time.perf_counter()
-                elapsed = now - t0 - marks["first_submit_s"]
-                span = (now - last_mark[1]) / max(done - last_mark[0], 1)
-                last_mark = (done, now)
-                print(
-                    f"  {done:4d}/{total}  {elapsed:6.1f}s  "
-                    f"{elapsed / done:5.2f}s/shard mean  "
-                    f"{span:5.2f}s/shard last 25"
-                )
-        if done < total and completed.is_empty():
-            msg = f"{total - done} of {total} shards never returned a result"
-            raise RuntimeError(msg)
-    marks["last_result_s"] = time.perf_counter() - t0
-    return stats, submit_s
-
-
-def _target_verdict(args, per_shard_gib, slots, client_gib) -> str:
-    """`  fits` or `  OVER by N GiB` against `--target-memory-gib`.
-
-    A dry run plans for a machine that has not been launched, so the figure it
-    checks against has to be named rather than read from the host. Without the
-    flag there is nothing to compare and this adds nothing to the line.
-    """
-    if not args.target_memory_gib:
-        return ""
-    demand = per_shard_gib * slots + client_gib
-    over = demand - args.target_memory_gib
-    return f"   OVER by {over:.1f} GiB" if over > 0 else "   fits"
+# --------------------------------------------------------------------------
+# Early exits. Each writes the summary a driver keys on and says why.
+# --------------------------------------------------------------------------
 
 
 def no_thermal_coverage(args, tile_id, bbox, n_scenes, dropped, run_provenance) -> int:
@@ -734,12 +303,6 @@ def no_thermal_coverage(args, tile_id, bbox, n_scenes, dropped, run_provenance) 
     across all 3,083,129 inventory rows, and USGS emits that product where the
     surface temperature algorithm has no usable emissivity. Compositing there
     is not a failure. There is nothing to composite.
-
-    `fleet_plan.py` drops these tiles from the launch list, so a fleet never
-    reaches this path. An operator naming the tile by hand does, and gets the
-    same artifact a driver keys on. Writing nothing and exiting non-zero would
-    make a correct outcome read as a dead machine, which is the distinction
-    the barren-shard records exist to preserve.
     """
     summary = {
         "status": "no-thermal-coverage",
@@ -758,28 +321,49 @@ def no_thermal_coverage(args, tile_id, bbox, n_scenes, dropped, run_provenance) 
         f"no thermal    all {n_scenes:,} scenes of {tile_id} are OLI_TIRS_L2SR "
         f"and carry no thermal band"
     )
-    print("              nothing to composite; summary written, no parts")
+    print("              nothing to composite; summary written, no rasters")
     print(f"artifacts     {args.out_dir.resolve()}")
     return 0
 
 
-def check_mask_inputs(args) -> dict | None:
+def no_scene_survives_destriping(args, tile_id, prep, run_provenance) -> int:
+    """Every scene of the tile failed the offset rule. Stop rather than ship.
+
+    An empty composite is not a tile with no data. It is a tile whose whole
+    scene list was found untrustworthy, and writing it as nodata would present
+    that as an observation gap.
+    """
+    summary = {
+        "status": "no-scene-survives-destriping",
+        "tile": tile_id,
+        "n_scenes": len(prep.offset),
+        "max_offset_c": args.max_offset_c,
+        "offsets": prep.meta.get("offsets"),
+        "inventory": run_provenance,
+    }
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    (args.out_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, default=str)
+    )
+    print(
+        f"destripe      all {len(prep.offset):,} scenes of {tile_id} fail the "
+        f"{args.max_offset_c:g} C cap or the sparse floor"
+    )
+    print(f"              {prep.meta.get('offsets')}")
+    print("              nothing to composite; summary written, no rasters")
+    return 1
+
+
+def check_mask_inputs(args, say=print) -> dict | None:
     """Refuse a run whose output mask cannot be built, before it costs anything.
 
-    Same reason the inventory manifest is checked before any read. A tile that
-    composites for three hours and then cannot be masked has already bought the
-    machine, and a tile written without the mask looks finished while carrying
-    sea and ASTER emissivity gaps as temperatures.
-
-    The two artifacts have to agree about the land. The NumObs mosaic was built
-    over the cells one land geometry touches; rasterising a different geometry
-    against it masks different ground on the two rules.
+    A tile that composites for an hour and then cannot be masked has already
+    bought the machine, and a tile written without the mask looks finished
+    while carrying sea and ASTER emissivity gaps as temperatures.
 
     The rehearsal is masked like any other run. Its pixels are synthetic but
-    its bbox is not: `--tile` fixes it on the production grid, so the mask
-    covers real ground and a rehearsal proves the assembly path the fleet uses
-    rather than a shorter one. A laptop with no artifacts stops here with the
-    command that writes them, which is the same answer a real run gets.
+    its bbox is not, so the mask covers real ground and a rehearsal proves the
+    path the fleet uses rather than a shorter one.
 
     Returns:
         The ASTER GED provenance for the run summary, or None under
@@ -791,7 +375,7 @@ def check_mask_inputs(args) -> dict | None:
             different land geometry.
     """
     if args.no_output_mask:
-        print("mask          skipped: --no-output-mask. Sea and ASTER gaps stay")
+        say("mask          skipped: --no-output-mask. Sea and ASTER gaps stay")
         return None
     if not args.land_geometry_uri.exists():
         msg = (
@@ -806,7 +390,7 @@ def check_mask_inputs(args) -> dict | None:
         land_geometry_sha256=masks.geometry_checksum(args.land_geometry_uri),
         path=args.numobs_uri,
     )
-    print(
+    say(
         f"mask          {manifest['granule_count']:,} ASTER GED granules, "
         f"{manifest['collection']['short_name']} v"
         f"{manifest['collection']['version']}"
@@ -815,23 +399,7 @@ def check_mask_inputs(args) -> dict | None:
 
 
 def no_unmasked_pixels(args, tile_id, bbox, counts, ged_provenance) -> int:
-    """Record a tile the water rule empties, and succeed.
-
-    A tile whose bbox holds no land inside the buffered geometry has nothing to
-    publish. `land_tiles.py` selects tiles from that same geometry, so a tile
-    on the fleet's list never reaches here. An operator naming a bbox by hand
-    does, and gets the artifact a driver already keys on, the way
-    `no_thermal_coverage` does.
-
-    The emissivity rule cannot reach this path. It removes a pixel only where
-    the gap region and 70 C coincide, so a tile of nothing but gap cells still
-    publishes every pixel that reads an ordinary temperature.
-
-    `n_scenes` is null rather than 0. This runs before the search, so the count
-    is unknown here, and writing zero would state a fact about the archive that
-    nothing measured. `no_thermal_coverage` runs after the search and does
-    write the real number.
-    """
+    """Record a tile the water rule empties, and succeed."""
     summary = {
         "status": "no-unmasked-pixels",
         "tile": tile_id,
@@ -849,14 +417,19 @@ def no_unmasked_pixels(args, tile_id, bbox, counts, ged_provenance) -> int:
         json.dumps(summary, indent=2, default=str)
     )
     print(f"no coverage   {tile_id} holds no land inside the buffered geometry")
-    print("              nothing to publish; summary written, no parts")
+    print("              nothing to publish; summary written, no rasters")
     print(f"artifacts     {args.out_dir.resolve()}")
     return 0
 
 
+# --------------------------------------------------------------------------
+# Arguments
+# --------------------------------------------------------------------------
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Sharded p95 LST composite: one shard, one task, no shuffle.",
+        description="p95 LST composite: one lazy dask-xarray graph per tile.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
@@ -868,9 +441,17 @@ def parse_args(argv=None):
     p.add_argument(
         "--bbox",
         default=None,
-        help="west,south,east,north EPSG:4326 (use --bbox=...). Only for "
-        "--rehearse and --dry-run; a real run needs --tile, because the "
-        "inventory is addressed by tile",
+        help="west,south,east,north EPSG:4326 (use --bbox=...). Alone, for "
+        "--rehearse and --dry-run. With --tile, a window of that tile: the "
+        "inventory rows and the prep artifact come from the tile, the raster "
+        "covers the bbox, and only the scenes that reach it are staged",
+    )
+    p.add_argument(
+        "--all-scenes",
+        action="store_true",
+        help="with --tile and --bbox, keep every scene of the tile on the time "
+        "axis rather than the ones that reach the window. Measures the memory "
+        "a full-tile block carries",
     )
     p.add_argument(
         "--inventory-uri",
@@ -896,9 +477,7 @@ def parse_args(argv=None):
         "--land-geometry-uri",
         type=Path,
         default=masks.DEFAULT_LAND_GEOMETRY_URI,
-        help="the buffered land geometry the pixel mask rasterises. The same "
-        "geometry chose the tile list, and it travels as an artifact so that "
-        "a run needs no network",
+        help="the buffered land geometry the pixel mask rasterises",
     )
     p.add_argument(
         "--no-output-mask",
@@ -909,73 +488,84 @@ def parse_args(argv=None):
     )
     p.add_argument("--pixels-per-degree", type=int, default=3600)
     p.add_argument("--crs", default="EPSG:4326")
-    p.add_argument("--shard", type=int, default=512, help="shard edge in pixels")
+    p.add_argument(
+        "--chunk",
+        type=int,
+        default=composite.DEFAULT_CHUNK_PX,
+        help="block edge in pixels: the dask chunk in both spatial dimensions. "
+        "The time axis is always one chunk",
+    )
     p.add_argument("--start", default=DEFAULT_START)
     p.add_argument("--end", default=DEFAULT_END)
     p.add_argument("--cloud-cover-lt", type=int, default=DEFAULT_CLOUD_COVER_LT)
     p.add_argument("--platforms", default=DEFAULT_PLATFORMS)
     p.add_argument("--source", choices=sorted(READ_SOURCES), default="earth-search")
+    p.add_argument(
+        "--engine",
+        choices=("graph", "fused"),
+        default="graph",
+        help="graph: one lazy dask-xarray graph for the tile, whose build "
+        "cost scales with the time axis. fused: one submitted task per "
+        "block, each reading only the scenes whose footprint reaches it",
+    )
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--threads-per-worker", type=int, default=4)
     p.add_argument("--memory-limit-gib", type=float, default=13.0)
-    p.add_argument(
-        "--read-threads",
-        type=int,
-        default=4,
-        help="threads used to read scenes inside one shard",
-    )
-    p.add_argument("--max-shards", type=int, default=None, help="cap, for smoke runs")
-    p.add_argument(
-        "--shard-slice",
-        default=None,
-        metavar="A:B",
-        help="process only shards[A:B] of the plan. The plan is deterministic "
-        "and anchored to whole degrees, so slice i on one machine and slice j "
-        "on another cover the tile exactly once between them",
-    )
     p.add_argument(
         "--rehearse",
         type=int,
         default=0,
         metavar="N",
-        help="run the whole pipeline with N synthetic scenes and no S3 reads; "
-        "proves submit, gather, assembly, part writing and merge for free",
+        help="run the whole pipeline over N synthetic scenes written to local "
+        "disk and no S3 reads. Every line and artifact is tagged REHEARSAL",
     )
-    p.add_argument(
-        "--merge",
-        nargs="+",
-        default=None,
-        metavar="DIR",
-        help="assemble a finished tile from the part files written by "
-        "--shard-slice runs, then exit",
-    )
-    p.add_argument("--out-dir", type=Path, default=Path("./shard-run"))
+    p.add_argument("--out-dir", type=Path, default=Path("./composite-run"))
     p.add_argument(
         "--stage-dir",
         type=Path,
         default=Path(os.environ.get("LST_STAGE_DIR", DEFAULT_STAGE_DIR)),
-        help="local directory the scene objects are fetched into. Wants "
-        "throughput as well as capacity, and now needs both at once: the "
-        "fetch writes at up to 922 MB/s while the shards read the files it "
-        "has already landed at about 358 MB/s. Pass --no-overlap to put the "
-        "two back in sequence",
-    )
-    p.add_argument(
-        "--no-stage",
-        action="store_true",
-        help="read every shard straight from S3, as the pipeline did before "
-        "staging existed. About 155 shards touch each scene and each open "
-        "costs 4.77 requests, so this is the expensive path and it is kept "
-        "for measuring against",
+        help="local directory the scene objects are fetched into, before the "
+        "cluster starts. Point it at the NVMe mount on a fleet instance",
     )
     p.add_argument(
         "--stage-threads",
         type=int,
         default=None,
-        help="threads in the fetch pool. Defaults to min(64, 4 x cores). The "
-        "cap was chosen when staging ran on its own; beside compute each "
-        "thread spends far more of its life blocked, so more of them keep the "
-        "same bytes in flight for the same cores",
+        help="objects in flight during staging. Defaults to min(64, 4 x cores)",
+    )
+    p.add_argument(
+        "--stage-connections",
+        type=int,
+        default=None,
+        help="botocore max_pool_connections. Defaults to the fetch threads "
+        "times the part concurrency, which is every socket the fetch can "
+        "want at once. Set it below that to find out whether the pool binds",
+    )
+    p.add_argument(
+        "--stage-part-mb",
+        type=float,
+        default=None,
+        help="MiB per ranged GET, and the size below which an object is "
+        "fetched whole. Defaults to 8. Has no effect at the default part "
+        "concurrency",
+    )
+    p.add_argument(
+        "--stage-part-concurrency",
+        type=int,
+        default=None,
+        help="ranged GETs in flight for one object, so that an 84 MB ST_B10 "
+        "can use more than one connection. Defaults to 1, which is one GET "
+        "per object and the request count staging.json has always reported. "
+        "Above 1 it costs one billable GET per part",
+    )
+    p.add_argument(
+        "--stage-fsync",
+        choices=staging.FSYNC_MODES,
+        default=None,
+        help="whether a staged file is flushed on the fetch thread. Defaults "
+        "to file, which fsyncs and then releases the page cache. none skips "
+        "both and leaves 278 GB for the kernel to reclaim on its own "
+        "schedule; dir also flushes the directory entry",
     )
     p.add_argument(
         "--keep-staged",
@@ -993,99 +583,107 @@ def parse_args(argv=None):
     p.add_argument(
         "--no-catalog",
         action="store_true",
-        help="skip the COGs and the STAC catalog that --merge writes, leaving "
-        "only the .npy arrays",
+        help="write the two COGs into --out-dir and skip the STAC catalog",
     )
     p.add_argument(
         "--catalog-dir",
         type=Path,
         default=None,
         help="where the catalog lives; defaults to <out-dir>/catalog. Point "
-        "every tile's merge at one path to collect them in one catalog",
+        "every tile at one path to collect them in one catalog",
     )
     p.add_argument(
         "--collection-id",
         default=None,
         help="the published collection id, which is also its directory name. "
-        "Defaults to the window the parts were composited over, so "
-        "2021-2025 gives lst-p95-2021-2025 and two windows cannot collect "
-        "into one collection by omission",
+        "Defaults to the window the tile was composited over",
     )
-    p.add_argument(
-        "--host-name",
-        default=DEFAULT_HOST_NAME,
-        help="the organization maintaining the published catalog",
-    )
-    p.add_argument(
-        "--host-url",
-        default=DEFAULT_HOST_URL,
-        help="a page where the catalog maintainer can be reached",
-    )
-    p.add_argument(
-        "--license",
-        default=DEFAULT_LICENSE,
-        help="SPDX identifier recorded in collection.json",
-    )
+    p.add_argument("--host-name", default=DEFAULT_HOST_NAME)
+    p.add_argument("--host-url", default=DEFAULT_HOST_URL)
+    p.add_argument("--license", default=DEFAULT_LICENSE)
     p.add_argument(
         "--force",
         action="store_true",
-        help="run even if slots x read-threads oversubscribes the cores, or "
-        "if the worker memory budget exceeds the machine. The memory model "
-        "over-predicts by 6 to 14 percent, so an operator who knows that can "
-        "spend the margin",
+        help="run even if the block memory model says the machine is too small",
     )
     p.add_argument(
         "--sample-interval",
         type=float,
         default=0.5,
-        help="seconds between memory samples. The sampler runs in its own "
-        "process and writes memory.csv beside the summary, so a run records "
-        "the worker RSS that shard_bytes only predicts. A shard runs 40 to "
-        "87 s, so the default takes about 120 samples of each one, and "
-        "0.05 s produced the same peak from a 6.6x larger file",
+        help="seconds between memory samples written to memory.csv",
     )
     p.add_argument(
         "--dry-run",
         action="store_true",
-        help="plan shards and print the budget; no cluster, no reads",
+        help="plan the blocks and print the budget; no cluster, no reads",
     )
     p.add_argument(
         "--target-memory-gib",
         type=float,
         default=None,
-        help="RAM of the machine this run is planned for, in GiB. The dry run "
-        "checks the worker budget against it and exits 2 if the run would be "
-        "refused, so a configuration can be priced before an instance is "
-        "launched. Without it the dry run reads no machine at all, because the "
-        "host planning a fleet run is not the host doing it",
+        help="RAM of the machine this run is planned for, in GiB, for the dry "
+        "run's verdict",
     )
     p.add_argument(
-        "--search-in-dry-run",
+        "--tile-prep",
+        type=Path,
+        default=None,
+        help="directory holding tile-prep.npz and tile-prep.json, written by "
+        "tile_prep.py. Without it the run composites the pooled percentile "
+        "and the WRS seam stays in the output",
+    )
+    p.add_argument(
+        "--no-destripe",
         action="store_true",
-        help="also hit STAC, to report real scenes per shard",
+        help="keep every scene at its own baseline. Reads the prep file for "
+        "the swath geometry and ignores the offsets",
+    )
+    p.add_argument(
+        "--no-feather",
+        action="store_true",
+        help="one pooled percentile instead of one per WRS path",
+    )
+    p.add_argument(
+        "--max-offset-c",
+        type=float,
+        default=destripe.DESTRIPE_MAX_OFFSET_C,
+        help="discard a scene whose absolute offset exceeds this",
+    )
+    p.add_argument(
+        "--emit-pooled",
+        action="store_true",
+        help="also write lst_p95_pooled.tif beside the product, the pooled "
+        "percentile from the same graph after the offsets are applied",
+    )
+    p.add_argument(
+        "--tracing-capacity",
+        type=int,
+        default=observe.DEFAULT_TRACING_CAPACITY,
+        help="frisky spans kept per process",
     )
     args = p.parse_args(argv)
-    # Refuse an unreadable source here rather than after the shard plan is
-    # printed. `configure_read_env` runs late enough that a run could get a
-    # full budget report before learning its source cannot read a scene.
+    if args.tile_prep is None and (args.no_destripe or args.no_feather):
+        raise SystemExit(
+            "--no-destripe and --no-feather turn off corrections that need "
+            "--tile-prep to be on at all. Without --tile-prep the run is "
+            "already pooled and un-de-striped."
+        )
     if args.source != SUPPORTED_READ_SOURCE:
         configure_read_env(args.source)
     return args
 
 
-def mask_rule(args, counts, ged_provenance=None) -> dict | None:
-    """The rule a part was masked under, for a merge to compare across parts.
+# --------------------------------------------------------------------------
+# The rules a run was built under, for the catalog to record
+# --------------------------------------------------------------------------
 
-    None under `--no-output-mask`, which is itself a rule a merge has to see:
-    one unmasked part beside three masked ones is a raster no single rule
-    describes.
+
+def mask_rule(args, counts, ged_provenance=None) -> dict | None:
+    """The rule the tile was masked under. None under `--no-output-mask`.
 
     The inputs are named by identity, not by path. An absolute path on the
-    machine that masked the part tells a reader of the published catalog
+    machine that masked the tile tells a reader of the published catalog
     nothing, and it carries the operator's home directory into a public file.
-    The DOI and the two checksums say which artifact was used, which is the
-    question a consumer and a merge both ask. `summary.json` keeps the paths,
-    because an operator rerunning one slice does want them.
     """
     if counts is None:
         return None
@@ -1099,287 +697,274 @@ def mask_rule(args, counts, ged_provenance=None) -> dict | None:
     return rule
 
 
-def merge_parts(dirs, out_dir: Path, args) -> int:
-    """Assemble one tile from the parts written by --shard-slice runs.
+def load_tile_prep(args, tile_id: str, item_dicts, run_provenance):
+    """The prep artifact, checked against the run that is about to use it.
 
-    The merge applies no mask. Every part was masked by the machine that wrote
-    it, over that machine's own slice, so the pixels arrive already screened.
-    What the merge does check is that they were screened the same way: it reads
-    every part's meta rather than the first, and stops when two disagree.
+    Returns None when the run was not given one, which composites pooled.
 
-    The `.npy` arrays stay: the measurement scripts read them, and they are the
-    cheapest way to reopen a merge. The COGs and the catalog beside them are
-    what a client consumes.
+    Six checks, and each one guards a failure that produces a finished raster
+    rather than an error. `item_dicts` must be the list the graph will load,
+    after `staging.drop_scenes_without_thermal`, because that is the list
+    `tile_prep` hashed.
 
-    Whatever the catalog needs from `part-meta.json` is checked before the
-    merge starts, so a run that cannot produce one says so in a second rather
-    than after the arrays are assembled.
+    Raises:
+        SystemExit: on any mismatch, naming the command that rebuilds the file.
     """
-    import numpy as np
+    if args.tile_prep is None:
+        return None
+    prep = destripe.load_prep(args.tile_prep)
+    rebuild = f"Rebuild it with tile_prep.py --tile {tile_id}."
 
-    parts = sorted(f for d in dirs for f in Path(d).glob("part-*.npz"))
-    if not parts:
-        raise SystemExit(f"no part-*.npz under {dirs}")
-
-    metas = {}
-    for f in parts:
-        meta_path = Path(f).parent / "part-meta.json"
-        metas[meta_path] = json.loads(meta_path.read_text())
-    rules = {json.dumps(m.get("mask_rule"), sort_keys=True) for m in metas.values()}
-    if len(rules) > 1:
-        joined = "\n  ".join(sorted(rules))
+    blocks = prep.meta.get("blocks") or {}
+    if blocks.get("partial"):
         raise SystemExit(
-            f"the parts were masked under {len(rules)} different rules, so no "
-            f"one rule describes the merged tile:\n  {joined}\n"
-            f"Rerun the disagreeing slices with the same --numobs-uri, "
-            f"--land-geometry-uri, and --no-output-mask setting."
+            f"{args.tile_prep} was built from {blocks.get('run')} of "
+            f"{blocks.get('with_scenes')} blocks holding scenes, under "
+            f"--max-blocks {blocks.get('max_blocks')}. Each quad's swath was "
+            f"counted over part of the tile and divided by all of its scenes, "
+            f"so the swaths are too small and the offsets rest on too few "
+            f"pixels. Rerun tile_prep.py without --max-blocks."
         )
 
-    meta = next(iter(metas.values()))
-    if not args.no_catalog:
-        try:
-            check_catalog_inputs(meta)
-        except ValueError as exc:
-            raise SystemExit(f"cannot write a catalog for this tile: {exc}") from exc
-    h, w = meta["raster"]
-    lst = np.zeros((h, w), dtype="uint16")
-    qa = np.zeros((12, h, w), dtype="uint8")
-
-    seen = np.zeros((h, w), dtype=bool)
-    n = 0
-    for f in parts:
-        with np.load(f) as z:
-            for key in z.files:
-                if not key.startswith("lst_"):
-                    continue
-                tag = key[4:]
-                y0, x0 = (int(v) for v in tag.split("_"))
-                a = z[key]
-                q = z["qa_" + tag]
-                lst[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = a
-                qa[:, y0 : y0 + q.shape[1], x0 : x0 + q.shape[2]] = q
-                seen[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = True
-                n += 1
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    covered = float(seen.mean())
-    valid = lst != LST_NODATA_DN
-    print(f"merged        {n} shards from {len(parts)} part files")
-    print(f"raster        {w} x {h}   coverage {covered * 100:.2f}%")
-    if covered < 1.0:
-        missing = int((~seen).sum())
-        print(f"WARNING       {missing:,} px never written; a slice is missing")
-    if valid.any():
-        cel = lst[valid].astype("float64") * LST_SCALE + LST_OFFSET
-        print(
-            f"LST p95       min {cel.min():.1f} C  mean {cel.mean():.1f} C  "
-            f"max {cel.max():.1f} C  ({100 * valid.mean():.1f}% valid)"
+    if prep.meta.get("schema_version") != tile_prep_schema_version():
+        raise SystemExit(
+            f"{args.tile_prep} carries schema version "
+            f"{prep.meta.get('schema_version')} and this version reads "
+            f"{tile_prep_schema_version()}. {rebuild}"
         )
-    np.save(out_dir / "lst_p95_dn.npy", lst)
-    np.save(out_dir / "qa_count.npy", qa)
+    if prep.tile != tile_id:
+        raise SystemExit(
+            f"{args.tile_prep} was written for tile {prep.tile}, and this run "
+            f"is building {tile_id}. {rebuild}"
+        )
+    if prep.pixels_per_degree != args.pixels_per_degree:
+        raise SystemExit(
+            f"{args.tile_prep} was built on a 1/{prep.pixels_per_degree} degree "
+            f"grid and this run is on 1/{args.pixels_per_degree}. The weights "
+            f"would land on the wrong ground. {rebuild}"
+        )
 
-    record: dict = {
-        "shards": n,
-        "parts": len(parts),
-        "coverage": covered,
-        "raster": [h, w],
-        "meta": meta,
-        # The rule every part agreed on, hoisted so a reader of the
-        # merged tile does not have to open a part to find it.
-        "mask_rule": meta.get("mask_rule"),
+    window = {
+        "start": args.start,
+        "end": args.end,
+        "platforms": args.platforms,
+        "cloud_cover_lt": args.cloud_cover_lt,
     }
-    # The record lands before the catalog, so a merge that took an hour is on
-    # disk whatever the catalog writer then does.
-    merge_json = out_dir / "merge.json"
-    merge_json.write_text(json.dumps(record, indent=2, default=str))
-    if not args.no_catalog:
-        record["catalog"] = str(_write_catalog(out_dir, lst, qa, meta, args))
-        merge_json.write_text(json.dumps(record, indent=2, default=str))
-    print(f"artifacts     {out_dir.resolve()}")
-    return 0 if covered == 1.0 else 2
+    mine = destripe.scene_digest((destripe.scene_id_of(d) for d in item_dicts), window)
+    if prep.digest != mine:
+        raise SystemExit(
+            f"{args.tile_prep} was fitted over a different scene set or a "
+            f"different window: it carries digest {prep.digest or 'none'} and "
+            f"this run computes {mine}. Its window was {prep.window} against "
+            f"{window} here, over {len(prep.offset)} scenes against "
+            f"{len(item_dicts)}. {rebuild}"
+        )
+    if prep.inventory and run_provenance and prep.inventory != run_provenance:
+        raise SystemExit(
+            f"{args.tile_prep} was built from a different inventory artifact:\n"
+            f"  prep: {prep.inventory}\n"
+            f"  run:  {run_provenance}\n"
+            f"The digests match, so the same scenes are named, and a rebuilt "
+            f"artifact can still move a footprint or a href. {rebuild}"
+        )
+    return prep
 
 
-def _write_catalog(out_dir: Path, lst, qa, meta: dict, args) -> Path:
-    """Write the COGs and the STAC catalog for one merged tile.
+def tile_prep_schema_version() -> int:
+    """Read lazily, because `tile_prep` imports this module."""
+    import tile_prep
 
-    The catalog defaults to a directory beside the arrays, which is what a
-    single tile wants. Several tiles pointed at one `--catalog-dir` land in
-    one collection, an item each.
+    return tile_prep.PREP_SCHEMA_VERSION
+
+
+def correction_rule(args, prep) -> dict | None:
+    """The seam correction the tile was built under, for the catalog.
+
+    None means the pooled percentile with every scene at its own baseline,
+    which is itself a rule the catalog has to state.
     """
-    collection_id = args.collection_id or collection_id_for_window(meta)
-    root = write_catalog(
-        args.catalog_dir or out_dir / "catalog",
-        lst,
-        qa,
-        meta,
-        collection_id=collection_id,
-        host_name=args.host_name,
-        host_url=args.host_url,
-        license_id=args.license,
-    )
-    provenance = catalog_provenance(meta, collection_id=collection_id)
-    print(f"catalog       {root.resolve()}")
-    print(
-        f"encoding      lst_p95 uint16 scale {provenance['lst_scale']} "
-        f"offset {provenance['lst_offset']} nodata {provenance['lst_nodata']}; "
-        f"qa_count uint8 12 bands, no nodata"
-    )
-    return root
+    if prep is None:
+        return None
+    return {
+        "prep_schema_version": prep.meta.get("schema_version"),
+        "prep_scene_digest": prep.digest,
+        "prep_window": prep.window,
+        "prep_tile": prep.tile,
+        "prep_bbox": list(prep.bbox),
+        "prep_factor": prep.meta.get("prep_factor"),
+        "swath_factor": prep.swath_factor,
+        "weight_factor": prep.meta.get("weight_factor"),
+        "swath_quad_share": prep.meta.get("swath_quad_share"),
+        "anomaly_bin_c": prep.meta.get("anomaly_bin_c"),
+        "min_offset_samples": prep.meta.get("min_offset_samples"),
+        "max_offset_c": None if args.no_destripe else args.max_offset_c,
+        "destripe": not args.no_destripe,
+        "feather": not args.no_feather,
+        "paths": list(prep.paths),
+    }
 
 
-# The CLI entry point: plan, filter, submit, gather, write, and the merge and
-# rehearse modes that short-circuit it. Each branch ends the run.
-def main(argv=None) -> int:  # noqa: C901
+def run_meta(args, bbox, height, width, mask_rule_value, correction_rule_value) -> dict:
+    """What the catalog needs to describe this tile. The former part-meta."""
+    return {
+        "raster": [height, width],
+        "bbox": list(bbox),
+        "crs": args.crs,
+        "pixels_per_degree": args.pixels_per_degree,
+        "chunk_px": args.chunk,
+        "mask_rule": mask_rule_value,
+        "correction_rule": correction_rule_value,
+        "start": args.start,
+        "end": args.end,
+    }
+
+
+# --------------------------------------------------------------------------
+# The run
+# --------------------------------------------------------------------------
+
+
+def _dry_run(args, bbox, height, width, say) -> int:
+    """Plan the blocks and print the budget; no cluster, no reads."""
+    chunk = args.chunk
+    rows = -(-height // chunk)
+    cols = -(-width // chunk)
+    say(f"blocks        {rows * cols}  of {chunk}x{chunk} px ({rows} x {cols})")
+    slots = args.workers * args.threads_per_worker
+    say(f"\nnaive budget across {slots} slots, DERIVED from the block model:")
+    for n, present in ((711, 200), (1765, 400), (4776, 820)):
+        per = composite.block_bytes(chunk, n, present)
+        total = per * slots
+        verdict = ""
+        if args.target_memory_gib:
+            over = total - args.target_memory_gib
+            verdict = f"   OVER by {over:.1f} GiB" if over > 0 else "   fits"
+        say(
+            f"  at {n:>5} scenes, {present:>3} present per block: "
+            f"{per:5.2f} GiB per block, {total:6.1f} GiB across {slots} slots"
+            f"{verdict}"
+        )
+    (args.out_dir / "blocks.json").write_text(
+        json.dumps(
+            {"chunk_px": chunk, "rows": rows, "cols": cols, "raster": [height, width]},
+            indent=2,
+        )
+    )
+    say(f"\nplan written  {args.out_dir / 'blocks.json'}")
+    return 0
+
+
+def run_fused(
+    args,
+    *,
+    client,
+    cluster,
+    bbox,
+    item_dicts,
+    item_bboxes,
+    prep,
+    keep_mask,
+    gap_mask,
+    marks,
+    say,
+):
+    """The fused engine: one block plan, then one submitted task per block.
+
+    The graph engine's cost is the tile's time axis: `odc.stac` puts two open
+    tasks per item into the graph and hands every band-load task all of them,
+    which MEASURED 15.5 s at 1,000 items and 60.5 s at 4,776 on the 64-worker
+    run. Here the driver computes each block's own scene list once, as one
+    boolean matmul, and every task carries only what its block reads.
+
+    `submit_blocks` keeps the `graph_build` and `compute` phase marks, so the
+    summary prints against the same two names; the plan itself is its own
+    `plan` phase, because what it replaces is worth reading separately.
+
+    Returns:
+        `(scalars, staged_paths, n_rejected, n_tasks)`, the four the graph
+        engine leaves behind for the summary.
+    """
+    from odc.geo.geobox import GeoBox
+
+    from masks import gap_hot_dn, transform_for
+
+    fused_block = getattr(composite, "fused_block", None)
+    if fused_block is None:
+        raise SystemExit(
+            "--engine fused needs composite.fused_block, the per-block kernel. "
+            "This build carries the plan and the submission path but not the "
+            "kernel; run with --engine graph."
+        )
+
+    height, width = composite.raster_shape(bbox, args.pixels_per_degree)
+    transform = transform_for(bbox, args.pixels_per_degree)
+    with observe.phase("plan", count=len(item_dicts), marks=marks):
+        geobox = GeoBox((height, width), transform, args.crs)
+        plan = composite.build_block_plan(item_dicts, item_bboxes, geobox, args.chunk)
+        vectors = composite.scene_vectors(
+            item_dicts,
+            prep,
+            max_offset_c=args.max_offset_c,
+            debias=not args.no_destripe,
+        )
+        targets, staged_paths = composite.staging_targets(
+            args.out_dir,
+            shape=(height, width),
+            transform=transform,
+            crs=args.crs,
+            emit_pooled=args.emit_pooled,
+        )
+    depth = [block.depth for block in plan]
+    say(
+        f"plan          {len(plan)} blocks, {sum(depth) / max(len(plan), 1):.0f} "
+        f"scenes per block on average against {len(item_dicts)} on the tile's "
+        f"time axis, planned in {marks['plan_s']:.2f}s"
+    )
+    outputs = composite.BlockOutputs(
+        targets=targets,
+        keep=keep_mask,
+        gap=gap_mask,
+        hot_dn=None if keep_mask is None else gap_hot_dn(),
+    )
+    scalars = composite.submit_blocks(
+        client,
+        cluster,
+        plan,
+        fused_block,
+        items=item_dicts,
+        vectors=vectors,
+        # `--no-feather` is the absence of the swath geometry at the kernel:
+        # `fused_block` cross-fades when it is handed a prep artifact and
+        # composites pooled when it is not. The offsets and the rejection are
+        # already in `vectors`, which was built from the real prep, so
+        # withholding it here turns off exactly what the flag names. The tasks
+        # get the artifact's path, not the object: see `composite.resolve_prep`.
+        prep=None if (args.no_feather or prep is None) else str(args.tile_prep),
+        out=outputs,
+        emit_pooled=args.emit_pooled,
+        marks=marks,
+    )
+    return scalars, staged_paths, vectors.n_rejected, len(plan)
+
+
+def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
     args = parse_args(argv)
-    if args.merge:
-        return merge_parts(args.merge, args.out_dir, args)
     bbox, tile_id = resolve_area(args)
     res = 1.0 / args.pixels_per_degree
+    height, width = composite.raster_shape(bbox, args.pixels_per_degree)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    shards, height, width = plan_shards(bbox, args.pixels_per_degree, args.shard)
-    # Shard slots and read threads MULTIPLY. 8 workers x 4 threads x 4 read
-    # threads is 128 OS threads on 16 cores, which thrashes: measured 15 of 324
-    # shards finished in 400 s, with the first wave of 64 all crawling at once.
-    #
-    # The reduce inside a shard is CPU-bound and wants a whole core. The reads
-    # are I/O-bound and want oversubscription. So size slots to cores and let
-    # read threads be the only multiplier.
-    concurrency = args.workers * args.threads_per_worker
+    def say(line: str = "") -> None:
+        prefix = REHEARSAL_TAG if args.rehearse else ""
+        for part in line.split("\n"):
+            print(prefix + part)
 
-    print(f"bbox          {bbox}")
-    print(f"grid          {args.crs} @ 1/{args.pixels_per_degree} deg")
-    print(f"raster        {width} x {height} px  ({width * height / 1e6:.0f} Mpx)")
-    print(
-        f"shards        {len(shards)}  of {args.shard}x{args.shard} px "
-        f"({max(s.row for s in shards) + 1} x {max(s.col for s in shards) + 1})"
-    )
+    say(f"bbox          {bbox}")
+    say(f"grid          {args.crs} @ 1/{args.pixels_per_degree} deg")
+    say(f"raster        {width} x {height} px  ({width * height / 1e6:.0f} Mpx)")
 
     if args.dry_run:
-        lo, hi_slice = 0, len(shards)
-        if args.shard_slice:
-            a, _, b = args.shard_slice.partition(":")
-            lo = int(a) if a else 0
-            hi_slice = int(b) if b else len(shards)
-            mine = shards[lo:hi_slice]
-            px = sum(sh.ny * sh.nx for sh in mine)
-            print(
-                f"slice         shards[{lo}:{hi_slice}] -> {len(mine)} shards, "
-                f"{px:,} px ({100 * px / (width * height):.1f}% of the tile)"
-            )
-            ys = [sh.y0 for sh in mine]
-            xs = [sh.x0 for sh in mine]
-            print(f"              rows {min(ys)}..{max(ys)}  cols {min(xs)}..{max(xs)}")
-        edge = [s for s in shards if s.ny != args.shard or s.nx != args.shard]
-        print(f"edge shards   {len(edge)} smaller than {args.shard} px")
-        cover = sum(s.ny * s.nx for s in shards)
-        assert cover == width * height, (
-            f"shards cover {cover}, raster is {width * height}"
-        )
-        print(f"coverage      {cover:,} px == raster, no gaps or overlap")
-
-        client_gib = client_bytes(width, height)
-        print(
-            f"\nnaive budget, assuming every shard sees every scene "
-            f"(+{client_gib:.1f} GiB of client output):"
-        )
-        for n in (711, 1765, 3910):
-            per = shard_bytes(args.shard, n)
-            print(
-                f"  at {n:>5} scenes: {per:5.2f} GiB per shard, "
-                f"{per * concurrency + client_gib:6.1f} GiB across "
-                f"{concurrency} slots{_target_verdict(args, per, concurrency, client_gib)}"
-            )
-
-        refused = False
-        if args.search_in_dry_run:
-            if tile_id is None:
-                raise SystemExit("--search-in-dry-run needs --tile")
-            items, item_bboxes, _ = load_tile_items(args, tile_id)
-            counts = [len(items_for_shard(sh, item_bboxes)) for sh in shards]
-            # The slice is what one machine runs, and its worst shard is what
-            # that machine's memory has to hold. Reporting the tile's worst
-            # instead understates a light slice and overstates a heavy one: at
-            # 360 px, S30W065 runs 404 scenes deep at shards[0:64] and 820 at
-            # shards[987:1051].
-            mine_counts = counts[lo:hi_slice] if args.shard_slice else counts
-            counts.sort()
-            print(f"\nactual scenes per shard (from {len(items)} total):")
-            print(
-                f"  tile:  min {counts[0]}  p50 {counts[len(counts) // 2]}  "
-                f"p95 {counts[int(len(counts) * 0.95)]}  max {counts[-1]}"
-            )
-            worst = max(mine_counts) if mine_counts else 0
-            if args.shard_slice:
-                ordered = sorted(mine_counts)
-                print(
-                    f"  slice: min {ordered[0]}  p50 {ordered[len(ordered) // 2]}  "
-                    f"max {worst}   <- what this machine holds"
-                )
-            per = shard_bytes(args.shard, worst)
-            print(
-                f"  worst shard: {per:.2f} GiB, "
-                f"{per * concurrency + client_gib:.1f} GiB across "
-                f"{concurrency} slots"
-                f"{_target_verdict(args, per, concurrency, client_gib)}"
-            )
-            print(
-                f"  total shard-scene reads: {sum(counts):,} "
-                f"vs {len(items) * len(shards):,} unfiltered "
-                f"({len(items) * len(shards) / max(sum(counts), 1):.0f}x saved)"
-            )
-            if args.target_memory_gib:
-                try:
-                    worker_memory_guard(
-                        args.shard,
-                        mine_counts,
-                        concurrency,
-                        width,
-                        height,
-                        total_bytes=int(args.target_memory_gib * GIB),
-                    )
-                except SystemExit as exc:
-                    print(f"\nREFUSED on a {args.target_memory_gib:g} GiB machine:")
-                    print(f"  {exc}")
-                    refused = True
-
-        (args.out_dir / "shards.json").write_text(
-            json.dumps(
-                [
-                    {
-                        "row": s.row,
-                        "col": s.col,
-                        "y0": s.y0,
-                        "x0": s.x0,
-                        "ny": s.ny,
-                        "nx": s.nx,
-                        "bbox": s.bbox,
-                    }
-                    for s in shards
-                ],
-                indent=2,
-            )
-        )
-        print(f"\nplan written  {args.out_dir / 'shards.json'}")
-        # 2, not 1, so a driver can tell "this configuration does not fit" from
-        # a plan that failed to build at all.
-        return 2 if refused else 0
-
-    # ---------------- execute ----------------
-    # Checked here, not before the dry run: planning a slice must never be
-    # blocked by a runtime concurrency decision.
-    total_threads = concurrency * args.read_threads
-    cores = os.cpu_count() or 1
-    print(
-        f"concurrency   {concurrency} shard slots x {args.read_threads} read "
-        f"threads = {total_threads} threads on {cores} cores"
-    )
-    if total_threads > cores * 6 and not args.force:
-        raise SystemExit(
-            f"{total_threads} threads on {cores} cores will thrash: slots and "
-            f"read threads multiply. Try --workers {cores} "
-            f"--threads-per-worker 1 --read-threads 4, or pass --force."
-        )
+        return _dry_run(args, bbox, height, width, say)
 
     import numpy as np
     import psutil
@@ -1387,47 +972,42 @@ def main(argv=None) -> int:  # noqa: C901
     import frisky
 
     configure_read_env(args.source)
-    os.environ.setdefault("FRISKY_TRACING_CAPACITY", "2000000")
+    # Before any span. Without this the driver records nothing, whatever the
+    # workers do.
+    observe.enable(args.tracing_capacity)
+    slots = args.workers * args.threads_per_worker
+    marks: dict[str, float] = {}
+    t0 = time.perf_counter()
+    t0_wall = time.time()
 
     # Before the inventory read and before the first GET. The mask depends on
     # the tile's bbox and on two artifacts, and on nothing this run computes,
     # so a tile it empties can be recorded without staging a single object.
-    ged_provenance = check_mask_inputs(args)
+    ged_provenance = check_mask_inputs(args, say)
     keep = gap = mask_counts = None
     if ged_provenance is not None:
-        keep, gap, mask_counts = masks.output_mask(
-            bbox,
-            args.pixels_per_degree,
-            numobs_uri=args.numobs_uri,
-            land_geometry_uri=args.land_geometry_uri,
-        )
-        print(
+        with observe.phase("masks", marks=marks):
+            keep, gap, mask_counts = masks.output_mask(
+                bbox,
+                args.pixels_per_degree,
+                numobs_uri=args.numobs_uri,
+                land_geometry_uri=args.land_geometry_uri,
+            )
+        say(
             f"              {mask_counts['pixels_kept'] / mask_counts['pixels_total']:.1%} "
             f"of the tile is land: {mask_counts['pixels_water']:,} px sea, "
             f"{mask_counts['pixels_emissivity_gap_on_land']:,} px inside the "
             f"ASTER gap region over land"
-        )
-        print(
-            f"              the gap region removes only what reads "
-            f"{masks.GAP_HOT_THRESHOLD_C:.0f} C or hotter, after the gather"
         )
         if not mask_counts["pixels_kept"]:
             return no_unmasked_pixels(args, tile_id, bbox, mask_counts, ged_provenance)
 
     t_search = time.perf_counter()
     if args.rehearse:
-        w, so, e, no = bbox
-        item_bboxes = [
-            (
-                w + (e - w) * (i % 7) / 7 - 0.3,
-                so + (no - so) * (i // 7 % 7) / 7 - 0.3,
-                w + (e - w) * (i % 7) / 7 + 0.6,
-                so + (no - so) * (i // 7 % 7) / 7 + 0.6,
-            )
-            for i in range(args.rehearse)
-        ]
-        items = [{"id": f"fake-{i}"} for i in range(args.rehearse)]
-        run_provenance = {"source": "rehearsal, synthetic items"}
+        items, item_bboxes = composite.rehearsal_items(
+            bbox, args.rehearse, args.out_dir / "rehearsal-scenes"
+        )
+        run_provenance = {"source": "rehearsal, synthetic scenes", "synthetic": True}
     else:
         if tile_id is None:
             raise SystemExit(
@@ -1436,26 +1016,22 @@ def main(argv=None) -> int:  # noqa: C901
             )
         items, item_bboxes, run_provenance = load_tile_items(args, tile_id)
     t_search = time.perf_counter() - t_search
-    print(f"scenes        {len(items)} from the inventory in {t_search:.2f}s")
+    say(f"scenes        {len(items)} from the inventory in {t_search:.2f}s")
     if not items:
-        print("no scenes matched")
+        say("no scenes matched")
         return 1
-    # Both paths hand over plain dicts now. The inventory builds them and the
-    # rehearsal fakes them, so nothing here converts a pystac object.
     item_dicts = items
 
     # L2SR products carry no thermal band, load as fill, and reach neither the
     # percentile nor the monthly counts. Dropping them is output-neutral and
-    # buys back a layer on the time axis of every shard they touch, which is
-    # what caps shard size at 94% of the worker memory limit. Skipped under
-    # --rehearse, where the synthetic items carry no assets at all.
+    # buys back a layer on the time axis of every block.
     dropped_no_thermal = 0
     if not args.rehearse and not args.keep_scenes_without_thermal:
         item_dicts, item_bboxes, dropped_no_thermal = (
             staging.drop_scenes_without_thermal(item_dicts, item_bboxes)
         )
         if dropped_no_thermal:
-            print(
+            say(
                 f"              {dropped_no_thermal} of {len(items)} carry no "
                 f"thermal band; dropped"
             )
@@ -1464,279 +1040,311 @@ def main(argv=None) -> int:  # noqa: C901
                 args, tile_id, bbox, len(items), dropped_no_thermal, run_provenance
             )
 
-    # Slice the PLAN, never the filtered list. Shards with no overlapping
-    # scenes drop out of `work_idx`, so slicing after filtering shifts every index
-    # and machines silently leave gaps. The rehearsal caught exactly that:
-    # slice 972:1296 ran 288 shards, and the merge reported 1,440,000 px
-    # never written.
-    mine = shards
-    if args.shard_slice:
-        a, _, b = args.shard_slice.partition(":")
-        lo = int(a) if a else 0
-        hi = int(b) if b else len(shards)
-        mine = shards[lo:hi]
-        print(
-            f"slice         shards[{lo}:{hi}] -> {len(mine)} of {len(shards)} planned"
-        )
-
-    # One pass over the plan, read twice. `work_idx` and `barren` partition
-    # this slice, and staging needs the union of those indices, so all three
-    # come from the same list rather than from three sweeps of the same test.
-    per_shard = [items_for_shard(sh, item_bboxes) for sh in mine]
-    work_idx = [(sh, idx) for sh, idx in zip(mine, per_shard, strict=True) if idx]
-    # Shards with no overlapping scene are still this slice's responsibility.
-    # Recording them as all-nodata keeps coverage complete, so the merge can
-    # tell "no Landsat here" (ocean, edge) from "a machine died", which it
-    # cannot do if they are simply absent.
-    barren = [sh for sh, idx in zip(mine, per_shard, strict=True) if not idx]
-    if barren:
-        print(f"              {len(barren)} shards have no scenes; written as nodata")
-    if args.max_shards:
-        work_idx = work_idx[: args.max_shards]
-
-    # Before the first GET, like the disk guard, because a configuration that
-    # cannot fit should not buy its objects first. --force is the escape, and
-    # the rehearsal skips it: rehearse_shard allocates nothing.
-    memory_demand = None
-    if work_idx and not args.rehearse and not args.force:
-        memory_demand = worker_memory_guard(
-            args.shard,
-            [len(idx) for _, idx in work_idx],
-            concurrency,
-            width,
-            height,
-        )
-        print(
-            f"memory        {memory_demand:.1f} GiB demanded across "
-            f"{concurrency} slots, fits"
-        )
-
-    counts = [len(idx) for _, idx in work_idx]
-    print(
-        f"shards        {len(work_idx)} with data, "
-        f"scenes/shard min {min(counts)} "
-        f"p50 {sorted(counts)[len(counts) // 2]} "
-        f"p95 {sorted(counts)[int(len(counts) * 0.95)]} "
-        f"max {max(counts)}"
+    # The prep artifact is hashed over the tile's whole scene list, so it is
+    # checked before any window cut.
+    prep = (
+        None
+        if args.rehearse
+        else load_tile_prep(args, tile_id, item_dicts, run_provenance)
     )
-    print(
-        f"worst shard   {shard_bytes(args.shard, max(counts)):.2f} GiB, "
-        f"{shard_bytes(args.shard, max(counts)) * concurrency:.1f} GiB across "
-        f"{concurrency} slots\n"
+    if args.bbox and tile_id is not None and not args.rehearse and not args.all_scenes:
+        # A window run stages and loads only the scenes that reach it.
+        # `--all-scenes` keeps the tile's whole time axis, which is what a
+        # full-tile block carries, for measuring that memory on a window.
+        w, s, e, n = bbox
+        reach = [
+            i
+            for i, (iw, isouth, ie, inorth) in enumerate(item_bboxes)
+            if iw < e and ie > w and isouth < n and inorth > s
+        ]
+        item_dicts = [item_dicts[i] for i in reach]
+        item_bboxes = [item_bboxes[i] for i in reach]
+        say(f"window        {len(item_dicts)} scenes reach {bbox}")
+        if not item_dicts:
+            say("no scene reaches the window")
+            return 1
+    if prep is not None:
+        kept = destripe.keep_mask(
+            np.array([prep.offset.get(s, np.nan) for s in prep.offset]),
+            np.array([prep.n_valid.get(s, 0) for s in prep.offset]),
+            floor=destripe.DESTRIPE_MIN_PREP_SAMPLES,
+            max_offset_c=args.max_offset_c,
+        )
+        say(
+            f"prep          {len(prep.paths)} WRS paths, "
+            f"{1.0 - kept.mean():.1%} of scenes rejected at "
+            f"{args.max_offset_c:g} C"
+        )
+        say(
+            f"              destripe {'off' if args.no_destripe else 'on'}, "
+            f"feather {'off' if args.no_feather else 'on'}"
+        )
+        if not args.no_destripe and not kept.any():
+            return no_scene_survives_destriping(args, tile_id, prep, run_provenance)
+    elif not args.rehearse:
+        say(
+            "prep          none: pooled percentile, no scene offsets. The WRS "
+            "seam stays in the output"
+        )
+
+    depths = composite.block_depths(
+        bbox, args.pixels_per_degree, args.chunk, item_bboxes
     )
+    flat = sorted(int(d) for d in depths.ravel())
+    say(
+        f"blocks        {depths.size} of {args.chunk}x{args.chunk} px, "
+        f"scenes/block min {flat[0]} p50 {flat[len(flat) // 2]} "
+        f"p95 {flat[int(len(flat) * 0.95)]} max {flat[-1]}"
+    )
+    memory_demand_gib = None
+    if not args.rehearse and not args.force:
+        memory_demand_gib = composite.memory_guard(
+            args.chunk, len(item_dicts), depths, slots
+        )
+        say(
+            f"memory        {memory_demand_gib:.1f} GiB demanded across "
+            f"{slots} slots (DERIVED), fits"
+        )
 
-    # One origin for every phase mark below, so the summary's numbers subtract.
-    t0 = time.perf_counter()
-    t0_wall = time.time()
-    marks: dict[str, float | bool] = {}
-
-    proc = psutil.Process()
-    peak = {"rss": 0.0}
-
-    # What the workers actually hold, sampled from outside them. `shard_bytes`
-    # predicts this and nothing on a production run had ever measured it, so
-    # the model was checked against its own output.
-    #
-    # It starts before staging as well as before the cluster, so the fetch has
-    # a memory and network series too. Before this it was sampled by nothing.
-    args.out_dir.mkdir(parents=True, exist_ok=True)
     sampler = MemorySampler(args.out_dir / "memory.csv", args.sample_interval)
     sampler.start()
 
-    # Staging runs after --max-shards, so a smoke run over two shards fetches
-    # the objects those two shards need and not the whole slice.
-    #
-    # It runs to completion before the cluster starts, and that ordering is
-    # deliberate rather than historical. Overlapping the fetch with the shards
-    # it feeds was tried and MEASURED as a loss: the same 1,998 objects and
-    # 78.9 GiB that stage in 91.9 s on an idle machine take 358.7 s beside 64
-    # busy workers, because staging is bound by processor time and not by the
-    # network. See `FINDINGS.md`, "Staging beside compute is slower than
-    # staging before it".
-    marks["stage_start_s"] = time.perf_counter() - t0
-    stage_report = stage_scenes_for(args, item_dicts, work_idx)
-    marks["stage_end_s"] = time.perf_counter() - t0
+    with observe.phase("stage", count=len(item_dicts), marks=marks):
+        stage_report = stage_scenes_for(args, item_dicts, say)
 
-    # After staging, so the table carries the staged hrefs.
-    table_path = None
-    table_report = None
-    if not args.rehearse:
-        args.stage_dir.mkdir(parents=True, exist_ok=True)
-        table_report = item_table.write(args.stage_dir / ITEM_TABLE_NAME, item_dicts)
-        table_path = table_report["path"]
-        marks["table_write_s"] = table_report["seconds"]
-        print(
-            f"item table    {table_report['n_items']:,} scenes, "
-            f"{table_report['bytes'] / 1e6:.1f} MB -> {table_path}"
+    with observe.phase("cluster", marks=marks):
+        cluster = frisky.LocalCluster(
+            n_workers=args.workers,
+            threads_per_worker=args.threads_per_worker,
+            processes=True,
+            memory_limit=int(args.memory_limit_gib * GIB),
+            dashboard_address="127.0.0.1:0",
+            silence_summary=True,
         )
-
-    t_cluster = time.perf_counter()
-    cluster = frisky.LocalCluster(
-        n_workers=args.workers,
-        threads_per_worker=args.threads_per_worker,
-        processes=True,
-        memory_limit=int(args.memory_limit_gib * GIB),
-        dashboard_address="127.0.0.1:0",
-        silence_summary=True,
+        client = cluster.get_client()
+        # Import the read stack on every worker before the first real task.
+        # See `composite.warm_worker` for the import race this closes.
+        n_warm = composite.warm_workers(client, cluster)
+    dash = observe.dashboard_url(cluster)
+    say(
+        f"cluster       {args.workers} workers x {args.threads_per_worker} threads, "
+        f"{n_warm} processes warmed in {marks['cluster_s']:.1f}s"
     )
-    client = cluster.get_client()
-    marks["cluster_start_s"] = time.perf_counter() - t_cluster
-    dash = cluster.dashboard_address
-    dash = dash if str(dash).startswith("http") else f"http://{dash}"
-    print(f"dashboard     {dash}")
+    say(f"dashboard     {dash}")
 
-    lst_out = np.zeros((height, width), dtype="uint16")
-    qa_out = np.zeros((12, height, width), dtype="uint8")
-
-    def assemble(future) -> dict:
-        """One shard into the output arrays, then dropped."""
-        try:
-            res_d = future.result()
-        except Exception as exc:  # a dead shard must not kill the tile
-            return {"error": repr(exc)}
-        y0, x0 = res_d["y0"], res_d["x0"]
-        a = res_d["lst_p95"]
-        lst_out[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = a
-        q = res_d["qa_count"]
-        qa_out[:, y0 : y0 + q.shape[1], x0 : x0 + q.shape[2]] = q
-        stat = {k: res_d[k] for k in ("row", "col", "n_scenes", "load_s", "reduce_s")}
-        del res_d, a, q
-        peak["rss"] = max(peak["rss"], proc.memory_info().rss / GIB)
-        return stat
-
-    fn = rehearse_task if args.rehearse else shard_task
+    scalars: dict = {}
+    staged_paths: dict = {}
+    trace_report: dict = {}
+    n_rejected = 0
+    n_tasks = 0
+    proc = psutil.Process()
     try:
-        stats, submit_s = drive_shards(
-            client,
-            fn,
-            work_idx,
-            table_path,
-            args.crs,
-            res,
-            args.read_threads,
-            assemble=assemble,
-            marks=marks,
-            t0=t0,
-        )
-    except BaseException:
-        # Without this the process hangs on a live cluster where before a
-        # failure in this stretch simply killed it.
+        if args.engine == "fused":
+            scalars, staged_paths, n_rejected, n_tasks = run_fused(
+                args,
+                client=client,
+                cluster=cluster,
+                bbox=bbox,
+                item_dicts=item_dicts,
+                item_bboxes=item_bboxes,
+                prep=prep,
+                keep_mask=keep,
+                gap_mask=gap,
+                marks=marks,
+                say=say,
+            )
+            say(
+                f"submit        {n_tasks:,} block tasks, one per block, "
+                f"submitted in {marks['graph_build_s']:.1f}s"
+            )
+            if n_rejected:
+                say(f"              {n_rejected} scenes rejected by the offset rule")
+            say(f"compute       {marks['compute_s']:.1f}s for {depths.size} blocks")
+        else:
+            with observe.phase("graph_build", count=depths.size, marks=marks):
+                out = composite.build_graph(
+                    item_dicts,
+                    bbox,
+                    crs=args.crs,
+                    resolution=res,
+                    chunk=args.chunk,
+                    prep=prep,
+                    max_offset_c=args.max_offset_c,
+                    debias=not args.no_destripe,
+                    feather=not args.no_feather,
+                    emit_pooled=args.emit_pooled,
+                )
+                ydim, xdim = composite.spatial_dims(args.crs)
+                counts, staged_paths = composite.staging_writes(
+                    out,
+                    args.out_dir,
+                    crs=args.crs,
+                    dims=(ydim, xdim),
+                    keep_mask=keep,
+                    gap_mask=gap,
+                )
+                n_tasks = len(dict(counts.__dask_graph__()))
+            n_rejected = out.attrs["n_rejected"]
+            say(
+                f"graph         {n_tasks:,} tasks for {depths.size} blocks over "
+                f"{out.attrs['n_scenes']} scenes, built in "
+                f"{marks['graph_build_s']:.1f}s"
+            )
+            if n_rejected:
+                say(f"              {n_rejected} scenes rejected by the offset rule")
+
+            with observe.phase("compute", count=depths.size, marks=marks):
+                scalars = composite.compute_all(counts)
+            say(f"compute       {marks['compute_s']:.1f}s for {depths.size} blocks")
+
+        with observe.phase("collect_trace", marks=marks):
+            trace_report = observe.collect(cluster, args.out_dir)
+    finally:
+        # Close the client before the cluster, so no other thread's bare
+        # compute resolves to a half-dead client. Without a close here a
+        # failure above hangs the process on a live cluster.
+        client.close()
         cluster.close()
         sampler.stop()
-        raise
 
-    print(
-        f"submitted     {len(work_idx)} shards in {submit_s:.1f}s of client time "
-        f"({submit_s / max(len(work_idx), 1) * 1000:.2f} ms each)"
-    )
-
-    # `compute_s` spans the whole shard-processing window. It used to run from
-    # the last submit to the last result, which was the same thing when every
-    # shard was submitted before any returned, and both are recorded so a
-    # before-and-after table can compare like with like.
-    compute_s = marks["last_result_s"] - marks["first_submit_s"]
-    marks |= {
-        "t0_wall": t0_wall,
-        "search_s": t_search,
-        "submit_total_s": submit_s,
-        "compute_s": compute_s,
-        "compute_from_last_submit_s": marks["last_result_s"] - marks["last_submit_s"],
-        "stage_s": marks["stage_end_s"] - marks["stage_start_s"],
-        "wall_s": time.perf_counter() - t0,
-    }
-    print(
-        f"phases        stage {marks['stage_s']:.1f}s, "
-        f"submit {submit_s:.1f}s, compute {compute_s:.1f}s"
-    )
-
-    # Every shard has been gathered, so nothing reads the staged files again.
-    # A failed run keeps them, which is what a rerun and a post-mortem both
-    # want; the disk guard on the next run says so rather than filling up.
     if stage_report is not None and not args.keep_staged:
         staging.cleanup(args.stage_dir, owned=stage_report.get("owns_stage_dir", True))
-    elif table_path is not None and not args.keep_staged:
-        # --no-stage writes the table and stages nothing, so `cleanup` never
-        # runs and 7.8 MB would be left behind on every run.
-        Path(table_path).unlink(missing_ok=True)
 
-    # The mask goes on before anything is measured or written, so the summary
-    # statistics, the part file, and a merge of parts from several machines all
-    # describe the same product. `merge_parts` needs no mask of its own, and a
-    # `--shard-slice` machine masks only its own slice: every pixel outside the
-    # slice is already nodata and the mask only ever removes.
-    if keep is not None and mask_counts is not None:
-        mask_counts |= masks.apply_output_mask(
-            lst_out,
-            qa_out,
-            keep,
-            gap,
-            scope="tile" if not args.shard_slice else f"shards[{args.shard_slice}]",
-        )
-        print(
+    memory_peak = sampler.peak_between(0.0, time.monotonic())
+    workers_gib = memory_peak.get("workers_rss_peak_mb", 0.0) / 1024
+    tree_gib = memory_peak.get("tree_rss_peak_mb", 0.0) / 1024
+
+    if mask_counts is not None:
+        mask_counts |= {
+            "scope": "tile",
+            "valid_removed_by_water": int(scalars.get("removed_water", 0)),
+            "valid_removed_by_emissivity": int(scalars.get("removed_hot", 0)),
+            "valid_removed_by_mask": int(scalars.get("removed_water", 0))
+            + int(scalars.get("removed_hot", 0)),
+            "qa_count_pixels_zeroed": int(scalars.get("qa_zeroed", 0)),
+        }
+        say(
             f"masked        {mask_counts['valid_removed_by_water']:,} px sea, "
             f"{mask_counts['valid_removed_by_emissivity']:,} px hot inside the "
             f"ASTER gap region"
         )
 
-    # After the mask, not before. The mask allocates while the two full-tile
-    # output arrays are live, and a sampler stopped above never sees the peak
-    # that `--target-memory-gib` is checked against.
-    sampler.stop()
-    memory_peak = sampler.peak_between(0.0, time.monotonic())
-    workers_gib = memory_peak.get("workers_rss_peak_mb", 0.0) / 1024
-    tree_gib = memory_peak.get("tree_rss_peak_mb", 0.0) / 1024
+    # The header fields the workers could not write: scale, offset, band
+    # names, and the statistics, scanned off the staging file in strips.
+    with observe.phase("cog", marks=marks):
+        lst_statistics = composite.finish_staging(
+            staged_paths["lst_p95"],
+            scale=LST_SCALE,
+            offset=LST_OFFSET,
+            descriptions=("95th percentile LST",),
+            nodata=LST_NODATA_DN,
+        )
+        qa_statistics = composite.finish_staging(
+            staged_paths["qa_count"],
+            scale=None,
+            offset=None,
+            descriptions=tuple(MONTH_NAMES),
+            nodata=None,
+        )
+        meta = run_meta(
+            args,
+            bbox,
+            height,
+            width,
+            mask_rule(args, mask_counts, ged_provenance),
+            correction_rule(args, prep),
+        )
+        catalog_root = None
+        if args.no_catalog:
+            for name, nodata, scale, offset in (
+                ("lst_p95", LST_NODATA_DN, LST_SCALE, LST_OFFSET),
+                ("qa_count", None, None, None),
+            ):
+                write_cog(
+                    args.out_dir / f"{name}.tif",
+                    bbox=bbox,
+                    pixels_per_degree=args.pixels_per_degree,
+                    crs=args.crs,
+                    nodata=nodata,
+                    scale=scale,
+                    offset=offset,
+                    source_path=staged_paths[name],
+                )
+        else:
+            check_catalog_inputs(meta)
+            catalog_root = write_catalog(
+                args.catalog_dir or (args.out_dir / "catalog"),
+                staged_paths["lst_p95"],
+                staged_paths["qa_count"],
+                meta,
+                collection_id=args.collection_id,
+                host_name=args.host_name,
+                host_url=args.host_url,
+                license_id=args.license,
+            )
+        if "lst_p95_pooled" in staged_paths:
+            composite.finish_staging(
+                staged_paths["lst_p95_pooled"],
+                scale=LST_SCALE,
+                offset=LST_OFFSET,
+                descriptions=("pooled 95th percentile LST",),
+                nodata=LST_NODATA_DN,
+            )
+            write_cog(
+                args.out_dir / "lst_p95_pooled.tif",
+                bbox=bbox,
+                pixels_per_degree=args.pixels_per_degree,
+                crs=args.crs,
+                nodata=LST_NODATA_DN,
+                scale=LST_SCALE,
+                offset=LST_OFFSET,
+                source_path=staged_paths["lst_p95_pooled"],
+            )
+        composite.cleanup_staging(staged_paths)
 
-    valid = lst_out != LST_NODATA_DN
-    cel = (
-        lst_out[valid].astype("float64") * LST_SCALE + LST_OFFSET
-        if valid.any()
-        else None
+    lst_stats = lst_statistics[0]
+    valid_fraction = (
+        float(lst_stats["kept"]) / float(lst_stats["total"])
+        if lst_stats["total"]
+        else 0.0
     )
+    marks |= {
+        "t0_wall": t0_wall,
+        "search_s": t_search,
+        "wall_s": time.perf_counter() - t0,
+    }
     summary = {
+        "synthetic": bool(args.rehearse),
+        "tile": tile_id,
         "bbox": bbox,
         "crs": args.crs,
         "pixels_per_degree": args.pixels_per_degree,
         "raster": [height, width],
-        "shard_px": args.shard,
-        "n_shards": len(work_idx),
-        # What the run composited, after the L2SR filter. The inventory total
-        # sits beside it, because the two differ by `scenes_dropped_no_thermal`
-        # and a reader cannot tell which one a single figure means.
+        "chunk_px": args.chunk,
+        "engine": args.engine,
+        "n_blocks": int(depths.size),
+        "scenes_per_block": {
+            "min": flat[0],
+            "p50": flat[len(flat) // 2],
+            "p95": flat[int(len(flat) * 0.95)],
+            "max": flat[-1],
+        },
         "n_scenes": len(item_dicts),
         "n_scenes_inventory": len(items),
-        "search_s": t_search,
-        # Every phase, as seconds from one origin, so a before-and-after table
-        # is two summaries subtracted rather than two logs scraped. The submit
-        # time in particular used to be printed and then discarded.
+        "n_scenes_rejected": n_rejected,
+        "scenes_dropped_no_thermal": dropped_no_thermal,
+        "n_tasks": n_tasks,
+        # Every phase in seconds from one origin, MEASURED. The same figures
+        # went to frisky as client phases.
         "phases": marks,
-        "item_table": table_report,
-        "compute_s": compute_s,
-        "s_per_shard": compute_s / max(len(work_idx), 1),
-        "client_rss_peak_gib": peak["rss"],
-        # MEASURED across the worker processes, not predicted. `shard_bytes`
-        # models the same quantity, so a run now says whether the model held.
+        "memory_demand_gib_derived": memory_demand_gib,
+        "client_rss_peak_gib": proc.memory_info().rss / GIB,
         "workers_rss_peak_gib": workers_gib,
         "tree_rss_peak_gib": tree_gib,
-        "memory_demand_gib": memory_demand,
-        "valid_fraction": float(valid.mean()),
-        # A driver needs one number, not a walk over shard_stats. A run that
-        # loses shards still writes a summary and still writes its parts, so
-        # without this the artifact of a half-finished tile looks finished.
-        "n_shards_errored": sum(1 for s in stats if "error" in s),
-        "shard_stats": stats,
-        # Which inventory answered this run. A composite is only reproducible
-        # if the scene list behind it is named, so this travels with the
-        # numbers rather than beside them.
+        "valid_fraction": valid_fraction,
+        "n_pooled_fallback": int(scalars.get("fallback", 0)),
         "inventory": run_provenance,
-        "tile": tile_id,
-        # What this run actually put on the wire. `cost_report.py --s3-get-requests`
-        # prices it directly, so the S3 line stops being derived from a
-        # requests-per-read sampled on one laptop against three shards.
         "staging": stage_report,
-        "scenes_dropped_no_thermal": dropped_no_thermal,
-        # Which pixels the product describes at all, and what it cost to say
-        # so. None under --no-output-mask, which writes a raster the mask never
-        # touched.
         "mask": (
             None
             if mask_counts is None
@@ -1747,126 +1355,58 @@ def main(argv=None) -> int:  # noqa: C901
                 "aster_ged": ged_provenance,
             }
         ),
+        "correction": correction_rule(args, prep),
+        "catalog": str(catalog_root) if catalog_root else None,
+        "frisky": trace_report,
+        "dashboard": dash,
     }
-    if cel is not None:
+    if lst_stats["kept"]:
         summary |= {
-            "min_c": float(cel.min()),
-            "mean_c": float(cel.mean()),
-            "max_c": float(cel.max()),
+            "min_c": float(lst_stats["min"]) * LST_SCALE + LST_OFFSET,
+            "mean_c": float(lst_stats["mean"]) * LST_SCALE + LST_OFFSET,
+            "max_c": float(lst_stats["max"]) * LST_SCALE + LST_OFFSET,
         }
-        print(
-            f"\nLST p95       min {cel.min():.1f} C  mean {cel.mean():.1f} C  "
-            f"max {cel.max():.1f} C  ({100 * valid.mean():.1f}% valid)"
+        say(
+            f"\nLST p95       min {summary['min_c']:.1f} C  "
+            f"mean {summary['mean_c']:.1f} C  max {summary['max_c']:.1f} C  "
+            f"({100 * valid_fraction:.1f}% valid)"
         )
-    print(
-        f"compute       {compute_s:.1f}s for {len(work_idx)} shards "
-        f"({compute_s / max(len(work_idx), 1):.2f}s/shard of wall clock, not "
-        f"per-shard duration)"
-    )
-    n_errored = sum(1 for s in stats if "error" in s)
-    if n_errored:
-        print(
-            f"FAILED        {n_errored} of {len(work_idx)} shards errored; this "
-            f"tile is incomplete"
-        )
-    print(f"client RSS    {peak['rss']:.2f} GiB peak")
-    if workers_gib:
-        # The model against the measurement, on every run. This is the check
-        # that was missing when a MEASURED table carried `shard_bytes` output.
-        against = ""
-        if memory_demand:
-            share = workers_gib / memory_demand
-            against = f" against {memory_demand:.1f} GiB modelled ({share:.0%})"
-        print(f"worker RSS    {workers_gib:.2f} GiB peak{against}")
-    qa_mean = {MONTHS[i]: float(qa_out[i].mean()) for i in range(12)}
+    qa_mean = {MONTHS[i]: float(qa_statistics[i]["mean"]) for i in range(12)}
     summary["qa_count_per_month"] = qa_mean
-    print("qa_count      " + "  ".join(f"{m} {v:.1f}" for m, v in qa_mean.items()))
-
-    try:
-        spans = frisky.query_spans(
-            limit=2_000_000, dashboard_url=dash, request_timeout=60
+    say("qa_count      " + "  ".join(f"{m} {v:.1f}" for m, v in qa_mean.items()))
+    say(
+        "phases        "
+        + ", ".join(
+            f"{k[:-2]} {v:.1f}s"
+            for k, v in marks.items()
+            if k.endswith("_s") and k not in ("wall_s", "search_s")
         )
-        summary["n_spans"] = len(spans)
-        (args.out_dir / "spans.json").write_text(
-            json.dumps(spans[:200000], default=str)
-        )
-    except Exception as exc:
-        summary["span_error"] = repr(exc)
-    cluster.close()
-
-    # Write this slice as a part file so other machines' slices can be merged.
-    import numpy as _np
-
-    payload = {}
-    for sh in mine:  # every planned shard in this slice, barren ones included
-        tag = f"{sh.y0}_{sh.x0}"
-        payload["lst_" + tag] = lst_out[sh.y0 : sh.y0 + sh.ny, sh.x0 : sh.x0 + sh.nx]
-        payload["qa_" + tag] = qa_out[:, sh.y0 : sh.y0 + sh.ny, sh.x0 : sh.x0 + sh.nx]
-    if payload:
-        # numpy declares savez_compressed(**kwds: ArrayLike) alongside a bool
-        # allow_pickle, so a dict of arrays collides with the named parameter.
-        _np.savez_compressed(
-            args.out_dir / "part-000.npz",
-            **payload,  # ty: ignore[invalid-argument-type]
-        )
-        (args.out_dir / "part-meta.json").write_text(
-            json.dumps(
-                {
-                    "raster": [height, width],
-                    "bbox": bbox,
-                    "crs": args.crs,
-                    "pixels_per_degree": args.pixels_per_degree,
-                    "shard_px": args.shard,
-                    "n_shards": len(work_idx),
-                    # What the mask did to this part. `merge_parts` compares
-                    # it across parts, because two machines that masked the
-                    # same tile differently produce one raster that no single
-                    # rule describes.
-                    "mask_rule": mask_rule(args, mask_counts, ged_provenance),
-                    # The merge turns these into the item's datetime interval,
-                    # so a catalog states the window its pixels came from.
-                    "start": args.start,
-                    "end": args.end,
-                },
-                indent=2,
-            )
-        )
-        print(
-            f"part written  {args.out_dir / 'part-000.npz'} ({len(payload) // 2} shards)"
-        )
+    )
+    say(f"client RSS    {summary['client_rss_peak_gib']:.2f} GiB peak")
+    if workers_gib:
+        say(f"worker RSS    {workers_gib:.2f} GiB peak (MEASURED)")
+    say(
+        f"frisky        {trace_report.get('n_spans', 0):,} spans, "
+        f"{trace_report.get('n_events', 0):,} events -> spans.json, events.json, "
+        f"overview.json"
+    )
 
     (args.out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, default=str)
     )
-    # Beside the summary as well as inside it, because pricing a run reads only
-    # this and `cost_report.py` should not have to know the summary's shape.
     if stage_report is not None:
         (args.out_dir / "staging.json").write_text(
             json.dumps(
                 stage_report
                 | {
                     "scenes_dropped_no_thermal": dropped_no_thermal,
-                    # Beside the counts, because pricing a run reads only this
-                    # file and whether the fetch overlapped the compute changes
-                    # what its seconds mean.
-                    "started_s": marks.get("stage_start_s"),
-                    "ended_s": marks.get("stage_end_s"),
-                    "overlapped": marks.get("overlapped", False),
+                    "seconds_in_run": marks.get("stage_s"),
                 },
                 indent=2,
             )
         )
-    print(f"artifacts     {args.out_dir.resolve()}")
-    # 3 for a tile that lost shards, 0 for one that did not. It used to return
-    # 0 either way, so a run that gathered 1 shard of 64 reported success and
-    # wrote a part file and a summary to match.
-    #
-    # This is the signal a fleet driver needs, and the panic that prompted
-    # looking is not it. MEASURED: SIGABRT on four of eight workers mid-run,
-    # which is what a non-unwinding panic does to a worker, and all 200 shards
-    # still completed with no errors and exit 0. frisky reschedules the work.
-    # What loses a tile quietly is a shard that raises.
-    return 3 if n_errored else 0
+    say(f"artifacts     {args.out_dir.resolve()}")
+    return 0
 
 
 if __name__ == "__main__":

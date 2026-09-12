@@ -1,8 +1,11 @@
 # /// script
 # requires-python = ">=3.12,<3.15"
-# dependencies = ["odc-stac", "pystac-client", "xarray", "numpy", "rioxarray"]
+# dependencies = [
+#   "odc-stac", "odc-geo", "pystac", "pystac-client", "xarray", "dask",
+#   "numpy", "rioxarray",
+# ]
 # ///
-"""Count the S3 GET requests one shard actually issues. Bounded and cheap.
+"""Count the S3 GET requests one block actually issues. Bounded and cheap.
 
 Requester-pays charges scale with request count, not bytes, and nothing in this
 repo has ever measured that count. Every requests-per-read figure quoted so far
@@ -24,9 +27,9 @@ Two things this has to get right, or the number describes a different pipeline:
   `CURL_INFO_HEADER_OUT: GET ...`. Both `redirect_stderr` and a file-descriptor
   redirect capture nothing here. This attaches a log handler instead.
 
-    uv run measure_s3_requests.py --shards 3
+    uv run measure_s3_requests.py --blocks 3
 
-Cost: a handful of shards, seconds of compute, a few thousand GETs. Run it on
+Cost: a handful of blocks, seconds of compute, a few thousand GETs. Run it on
 one instance in-region. The count is what matters, not the wall clock.
 """
 
@@ -42,10 +45,69 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from stac_window import DEFAULT_END, DEFAULT_START
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
+class Block(NamedTuple):
+    """One dask block of the tile raster: where it sits and what it covers."""
+
+    row: int
+    col: int
+    ny: int
+    nx: int
+    bbox: tuple[float, float, float, float]
+
+
+def plan_blocks(bbox, pixels_per_degree: int, chunk: int) -> list[Block]:
+    """The blocks `composite.open_stack` cuts this bbox into.
+
+    Anchored at the north-west corner, the way dask anchors the chunks, so the
+    read pattern measured here is a block the run actually issues rather than
+    an arbitrary window of the same size.
+    """
+    import composite
+
+    height, width = composite.raster_shape(bbox, pixels_per_degree)
+    west, _, _, north = bbox
+    res = 1.0 / pixels_per_degree
+    out = []
+    for row, y0 in enumerate(range(0, height, chunk)):
+        ny = min(chunk, height - y0)
+        for col, x0 in enumerate(range(0, width, chunk)):
+            nx = min(chunk, width - x0)
+            out.append(
+                Block(
+                    row,
+                    col,
+                    ny,
+                    nx,
+                    (
+                        west + x0 * res,
+                        north - (y0 + ny) * res,
+                        west + (x0 + nx) * res,
+                        north - y0 * res,
+                    ),
+                )
+            )
+    return out
+
+
+def items_for_block(block: Block, item_bboxes) -> list[int]:
+    """Indices of the scenes whose footprint reaches this block.
+
+    The same strict-inequality overlap `composite.block_depths` counts with, so
+    a block measured here holds the scenes the graph would paint into it.
+    """
+    west, south, east, north = block.bbox
+    return [
+        i
+        for i, (w, s, e, n) in enumerate(item_bboxes)
+        if w < east and e > west and s < north and n > south
+    ]
 
 
 @contextlib.contextmanager
@@ -98,31 +160,28 @@ def parse_log(text: str) -> dict:
 
 
 def count_requests(
-    shard, item_dicts, crs, resolution, read_threads, log_path: Path | None
+    block: Block, item_dicts, crs, resolution, threads, log_path: Path | None
 ) -> dict:
-    """Load one shard with curl verbose on, and count what crossed the wire.
+    """Load one block with curl verbose on, and count what crossed the wire.
 
-    The load call mirrors `shard_lst_p95.process_shard` exactly. Any difference
-    here would measure a pipeline that does not exist.
+    The load is `composite.open_stack`, the call the pipeline itself makes,
+    over one block's bbox with the time axis in one chunk. A second
+    implementation here would measure a pipeline that does not exist.
     """
-    import pystac
-    from odc.geo import CRS
-    from odc.stac import stac_load
-
-    ydim, xdim = ("y", "x") if CRS(crs).projected else ("latitude", "longitude")
-    items = [pystac.Item.from_dict(d) for d in item_dicts]
+    import composite
+    import dask
 
     t0 = time.perf_counter()
     with capture_gdal_log() as lines:
-        data = stac_load(
-            items,
-            bands=("lwir11", "qa_pixel"),
+        stack = composite.open_stack(
+            item_dicts,
+            block.bbox,
             crs=crs,
             resolution=resolution,
-            bbox=shard.bbox,
-            groupby="landsat:scene_id",
-            chunks={"time": 1, ydim: -1, xdim: -1},
-        ).compute(scheduler="threads", num_workers=read_threads)
+            chunk=max(block.ny, block.nx),
+        )
+        with dask.config.set(scheduler="threads", num_workers=threads):
+            data = stack.compute()
         shape = data["lwir11"].values.shape
     wall = time.perf_counter() - t0
 
@@ -132,11 +191,11 @@ def count_requests(
             fh.write(text)
 
     counts = parse_log(text)
-    n = len(items)
+    n = len(item_dicts)
     band_reads = n * 2
     return {
-        "row": shard.row,
-        "col": shard.col,
+        "row": block.row,
+        "col": block.col,
         "n_scenes": n,
         "pixels": [int(shape[1]), int(shape[2])],
         "log_records": len(lines),
@@ -145,8 +204,8 @@ def count_requests(
         "requests_per_scene": counts["get_requests"] / max(n, 1),
         "requests_per_band_read": counts["get_requests"] / max(band_reads, 1),
         # Requests per million output pixels covered, per scene. Requests per
-        # band-read rises with shard size by construction, so it cannot answer
-        # whether a larger read block cuts the total. This can.
+        # band-read rises with block size by construction, so it cannot answer
+        # whether a larger --chunk cuts the total. This can.
         "requests_per_scene_megapixel": counts["get_requests"]
         / max(n * shape[1] * shape[2] / 1e6, 1e-9),
     }
@@ -158,17 +217,17 @@ def main() -> int:
     ap.add_argument("--pixels-per-degree", type=int, default=3600)
     ap.add_argument("--crs", default="EPSG:4326")
     ap.add_argument(
-        "--shard",
+        "--chunk",
         type=int,
         default=512,
-        help="shard edge in pixels; this is the read size knob",
+        help="block edge in pixels; this is the read size knob",
     )
-    ap.add_argument("--shards", type=int, default=3, help="how many to measure")
+    ap.add_argument("--blocks", type=int, default=3, help="how many to measure")
     ap.add_argument(
-        "--read-threads",
+        "--threads",
         type=int,
         default=4,
-        help="must match shard_lst_p95 --read-threads",
+        help="must match shard_lst_p95 --threads-per-worker",
     )
     ap.add_argument("--source", default="earth-search")
     ap.add_argument("--start", default=DEFAULT_START)
@@ -179,8 +238,8 @@ def main() -> int:
         "--max-scenes",
         type=int,
         default=None,
-        help="cap scenes per shard, sampled evenly across the "
-        "shard's items. The reported figure is a ratio per "
+        help="cap scenes per block, sampled evenly across the "
+        "block's items. The reported figure is a ratio per "
         "band-read, so a cap lowers the spend without changing "
         "what is measured",
     )
@@ -192,7 +251,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path("s3-requests.json"))
     args = ap.parse_args()
 
-    from shard_lst_p95 import configure_read_env, items_for_shard, plan_shards
+    from shard_lst_p95 import configure_read_env
 
     # The catalogue query lives in stac_reference now. This is a measurement
     # tool, so it describes what the old runtime did; the runtime itself reads
@@ -205,7 +264,7 @@ def main() -> int:
     os.environ["CPL_DEBUG"] = "ON"
 
     bbox = tuple(float(v) for v in args.bbox.split(","))
-    shards, h, w = plan_shards(bbox, args.pixels_per_degree, args.shard)
+    blocks = plan_blocks(bbox, args.pixels_per_degree, args.chunk)
 
     items, boxes = search_items(
         bbox,
@@ -217,33 +276,33 @@ def main() -> int:
     )
     dicts = [i.to_dict() for i in items]
     print(
-        f"scenes {len(items)}   shards planned {len(shards)}   "
-        f"shard {args.shard}px   threads {args.read_threads}"
+        f"scenes {len(items)}   blocks planned {len(blocks)}   "
+        f"chunk {args.chunk}px   threads {args.threads}"
     )
 
-    # Pick shards spread across the plan, skipping barren ones.
-    picks, step = [], max(len(shards) // (args.shards + 1), 1)
-    for i in range(0, len(shards), step):
-        idx = items_for_shard(shards[i], boxes)
+    # Pick blocks spread across the plan, skipping barren ones.
+    picks, step = [], max(len(blocks) // (args.blocks + 1), 1)
+    for i in range(0, len(blocks), step):
+        idx = items_for_block(blocks[i], boxes)
         if idx:
             if args.max_scenes and len(idx) > args.max_scenes:
                 step_i = len(idx) / args.max_scenes
                 idx = [idx[int(k * step_i)] for k in range(args.max_scenes)]
-            picks.append((shards[i], [dicts[j] for j in idx]))
-        if len(picks) == args.shards:
+            picks.append((blocks[i], [dicts[j] for j in idx]))
+        if len(picks) == args.blocks:
             break
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     res = 1.0 / args.pixels_per_degree
     out = []
-    for sh, d in picks:
+    for block, d in picks:
         log_path = None
         if args.keep_logs:
-            log_path = args.out.with_suffix(f".r{sh.row}c{sh.col}.log.gz")
-        r = count_requests(sh, d, args.crs, res, args.read_threads, log_path)
+            log_path = args.out.with_suffix(f".r{block.row}c{block.col}.log.gz")
+        r = count_requests(block, d, args.crs, res, args.threads, log_path)
         out.append(r)
         print(
-            f"  shard r{r['row']:>2} c{r['col']:<2} {r['n_scenes']:>4} scenes  "
+            f"  block r{r['row']:>2} c{r['col']:<2} {r['n_scenes']:>4} scenes  "
             f"{r['get_requests']:>7,} GETs  "
             f"{r['requests_per_band_read']:5.2f} per band-read  "
             f"{r['wall_s']:6.1f}s"
@@ -255,7 +314,7 @@ def main() -> int:
             )
 
     if not out:
-        print("no shard had any scene; nothing measured")
+        print("no block had any scene; nothing measured")
         return 1
 
     if sum(x["get_requests"] for x in out) == 0:
@@ -268,10 +327,10 @@ def main() -> int:
     per = [x["requests_per_band_read"] for x in out]
     permp = [x["requests_per_scene_megapixel"] for x in out]
     summary = {
-        "shard_px": args.shard,
+        "chunk_px": args.chunk,
         "max_scenes": args.max_scenes,
-        "read_threads": args.read_threads,
-        "shards_measured": len(out),
+        "threads": args.threads,
+        "blocks_measured": len(out),
         "scenes_searched": len(items),
         "requests_per_band_read_min": min(per),
         "requests_per_band_read_mean": sum(per) / len(per),
@@ -289,7 +348,7 @@ def main() -> int:
     )
     print(
         f"requests per scene-megapixel: mean {sum(permp) / len(permp):.2f} "
-        f"(compare shard sizes on this, not on the line above)"
+        f"(compare block sizes on this, not on the line above)"
     )
     print(f"written {args.out}")
     print("\nFeed the mean into cost_report.py --requests-per-read.")

@@ -19,13 +19,18 @@ dependencies = []
 
 [dependency-groups]
 dev = [
-  # The union of the inline blocks in profile_lst_p95.py, shard_lst_p95.py,
-  # measure_s3_requests.py and compare_qa_masks.py. cost_report.py and
-  # sweep_throughput.py are standard library only.
+  # The union of the inline blocks in shard_lst_p95.py, composite.py,
+  # measure_s3_requests.py and compare_qa_masks.py. cost_report.py is standard
+  # library only.
   "rasterio",
   "frisky>=0.7.2",
-  "dask",
+  # Pinned: frisky 0.7.2 imports the private `dask._task_spec` and
+  # `dask._expr` modules and declares no dask bound of its own.
+  "dask==2026.8.0",
   "odc-stac",
+  # The graph reprojects the cross-fade weights and reads the tile geobox
+  # through odc.geo, so it is a direct dependency and not odc-stac's.
+  "odc-geo",
   "pystac-client",
   "planetary-computer",
   "xarray",
@@ -117,6 +122,11 @@ testpaths = ["tests"]
 #
 #     uv run pytest -n 0 -x tests/test_fleet_plan.py
 addopts = "-q --timeout=60 -n 4 --dist loadfile -m 'not network and not s3 and not packaging'"
+# odc-geo multiplies affines with `*`, which the affine package now flags on
+# every call. Tens of thousands of copies of that one line bury a failure.
+filterwarnings = [
+  "ignore:Use `@` matmul instead of `\\*` mul operator:PendingDeprecationWarning",
+]
 markers = [
   "network: reaches Earth Search or the USGS bulk metadata service",
   "s3: reads s3://usgs-landsat, which is requester-pays and costs money",

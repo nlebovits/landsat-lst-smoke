@@ -35,10 +35,8 @@ from lst_qa import (  # noqa: E402
     QA_EXCLUDED_BIT_NUMBERS,
     QA_EXCLUDED_BITS,
     encode_celsius,
-    encode_celsius_xr,
     in_trusted_range,
     masked_celsius,
-    masked_celsius_xr,
     qa_clear,
     to_celsius,
 )
@@ -121,6 +119,51 @@ class TestQaBits:
     def test_qa_clear_is_elementwise(self):
         qa = np.array([QA_CLEAR, QA_CLEAR | 0b1000, 0, 0b100000], dtype="uint16")
         assert list(np.asarray(qa_clear(qa))) == [True, False, True, False]
+
+
+class TestTheDecodeIsOneCopy:
+    """`to_celsius` scales and offsets in place, and must not move a value.
+
+    The block stack is the largest array the pipeline holds, so the decode
+    keeps one float32 copy of it rather than three. The arithmetic is the same
+    two float32 operations in the same order, so the result is bit-identical
+    to the expression form, and this asserts that rather than trusting it.
+    """
+
+    @staticmethod
+    def expression_form(dn):
+        return dn.astype("float32") * np.float32(LWIR_SCALE) + np.float32(LWIR_OFFSET_C)
+
+    @pytest.mark.parametrize("shape", [(1,), (7, 5), (4, 8, 8)])
+    def test_it_is_bit_identical_to_the_expression_form(self, shape):
+        rng = np.random.default_rng(sum(shape))
+        dn = rng.integers(0, 65536, size=shape, dtype="uint16")
+        got = to_celsius(dn)
+        want = self.expression_form(dn)
+        assert got.dtype == np.float32
+        assert np.array_equal(got.view("uint32"), want.view("uint32"))
+
+    def test_it_does_not_touch_its_input(self):
+        dn = np.array([[100, 20000, 65535]], dtype="uint16")
+        before = dn.copy()
+        to_celsius(dn)
+        np.testing.assert_array_equal(dn, before)
+
+    def test_a_numpy_scalar_still_decodes(self):
+        """`in_trusted_range(to_celsius(np.uint16(5)))` is asserted below."""
+        assert float(to_celsius(np.uint16(5))) == float(
+            self.expression_form(np.uint16(5))
+        )
+
+    def test_a_dataarray_decodes_to_the_same_bits(self):
+        rng = np.random.default_rng(11)
+        dn = rng.integers(0, 65536, size=(3, 4, 4), dtype="uint16")
+        lazy = xr.DataArray(dn, dims=("time", "y", "x"))
+        got = to_celsius(lazy)
+        assert np.array_equal(
+            got.values.view("uint32"), self.expression_form(dn).view("uint32")
+        )
+        np.testing.assert_array_equal(lazy.values, dn)
 
 
 class TestFillAndPhysicalRange:
@@ -298,35 +341,24 @@ class TestEncoding:
         assert list(back) == pytest.approx([30.0, 45.5, 79.9], abs=LST_SCALE)
 
 
-class TestBothWrappersAgree:
-    """The numpy and xarray wrappers are the same rule, twice."""
+class TestThePredicatesTakeDataArrays:
+    """The predicates are one rule for numpy and xarray alike.
 
-    def _arrays(self):
+    `composite.reduce_block` hands numpy to `masked_celsius`; the predicates it
+    is built from also answer a DataArray, which is what lets a test or a
+    notebook ask the same question of a lazy stack.
+    """
+
+    def test_the_validity_rule_agrees_on_both(self):
+        from lst_qa import valid_observation
+
         rng = np.random.default_rng(7)
         dn = rng.integers(0, 65536, size=(5, 8, 8), dtype="uint16")
         dn[0, 0, :] = 0  # a fill row
         dn[1, 1, :] = 3  # a reprojected-edge row
         qa = rng.integers(0, 4096, size=(5, 8, 8)).astype("uint16")
-        return dn, qa
-
-    def test_the_masked_stacks_are_identical(self):
-        dn, qa = self._arrays()
-        eager, _ = masked_celsius(dn.copy(), qa)
-        lazy = masked_celsius_xr(
-            xr.DataArray(dn, dims=("time", "y", "x")),
-            xr.DataArray(qa, dims=("time", "y", "x")),
-        )
-        np.testing.assert_array_equal(np.isnan(eager), np.isnan(lazy.values))
-        np.testing.assert_allclose(
-            np.nan_to_num(eager, nan=0.0), np.nan_to_num(lazy.values, nan=0.0)
-        )
-
-    def test_the_encoders_are_identical(self):
-        celsius = np.array(
-            [-124.15, -50.0, -49.99, -49.98, 0.0, 30.0, 80.0, 700.0, np.nan],
-            dtype="float32",
-        )
-        eager = encode_celsius(celsius)
-        lazy = encode_celsius_xr(xr.DataArray(celsius, dims=("p",)))
+        _, eager = masked_celsius(dn.copy(), qa)
+        lazy_dn = xr.DataArray(dn, dims=("time", "y", "x"))
+        lazy_qa = xr.DataArray(qa, dims=("time", "y", "x"))
+        lazy = valid_observation(lazy_dn, lazy_qa, to_celsius(lazy_dn))
         np.testing.assert_array_equal(eager, lazy.values)
-        assert lazy.dtype == np.uint16

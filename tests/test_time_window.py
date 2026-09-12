@@ -12,7 +12,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import measure_s3_requests  # noqa: E402
-import profile_lst_p95  # noqa: E402
 import shard_lst_p95  # noqa: E402
 from stac_window import (  # noqa: E402
     DEFAULT_END,
@@ -50,12 +49,14 @@ class TestDefaultWindow:
 class TestEntryPointDefaults:
     """Every path that searches STAC has to ask for the same five years."""
 
-    def test_shard_pipeline(self):
+    def test_composite_pipeline(self):
         args = shard_lst_p95.parse_args(["--bbox=-62.5,-35.0,-60.0,-32.5"])
         assert (args.start, args.end) == (DEFAULT_START, DEFAULT_END)
 
-    def test_profile_harness(self):
-        args = profile_lst_p95.parse_args([])
+    def test_composite_pipeline_with_no_flags_at_all(self):
+        # The bare parser, because the window is what the inventory manifest is
+        # checked against and an area is not needed to state it.
+        args = shard_lst_p95.parse_args([])
         assert (args.start, args.end) == (DEFAULT_START, DEFAULT_END)
 
     def test_s3_request_measurement(self):
@@ -68,13 +69,6 @@ class TestEntryPointDefaults:
         src = Path(measure_s3_requests.__file__).read_text()
         assert 'ap.add_argument("--start", default=DEFAULT_START)' in src
         assert 'ap.add_argument("--end", default=DEFAULT_END)' in src
-
-    def test_dryrun_script_source_uses_the_shared_window(self):
-        src = (
-            Path(__file__).resolve().parent.parent / "dryrun" / "dryrun.py"
-        ).read_text()
-        assert "datetime_range(DEFAULT_START, DEFAULT_END)" in src
-        assert OLD_START not in src
 
 
 class TestStacQuery:
@@ -156,9 +150,10 @@ def test_no_entry_point_still_carries_the_old_window():
     root = Path(__file__).resolve().parent.parent
     scripts = [
         root / "shard_lst_p95.py",
-        root / "profile_lst_p95.py",
+        root / "composite.py",
         root / "measure_s3_requests.py",
-        *sorted((root / "dryrun").glob("*.py")),
+        root / "stac_window.py",
+        root / "tile_prep.py",
     ]
     offenders = [p.name for p in scripts if '"2020-01-01"' in p.read_text()]
     assert offenders == []

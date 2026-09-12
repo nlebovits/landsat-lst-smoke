@@ -1,7 +1,7 @@
 """Write the merged composite as COGs inside a Portolan catalog.
 
 The pipeline has always published an encoding contract and never a file. This
-module is the file. It turns the two arrays `merge_parts` assembles into a
+module is the file. It turns the two rasters a composite run writes into a
 catalog that the Portolan validator accepts:
 
     <out-dir>/catalog/
@@ -151,7 +151,7 @@ DEFAULT_LICENSE = "CC0-1.0"
 #: `collection_id_for_window` builds `lst-p95-2021-2025`.
 COLLECTION_ID_STEM = "lst-p95"
 
-#: EPSG:4326 is the only coherent grid here: the shard plan is anchored to
+#: EPSG:4326 is the only coherent grid here: the tile grid is anchored to
 #: whole degrees and sized in pixels per degree.
 SUPPORTED_CRS = "EPSG:4326"
 
@@ -190,7 +190,7 @@ VALID_PERCENT_KEY = "STATISTICS_VALID_PERCENT"
 def transform_for(bbox, pixels_per_degree: int):
     """The north-up affine transform of a tile on the degree grid.
 
-    Row 0 is the northern edge, matching `plan_shards`, so the y step is
+    Row 0 is the northern edge, matching the tile grid, so the y step is
     negative.
     """
     from rasterio.transform import from_origin
@@ -284,15 +284,36 @@ def band_statistics(band, nodata: int | None) -> dict[str, str]:
     total = int(band.size)
     kept = int(values.size)
     if kept == 0:
+        return statistics_tags(min=0.0, max=0.0, mean=0.0, std=0.0, kept=0, total=total)
+    wide = np.asarray(values, dtype="float64")
+    return statistics_tags(
+        min=float(wide.min()),
+        max=float(wide.max()),
+        mean=float(wide.mean()),
+        std=float(wide.std()),
+        kept=kept,
+        total=total,
+    )
+
+
+def statistics_tags(*, min, max, mean, std, kept, total) -> dict[str, str]:  # noqa: A002
+    """The `STATISTICS_*` tags from already-reduced figures.
+
+    `band_statistics` reduces an array in memory and calls this. The composite
+    reduces lazily on the workers, in the same compute as the pixels, and calls
+    this with the results, so both routes write the same tags.
+    """
+    kept = int(kept)
+    total = int(total)
+    if kept == 0:
         stats = dict.fromkeys(STATISTICS_KEYS, "0.0")
         stats[VALID_PERCENT_KEY] = "0.0"
         return stats
-    wide = np.asarray(values, dtype="float64")
     return {
-        "STATISTICS_MINIMUM": repr(float(wide.min())),
-        "STATISTICS_MAXIMUM": repr(float(wide.max())),
-        "STATISTICS_MEAN": repr(float(wide.mean())),
-        "STATISTICS_STDDEV": repr(float(wide.std())),
+        "STATISTICS_MINIMUM": repr(float(min)),
+        "STATISTICS_MAXIMUM": repr(float(max)),
+        "STATISTICS_MEAN": repr(float(mean)),
+        "STATISTICS_STDDEV": repr(float(std)),
         VALID_PERCENT_KEY: repr(100.0 * kept / total if total else 0.0),
     }
 
@@ -396,7 +417,7 @@ def _verify_cog(
 
 def write_cog(
     path: Path,
-    array,
+    array=None,
     *,
     bbox,
     pixels_per_degree: int,
@@ -405,12 +426,19 @@ def write_cog(
     scale: float | None = None,
     offset: float | None = None,
     descriptions: tuple[str, ...] = (),
+    source_path: Path | None = None,
 ) -> Path:
-    """Write one array as a Portolan-conformant COG.
+    """Write one array, or one finished staging file, as a Portolan COG.
 
     GDAL's COG driver is create-copy only, so this writes a tiled GeoTIFF
     first and copies it. The copy is what builds the overviews and moves the
     header, including the statistics, to the front of the file.
+
+    `source_path` names a staging GeoTIFF that already exists, written window
+    by window from the workers of a composite run and finished with its scale,
+    offset, descriptions, and statistics by `composite.finish_staging`. Then
+    no array is passed and nothing is materialised here: the copy reads the
+    file. The verification afterwards is the same either way.
 
     Not rio-cogeo, which is the usual choice and which the Portolan reference
     tool uses. `cog_translate` drops band tags unless it is called with
@@ -431,28 +459,43 @@ def write_cog(
     if crs != SUPPORTED_CRS:
         msg = f"the degree grid needs {SUPPORTED_CRS}, got {crs}"
         raise ValueError(msg)
+    if (array is None) == (source_path is None):
+        msg = "write_cog takes an array or a source_path, not both and not neither"
+        raise ValueError(msg)
+
+    def copy_to_cog(source: Path) -> None:
+        rasterio.shutil.copy(
+            source,
+            path,
+            driver="COG",
+            blocksize=BLOCK_SIZE,
+            compress=COMPRESSION,
+            predictor=PREDICTOR,
+            overview_resampling=OVERVIEW_RESAMPLING,
+            bigtiff="IF_SAFER",
+            num_threads="ALL_CPUS",
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if source_path is not None:
+        with rasterio.Env(GDAL_PAM_ENABLED="NO"), rasterio.open(source_path) as src:
+            count = src.count
+            check_raster_shape((src.height, src.width), bbox, pixels_per_degree)
+        with rasterio.Env(GDAL_PAM_ENABLED="NO"):
+            copy_to_cog(Path(source_path))
+        _verify_cog(path, count, scale=scale, offset=offset, nodata=nodata)
+        return path
 
     stack = _as_bands(array)
     check_raster_shape(stack.shape[1:], bbox, pixels_per_degree)
     profile = _staging_profile(
         stack, transform_for(bbox, pixels_per_degree), crs, nodata
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=path.parent) as staging_dir:
         staging = Path(staging_dir) / "staging.tif"
         with rasterio.Env(GDAL_PAM_ENABLED="NO"):
             _write_staging(staging, stack, profile, scale, offset, descriptions)
-            rasterio.shutil.copy(
-                staging,
-                path,
-                driver="COG",
-                blocksize=BLOCK_SIZE,
-                compress=COMPRESSION,
-                predictor=PREDICTOR,
-                overview_resampling=OVERVIEW_RESAMPLING,
-                bigtiff="IF_SAFER",
-                num_threads="ALL_CPUS",
-            )
+            copy_to_cog(staging)
     _verify_cog(path, stack.shape[0], scale=scale, offset=offset, nodata=nodata)
     return path
 
@@ -669,6 +712,7 @@ def build_item(
     end: str,
     crs: str,
     mask_rule: dict[str, Any] | None = None,
+    correction_rule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The tile item: one footprint, one acquisition window, two COGs.
 
@@ -679,9 +723,19 @@ def build_item(
 
     The mask lineage is on the item for the same reason. The rules ran over
     this tile's pixels, and a tile masked against a different ASTER GED build
-    says so itself rather than inheriting a collection-wide claim.
+    says so itself rather than inheriting a collection-wide claim. The seam
+    correction joins it there, and for a stronger version of the same reason:
+    it decides what every value means, not which pixels survive.
+
+    The two lineages share one `processing:lineage`. The correction goes first,
+    because it says what the number is and the mask says which pixels survived.
+    Both of the mask's own paragraphs locate themselves against the percentile,
+    so nothing depends on reading them in the order the pipeline ran them.
     """
     lineage = mask_lineage(mask_rule)
+    lineage["processing:lineage"] = " ".join(
+        [correction_lineage(correction_rule), lineage["processing:lineage"]]
+    )
     extensions = [
         FILE_EXTENSION,
         PROJECTION_EXTENSION,
@@ -1020,6 +1074,16 @@ def _collection_readme(
         "Only the first would improve with a wider window. Each item's "
         "`processing:lineage` states the rules that produced its pixels and "
         "names the artifacts they read by checksum.\n\n"
+        "### Two tiles are not always comparable\n\n"
+        "A tile may be built with a WRS seam correction, which shifts every "
+        "scene to its own calendar-month median before the percentile. That "
+        "value answers how hot a surface gets against its own monthly normal. "
+        "An uncorrected tile answers what the hottest observed value was. "
+        "Nothing in either raster separates the two, so differencing a "
+        "corrected tile against an uncorrected one measures the correction "
+        "rather than the ground. Read each item's `processing:lineage` before "
+        "comparing tiles: it states which rule produced the pixels, and names "
+        "the scene set the offsets were fitted over.\n\n"
         "Where ASTER GED caught no clear sky between 2000 and 2008, the USGS "
         "interpolates emissivity from neighbouring cells and retrieves a "
         "temperature anyway, and some of those retrievals fail upward. A pixel "
@@ -1086,6 +1150,14 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
         "calendar month, pooled across every year in the window. The count "
         "saturates at 255. A zero is a real count, not a gap, which is why "
         "the band declares no nodata value.\n\n"
+        "## Comparing two tiles\n\n"
+        "Check each item's `processing:lineage` first. A tile built with the "
+        "WRS seam correction carries a percentile taken against each scene's "
+        "own calendar-month median, and an uncorrected tile carries the "
+        "hottest observed value. The rasters look alike and the numbers answer "
+        "different questions, so a difference between two tiles built under "
+        "different rules measures the rule. The lineage names the rule and the "
+        "scene set the offsets were fitted over.\n\n"
         "## Cross-referencing\n\n"
         "Read `items.parquet` in the collection root to get every item's "
         "metadata in one range request, instead of fetching each item JSON.\n"
@@ -1106,6 +1178,72 @@ _QA_LINEAGE = (
     "out-of-range pixels before the percentile. A pixel with no surviving "
     "observation is nodata."
 )
+
+
+#: What a pixel means with no seam correction applied. Named separately because
+#: it is the claim a consumer makes by default, and because a part written
+#: before `destripe.py` existed carries no `correction_rule` at all.
+_POOLED_LINEAGE = (
+    "No seam correction ran. Each pixel is the pooled 95th percentile of every "
+    "scene that observed it, at each scene's own atmospheric baseline. WRS-2 "
+    "footprint edges may show as steps in the raster, because the set of "
+    "scenes behind a pixel changes across them."
+)
+
+
+def correction_lineage(correction_rule: dict[str, Any] | None) -> str:
+    """What produced each value, for a consumer who cannot see it in the pixels.
+
+    Two composites of the same ground under different corrections are not
+    comparable, and nothing in a raster says which one it is. The de-striped
+    percentile answers "how hot does this surface get against its own monthly
+    normal", where the pooled one answers "what is the hottest value observed
+    here". A reader differencing the two without knowing that reads the
+    correction as climate.
+
+    One run composites one tile under one rule, so the item can state it.
+    Nothing enforces one
+    rule across a collection, which is why this belongs on the item beside the
+    mask lineage rather than in the collection description.
+
+    Returns one paragraph. An absent rule means the pooled percentile, which is
+    itself a claim about the pixels and is stated rather than omitted.
+    """
+    if not correction_rule:
+        return _POOLED_LINEAGE
+
+    sentences = []
+    if correction_rule.get("destripe"):
+        sentences.append(
+            "Scene offsets: each scene was compared against a per-pixel median "
+            "for its own calendar month, pooled across every year in the "
+            "window, and shifted by its bulk deviation. A value is relative to "
+            "that month's normal, not an absolute maximum, and is not "
+            "comparable with a composite built without this step. A scene "
+            f"whose offset exceeded {correction_rule.get('max_offset_c')} C "
+            "was discarded rather than clamped, so qa_count counts the "
+            "evidence behind the percentile rather than what was available."
+        )
+    if correction_rule.get("feather"):
+        paths = ", ".join(str(p) for p in correction_rule.get("paths") or ())
+        share = correction_rule.get("swath_quad_share")
+        sentences.append(
+            "Per-path percentiles: the percentile was taken once per WRS path "
+            f"({paths}) and blended on distance to each swath edge, which "
+            "removes the step where one path's coverage stops. A swath is the "
+            f"ground where at least {share} of a (path, row) quad's scenes "
+            "produced a valid observation. A pixel outside every swath takes "
+            "the pooled percentile of whatever observed it."
+        )
+    if not sentences:
+        return _POOLED_LINEAGE
+
+    window = correction_rule.get("prep_window") or {}
+    fitted = f"Fitted over scene set {correction_rule.get('prep_scene_digest')}"
+    if window.get("start") and window.get("end"):
+        fitted += f", {window['start']} to {window['end']}"
+    sentences.append(f"{fitted}.")
+    return " ".join(sentences)
 
 
 def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
@@ -1179,8 +1317,8 @@ def catalog_provenance(meta: dict[str, Any], *, collection_id: str) -> dict[str,
     missing = [key for key in REQUIRED_META_KEYS if key not in meta]
     if missing:
         msg = (
-            f"part-meta.json states no {', '.join(missing)}; rerun the "
-            f"--shard-slice that wrote it, or merge with --no-catalog"
+            f"the run metadata states no {', '.join(missing)}; rerun the "
+            f"composite that wrote it, or pass --no-catalog"
         )
         raise ValueError(msg)
     return {
@@ -1197,6 +1335,10 @@ def catalog_provenance(meta: dict[str, Any], *, collection_id: str) -> dict[str,
         "lst_scale": LST_SCALE,
         "lst_offset": LST_OFFSET,
         "lst_nodata": LST_NODATA_DN,
+        # The seam correction the pixels were built under, or None for the
+        # pooled percentile. Absent from a part written before `destripe.py`,
+        # and None is the right reading of that: those pixels are pooled.
+        "correction_rule": meta.get("correction_rule"),
     }
 
 
@@ -1211,8 +1353,8 @@ def collection_id_for_window(meta: dict[str, Any]) -> str:
     missing = [key for key in ("start", "end") if key not in meta]
     if missing:
         msg = (
-            f"part-meta.json states no {', '.join(missing)}, so the collection "
-            f"id has no window to carry; rerun the --shard-slice that wrote it, "
+            f"the run metadata states no {', '.join(missing)}, so the collection "
+            f"id has no window to carry; rerun the composite that wrote it, "
             f"or pass --collection-id"
         )
         raise ValueError(msg)
@@ -1220,12 +1362,11 @@ def collection_id_for_window(meta: dict[str, Any]) -> str:
 
 
 def check_catalog_inputs(meta: dict[str, Any]) -> None:
-    """Fail before a long merge rather than after it.
+    """Fail before a long compute rather than after it.
 
-    Every rule the writer enforces is answerable from `part-meta.json` alone.
-    Checking it up front turns an hour of merging followed by a traceback into
-    a message in under a second, and it leaves the `.npy` arrays a merge has
-    already earned alone.
+    Every rule the writer enforces is answerable from the run metadata alone.
+    Checking it up front turns an hour of compute followed by a traceback into
+    a message in under a second.
     """
     provenance = catalog_provenance(meta, collection_id=collection_id_for_window(meta))
     if provenance["crs"] != SUPPORTED_CRS:
@@ -1257,13 +1398,23 @@ def read_items(collection_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def _write_cogs(item_dir: Path, lst, qa, provenance: dict[str, Any]):
-    """Both COGs of one tile, in the item directory that carries them."""
+    """Both COGs of one tile, in the item directory that carries them.
+
+    `lst` and `qa` are arrays, or the paths of finished staging GeoTIFFs a
+    composite run wrote window by window. A path is copied; an array is
+    staged first.
+    """
     bbox = provenance["bbox"]
     ppd = provenance["pixels_per_degree"]
     crs = provenance["crs"]
+
+    def source(value) -> dict[str, Any]:
+        if isinstance(value, str | Path):
+            return {"source_path": Path(value)}
+        return {"array": value}
+
     lst_path = write_cog(
         item_dir / LST_FILENAME,
-        lst,
         bbox=bbox,
         pixels_per_degree=ppd,
         crs=crs,
@@ -1271,14 +1422,15 @@ def _write_cogs(item_dir: Path, lst, qa, provenance: dict[str, Any]):
         scale=LST_SCALE,
         offset=LST_OFFSET,
         descriptions=("95th percentile LST",),
+        **source(lst),
     )
     qa_path = write_cog(
         item_dir / QA_FILENAME,
-        qa,
         bbox=bbox,
         pixels_per_degree=ppd,
         crs=crs,
         descriptions=tuple(MONTH_NAMES),
+        **source(qa),
     )
     return lst_path, qa_path
 
@@ -1406,6 +1558,7 @@ def write_catalog(
         end=provenance["end"],
         crs=crs,
         mask_rule=meta.get("mask_rule"),
+        correction_rule=meta.get("correction_rule"),
     )
     _dump(item_dir / f"{item_id}.json", item)
 

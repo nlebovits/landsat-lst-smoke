@@ -1,0 +1,992 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#   "numpy", "rasterio", "shapely",
+# ]
+# ///
+"""The WRS seam, and the two corrections that remove it.
+
+A composite pixel draws on whichever scenes overlap it. Two things make that
+set change abruptly, and both leave a diagonal seam tracing satellite geometry
+rather than ground.
+
+**Per-scene bias.** Landsat Collection 2 Level 2 surface temperature is
+atmospherically corrected one scene at a time, and the correction rests on
+column water vapour estimates carrying a published error of 1 to 5 K. The error
+applies to the whole scene at once. `nlebovits/landsat-lst` ADR-005 established
+that pooling more years does not cancel it: one year, three and five all
+stripe, because the bias is common to a whole scene. The fix is to compare each
+scene against what that pixel normally does *in that calendar month*, pooled
+across every year in the window, and subtract the scene's bulk deviation. An
+annual reference was tried first and absorbed the seasonal cycle itself,
+cooling the composite from 40.6 C to 29.8 C at a spatial correlation of 0.44.
+The month is what makes the reference safe to subtract.
+
+**Residual tail difference between paths.** The offset is fitted at the median,
+and the product is a P95. On S30W065 one WRS path still runs 2.2 to 4.8 C
+warmer in the upper tail on identical ground at matched observation counts, so
+the pooled percentile steps where that path's coverage stops. Fifteen sampling
+and weighting arms recovered at most 44% of that step. Building one P95 per
+path and cross-fading them on geometry removed 95.8% of it and retained 97.7%
+of spatial variance.
+
+The two corrections are independent. De-striping shifts a scene by one scalar,
+so it cannot change spatial structure at all. Feathering never touches a pixel
+one path reaches.
+
+This module holds the rules. It reads nothing and writes nothing. `tile_prep`
+calls the estimation half once per tile, and `composite.reduce_block` calls
+the application half on every block of the lazy graph. One implementation of
+each rule, the same arrangement as `lst_qa`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from lst_qa import LST_SCALE, LST_VALID_MAX_C, LST_VALID_MIN_C
+
+# --------------------------------------------------------------------------
+# De-striping constants. Calibrated in `nlebovits/landsat-lst` ADR-007 against
+# Pergamino 2021-2025, 390 solar-day scenes. Every one is a screen set on one
+# mid-latitude agricultural AOI, so a humid tropical tile is owed its own
+# calibration before a global build.
+# --------------------------------------------------------------------------
+
+#: Discard a scene whose absolute offset exceeds this. Measured: the offset
+#: distribution is not a bell curve. It is a tight core holding 82.7% of scenes
+#: at a standard deviation of 5.71 C, plus a one-sided cold tail. 63 scenes fall
+#: below -15 C and exactly one rises above it, at +15.55, and that asymmetry is
+#: the signature of undetected cloud rather than of correction bias. The cap
+#: discards 21.8% of scenes and sits at about 2.6 core sigma.
+DESTRIPE_MAX_OFFSET_C = 15.0
+
+#: Sparse floor when the offset is estimated on the output grid, in pixels.
+DESTRIPE_MIN_SCENE_PIXELS = 500
+
+#: Sparse floor when the offset is estimated on the prep grid, in prep pixels.
+#: It replaces the native floor rather than scaling into it. A coarse valid
+#: count cannot be converted back: a single valid native pixel read through a
+#: nodata-ignoring average reports as a whole coarse pixel.
+#:
+#: **This number is carried over, not calibrated here, and the two grids are
+#: not the same one.** `nlebovits/landsat-lst` set it on a factor-2 grid over a
+#: 5 degree tile. `tile_prep` estimates on a factor-4 grid over the tile plus a
+#: 1 degree margin, which holds roughly a fifth as many pixels per scene, so 200
+#: screens a different thing here than it did there. It is a placeholder with a
+#: citation that does not apply to it. `scripts` owes a sweep of the rejected
+#: share against this floor on a real tile, the way the cap was swept.
+DESTRIPE_MIN_PREP_SAMPLES = 200
+
+#: Width of one anomaly histogram bin, in Celsius. This is the output encoding
+#: step (`lst_qa.LST_SCALE`), so a median read off the histogram is exact to the
+#: quantisation the product already carries.
+ANOMALY_BIN_C = LST_SCALE
+
+#: The anomaly range, which is exact rather than chosen. Every value reaching
+#: the histogram has passed `lst_qa.in_trusted_range`, so it lies in
+#: [-50, 80] C and a difference of two such values lies in [-130, 130]. No
+#: overflow bin is needed and no value can fall outside.
+ANOMALY_MIN_C = LST_VALID_MIN_C - LST_VALID_MAX_C  # -130.0
+ANOMALY_MAX_C = LST_VALID_MAX_C - LST_VALID_MIN_C  # +130.0
+N_ANOMALY_BINS = int(round((ANOMALY_MAX_C - ANOMALY_MIN_C) / ANOMALY_BIN_C))
+
+# --------------------------------------------------------------------------
+# Feathering constants.
+# --------------------------------------------------------------------------
+
+#: The swath grid, as a divisor of the output grid. At 3600 px/degree this puts
+#: the swath and the cross-fade on a 1/450 degree grid, about 240 m. The ramp is
+#: smooth over tens of kilometres, so nothing in it needs 30 m.
+SWATH_FACTOR = 8
+
+#: A quad's swath is the ground at least this share of its scenes reached. A
+#: union overreaches: one outlying scene extends the swath past where the path
+#: contributes and leaves no edge to ramp toward. Grouping by (path, row) quad
+#: rather than by path is what makes the share mean anything, because a path's
+#: scenes span five rows.
+SWATH_QUAD_SHARE = 0.5
+
+#: Resolution divisor for the distance ramp inside an overlap, on top of the
+#: swath grid. Containment stays exact on the swath grid whatever this is, so
+#: membership and single-path pixels are untouched and only the ratio between
+#: overlapping paths is interpolated. Exact point-to-boundary distance was
+#: measured at 99.8% of the geometry cost in `nlebovits/landsat-lst`, because a
+#: swath boundary carries thousands of vertices and shapely walks them per
+#: point. Set to 1 for the exact ramp.
+WEIGHT_FACTOR = 4
+
+#: Below this many cells on either side, coarsening carries the ramp on too few
+#: cells to be worth the error, so the exact ramp runs instead.
+MIN_COARSE_EDGE = 16
+
+#: Rows per block when measuring point-to-boundary distance. Bounds the shapely
+#: point array, which is the only large allocation in the ramp.
+_ROW_BLOCK = 256
+
+#: The grid every raster here rests on. Written as a string rather than a
+#: `rasterio.crs.CRS`, which rasterio resolves itself and which `ty` cannot: the
+#: module is a compiled extension with no stub to read. `masks.transform_for`
+#: assumes the same geographic grid one level down.
+GRID_CRS = "EPSG:4326"
+
+
+# --------------------------------------------------------------------------
+# The climatology and the offset. `tile_prep` calls these, once per tile.
+# --------------------------------------------------------------------------
+
+
+def month_climatology(celsius, months):
+    """Per-pixel median for each calendar month present, pooled across years.
+
+    Args:
+        celsius: `(n_scenes, ny, nx)` float32, NaN where unusable.
+        months: `(n_scenes,)` int, the calendar month of each scene.
+
+    Returns:
+        `(planes, ref)`. `planes` holds the months observed, ascending. `ref` is
+        `(n_planes, ny, nx)` float32, NaN where a month has no observation.
+
+    A month with no scene gets no plane. Reindexing to twelve and filling would
+    invent a reference, and a scene compared against an invented reference is a
+    scene with an invented offset.
+    """
+    import numpy as np
+
+    months = np.asarray(months)
+    planes = np.unique(months)
+    ref = np.empty((planes.size, *celsius.shape[1:]), dtype="float32")
+    for i, month in enumerate(planes):
+        ref[i] = nan_median(celsius[months == month])
+    return planes, ref
+
+
+def nan_median(values):
+    """`np.nanmedian(values, axis=0)`, bit-identical, in a layout that sorts fast.
+
+    numpy sorts along axis 0 in place, so every pixel's samples sit one whole
+    plane apart. At the prep block size a float32 plane is exactly 1 MiB and
+    every sample of a pixel lands in the same cache set. MEASURED on a
+    `(67, S, S)` float32 stack: `np.sort(axis=0)` takes 0.16 s at S=511 and
+    S=513, and 4.9 s at S=512, a 31x cliff that `tile_prep.DEFAULT_BLOCK`
+    sits on. Twelve such medians made the climatology 56 s of a 66 s prep
+    block.
+
+    This copies the stack into `(pixels, scenes)` one scene at a time, which
+    is a contiguous write per scene, and sorts along the contiguous axis. A
+    transposed `.copy()` is not a substitute: it runs a 67-element strided
+    inner loop and takes 1.8 s for the same bytes. MEASURED at the prep block
+    shape: 55.8 s to 2.1 s for the twelve medians, output identical to numpy
+    to the bit, NaN pattern included. The median rule is numpy's: the middle
+    value for an odd count, the float32 mean of the two middle values for an
+    even count, NaN where nothing is finite.
+
+    Args:
+        values: `(n, ...)` float32 or castable, NaN where unusable.
+
+    Returns:
+        `(...)` float32.
+    """
+    import numpy as np
+
+    values = np.asarray(values, dtype="float32")
+    depth = values.shape[0]
+    shape = values.shape[1:]
+    if depth == 0:
+        return np.full(shape, np.nan, dtype="float32")
+    pixels = int(np.prod(shape))
+    flat = values.reshape(depth, pixels)
+    lane = np.empty((pixels, depth), dtype="float32")
+    for s in range(depth):
+        lane[:, s] = flat[s]
+    lane.sort(axis=-1)  # NaN sorts last
+    n = depth - np.isnan(lane).sum(axis=-1)
+    half = n // 2
+    rows = np.arange(pixels)
+    upper = lane[rows, np.minimum(half, depth - 1)]
+    lower = lane[rows, np.maximum(half - 1, 0)]
+    out = np.where(n % 2 == 1, upper, (lower + upper) * np.float32(0.5))
+    out[n == 0] = np.nan
+    return out.reshape(shape)
+
+
+def accumulate_anomaly(hist, n_valid, celsius, months, planes, ref):
+    """Bin each scene's anomaly against its own month's reference, in place.
+
+    This is what makes the whole estimate one pass over the source. A spatial
+    median does not decompose across blocks, which is why
+    `nlebovits/landsat-lst` splits the estimate into a climatology phase and a
+    second phase that re-reads every scene. A histogram does decompose, and at a
+    bin one output DN wide the median read back off it is exact to the
+    quantisation the product already carries.
+
+    Args:
+        hist: `(n_scenes, N_ANOMALY_BINS)` uint32, accumulated in place.
+        n_valid: `(n_scenes,)` int64, accumulated in place.
+        celsius: this block's stack, `(n_scenes, ny, nx)` float32.
+        months: `(n_scenes,)` int.
+        planes: the months `ref` carries, ascending.
+        ref: `(n_planes, ny, nx)` float32 for this block.
+    """
+    import numpy as np
+
+    plane_of = {int(m): i for i, m in enumerate(planes)}
+    for s in range(celsius.shape[0]):
+        scene = celsius[s]
+        n_valid[s] += int(np.isfinite(scene).sum())
+        anomaly = scene - ref[plane_of[int(months[s])]]
+        finite = np.isfinite(anomaly)
+        if not finite.any():
+            continue
+        idx = np.floor((anomaly[finite] - ANOMALY_MIN_C) / ANOMALY_BIN_C)
+        idx = np.clip(idx, 0, N_ANOMALY_BINS - 1).astype("int64")
+        hist[s] += np.bincount(idx, minlength=N_ANOMALY_BINS).astype("uint32")
+
+
+def offsets_from_histograms(hist):
+    """The median anomaly of each scene, read off its accumulated histogram.
+
+    Returns `(n_scenes,)` float64, NaN for a scene that produced no anomaly.
+
+    The two middle order statistics are averaged, as `numpy.nanmedian` does for
+    an even count, so the result tracks a direct median to within one bin.
+    """
+    import numpy as np
+
+    counts = np.asarray(hist, dtype="int64")
+    total = counts.sum(axis=1)
+    centres = ANOMALY_MIN_C + (np.arange(N_ANOMALY_BINS) + 0.5) * ANOMALY_BIN_C
+    out = np.full(counts.shape[0], np.nan, dtype="float64")
+    for s in range(counts.shape[0]):
+        n = int(total[s])
+        if n == 0:
+            continue
+        cumulative = np.cumsum(counts[s])
+        lower = int(np.searchsorted(cumulative, (n - 1) // 2 + 1))
+        upper = int(np.searchsorted(cumulative, n // 2 + 1))
+        out[s] = 0.5 * (centres[lower] + centres[upper])
+    return out
+
+
+def keep_mask(offset, n_valid, *, floor, max_offset_c=DESTRIPE_MAX_OFFSET_C):
+    """Which scenes survive. One rule, so nothing can apply a second one.
+
+    Three conditions: the offset exists, it rests on enough pixels to believe,
+    and it is small enough to be a correction rather than a verdict about the
+    scene.
+
+    Rejected scenes are dropped from the stack, never clamped and never passed
+    through at zero. Bounding a -73 C offset to -15 C leaves about 58 C of
+    uncorrected bias in a scene that is almost certainly cloud-contaminated, and
+    then presents it as corrected. An uncorrected scene inside a corrected stack
+    is the artifact the correction exists to remove.
+    """
+    import numpy as np
+
+    offset = np.asarray(offset, dtype="float64")
+    return (
+        np.isfinite(offset)
+        & (np.asarray(n_valid) >= floor)
+        & (np.abs(offset) <= max_offset_c)
+    )
+
+
+def offset_diagnostics(offset, keep) -> dict:
+    """What the offsets looked like and what rejection removed.
+
+    The rejected share is the number to watch per tile. The cap was calibrated
+    on mid-latitude cropland, and a tile departing sharply from the 21.8% seen
+    there is saying something about itself.
+    """
+    import numpy as np
+
+    values = np.asarray(offset, dtype="float64")
+    finite = values[np.isfinite(values)]
+    kept = np.asarray(keep, dtype=bool)
+    out = {
+        "n_scenes": int(values.size),
+        "n_kept": int(kept.sum()),
+        "rejected_frac": round(float(1.0 - kept.mean()), 4) if kept.size else 1.0,
+    }
+    if finite.size:
+        p1, p50, p99 = (float(v) for v in np.percentile(finite, [1, 50, 99]))
+        out |= {
+            "std": round(float(finite.std()), 2),
+            "min": round(float(finite.min()), 2),
+            "max": round(float(finite.max()), 2),
+            "p1": round(p1, 2),
+            "p50": round(p50, 2),
+            "p99": round(p99, 2),
+        }
+    return out
+
+
+# --------------------------------------------------------------------------
+# The swath. `tile_prep` builds it from where each path actually contributed a
+# valid pixel, rather than from a footprint polygon.
+#
+# The sibling reads Earth Search, whose item geometry is the imaged
+# parallelogram, and rasterises that. This repository reads the USGS bulk
+# metadata, whose corner columns describe the product bounding *rectangle*.
+# FINDINGS.md measures the gap at about 46% of the area, and no column in the
+# bulk file carries the imaged footprint. The seam sits at the imaged edge, so
+# rasterising the ring would put the ramp tens of kilometres off the seam it is
+# supposed to remove. Counting valid observations answers the question the
+# median footprint answers -- what ground did at least half this quad's scenes
+# reach -- and answers it from the data rather than from a polygon.
+# --------------------------------------------------------------------------
+
+
+def swath_masks(quad_count, quad_scenes):
+    """One boolean swath per path, from per-quad valid-observation counts.
+
+    Args:
+        quad_count: `{(path, row): (h, w) uint16}`, how many of that quad's
+            scenes reached each swath cell.
+        quad_scenes: `{(path, row): int}`, how many scenes the quad has.
+
+    Returns:
+        `{path: (h, w) bool}`, with a path omitted when no cell retains it.
+    """
+    import numpy as np
+
+    by_path: dict[str, np.ndarray] = {}
+    for quad, count in sorted(quad_count.items()):
+        path, _row = quad
+        keep = count >= max(quad_scenes[quad] * SWATH_QUAD_SHARE, 1.0)
+        if not keep.any():
+            continue
+        if path in by_path:
+            by_path[path] |= keep
+        else:
+            by_path[path] = keep
+    return {path: mask for path, mask in by_path.items() if mask.any()}
+
+
+def _boundaries(masks, paths, transform, shape_hw):
+    """Each path's swath boundary, with the grid's own edge taken out of it.
+
+    A swath derived from data is clipped wherever the grid ends, so the grid
+    edge becomes part of the polygon boundary. That edge is not an acquisition
+    edge, and leaving it in makes the ramp fall toward the corner of the raster
+    instead of toward the place the path stops contributing. Two neighbouring
+    tiles would then disagree along their shared border, which trades the WRS
+    seam for a seam on the tile grid.
+
+    `nlebovits/landsat-lst` reaches the same result by rasterising each swath
+    over the footprints' own bounds rather than the tile's. This repository
+    reads coverage off the data, so there is no wider extent to rasterise over
+    and the edge comes out of the linework instead.
+
+    Returns one geometry per path, or None for a path with no edge left. A path
+    filling the grid has nothing to ramp toward, and saying so is better than
+    ramping toward the raster.
+    """
+    from rasterio.features import shapes
+    from shapely.geometry import box, shape
+    from shapely.ops import unary_union
+
+    height, width = shape_hw
+    step_x, step_y = abs(transform.a), abs(transform.e)
+    west = transform.c
+    north = transform.f
+    interior = box(
+        west + step_x,
+        north - step_y * height + step_y,
+        west + step_x * width - step_x,
+        north - step_y,
+    )
+
+    out = []
+    for path in paths:
+        mask = masks[path]
+        polygons = [
+            shape(geom)
+            for geom, value in shapes(
+                mask.astype("uint8"), mask=mask, transform=transform
+            )
+            if value == 1
+        ]
+        edge = unary_union(polygons).boundary.intersection(interior)
+        out.append(None if edge.is_empty else edge)
+    return out
+
+
+def _exact_distances(masks, paths, transform, shape_hw, inside, multi):
+    """Point-to-boundary distance on this grid, only where it can matter.
+
+    A pixel one path reaches needs no distance at all, and only the covered
+    pixels of a multi-path region are handed to shapely. That is the difference
+    between seconds and minutes: on a production band `nlebovits/landsat-lst`
+    measured containment at 0.04 s and exact distance at 152 to 180 s.
+
+    A path with no edge inside the grid is held at the grid diagonal, so it
+    dominates the blend uniformly and the paths that do have an edge ramp
+    against it. No edge means no ramp, and a flat share is what that says.
+    """
+    import numpy as np
+    import shapely
+
+    height, width = shape_hw
+    n = len(paths)
+    dist = np.zeros((n, height, width), dtype="float32")
+    boundaries = _boundaries(masks, paths, transform, shape_hw)
+    span = float(np.hypot(abs(transform.a) * width, abs(transform.e) * height))
+    lon = transform.c + transform.a * (np.arange(width, dtype="float64") + 0.5)
+    for y0 in range(0, height, _ROW_BLOCK):
+        y1 = min(y0 + _ROW_BLOCK, height)
+        block = multi[y0:y1]
+        if not block.any():
+            continue
+        lat = transform.f + transform.e * (np.arange(y0, y1, dtype="float64") + 0.5)
+        yy, xx = np.nonzero(block)
+        points = shapely.points(lon[xx], lat[yy])
+        for j in range(n):
+            sel = inside[j, y0:y1][yy, xx]
+            if not sel.any():
+                continue
+            d = np.zeros(points.size, dtype="float64")
+            if boundaries[j] is None:
+                d[sel] = span
+            else:
+                d[sel] = shapely.distance(points[sel], boundaries[j])
+            target = dist[j, y0:y1]
+            target[yy, xx] = d.astype("float32")
+    return dist
+
+
+def _block_any(mask, factor):
+    """Coarsen a mask by "any cell inside", which grows it by up to one cell.
+
+    Subsampling would shrink it instead, and a shrunken coarse mask leaves a
+    band one to `factor` cells wide where the exact containment says two paths
+    overlap and the coarse ramp is undefined for both. Every pixel in that band
+    then falls to the equal-share tie-break, which puts a 0.5 line along the
+    swath edge. That line is the artifact this whole module exists to remove.
+
+    Growing instead means the distance is measured to a boundary up to one
+    coarse cell outside the true one, and `shapely.distance` is unsigned, so
+    the value just outside a boundary is small and positive exactly as it is
+    just inside. Interpolation carries it to zero at the edge either way.
+
+    The last two axes are the grid, and anything in front of them is carried
+    through untouched. `tile_prep._quad_coverage` used to call this once per
+    scene, which is `factor**2` strided reads and a padded copy per scene;
+    passing the whole `(scenes, ny, nx)` stack takes the same OR over the same
+    cells in one pass. MEASURED at (800, 512, 512) and factor 2: 1.38 s to
+    0.09 s, byte-identical, at a peak of 55 MiB against 4 MiB.
+
+    The `factor**2` shifted slices replace the four-dimensional reshape. The
+    reshape needs the padded copy even when the grid divides; the slices only
+    need it when it does not.
+    """
+    import numpy as np
+
+    mask = np.asarray(mask, dtype=bool)
+    height, width = mask.shape[-2:]
+    ch = -(-height // factor)
+    cw = -(-width // factor)
+    if height != ch * factor or width != cw * factor:
+        padded = np.zeros((*mask.shape[:-2], ch * factor, cw * factor), dtype=bool)
+        padded[..., :height, :width] = mask
+        mask = padded
+    out = mask[..., 0::factor, 0::factor].copy()
+    for dy in range(factor):
+        for dx in range(factor):
+            if dy or dx:
+                out |= mask[..., dy::factor, dx::factor]
+    return out
+
+
+def _coarse_distances(masks, paths, transform, shape_hw, factor):
+    """The ramp measured on a grid `factor` cells coarser, resampled back.
+
+    The ramp is smooth over tens of kilometres, so a coarser grid carries it to
+    well under 1% of a weight while cutting the point count by `factor**2`.
+    """
+    import numpy as np
+    from affine import Affine
+    from rasterio.enums import Resampling
+    from rasterio.warp import reproject
+
+    height, width = shape_hw
+    coarse = Affine(
+        transform.a * factor,
+        transform.b,
+        transform.c,
+        transform.d,
+        transform.e * factor,
+        transform.f,
+    )
+
+    c_masks = {p: _block_any(masks[p], factor) for p in paths}
+    c_inside = np.stack([c_masks[p] for p in paths])
+    ch, cw = c_inside.shape[1], c_inside.shape[2]
+    c_multi = c_inside.sum(axis=0) >= 2
+    c_dist = _exact_distances(c_masks, paths, coarse, (ch, cw), c_inside, c_multi)
+
+    out = np.zeros((len(paths), height, width), dtype="float32")
+    for j in range(len(paths)):
+        reproject(
+            source=c_dist[j],
+            destination=out[j],
+            src_transform=coarse,
+            src_crs=GRID_CRS,
+            dst_transform=transform,
+            dst_crs=GRID_CRS,
+            resampling=Resampling.bilinear,
+        )
+    return out
+
+
+def _blend(weight, dist, inside, multi, k):
+    """Turn distances into shares in place: `w_j = d_j / sum_i d_i`.
+
+    Renormalised on the containment masks, so an interpolated ramp still sums to
+    one and still gives a single-path pixel exactly its own weight. On a
+    boundary every distance is zero; equal shares are the answer there rather
+    than a division by zero, and the pixel is a measure-zero line either way.
+    """
+    import numpy as np
+
+    n = weight.shape[0]
+    total = dist.sum(axis=0)
+    safe = np.where(total > 0, total, 1.0)
+    for j in range(n):
+        share = np.where(total > 0, dist[j] / safe, 0.0)
+        weight[j] = np.where(multi & inside[j], share.astype("float32"), weight[j])
+    wsum = weight.sum(axis=0)
+    fix = multi & (wsum > 0)
+    safe_sum = np.where(wsum > 0, wsum, 1.0)
+    for j in range(n):
+        weight[j] = np.where(fix, weight[j] / safe_sum, weight[j])
+    degenerate = multi & (wsum <= 0)
+    if degenerate.any():
+        for j in range(n):
+            sel = degenerate & inside[j]
+            weight[j][sel] = 1.0 / k[sel]
+
+
+def path_weights(masks, transform, *, factor=WEIGHT_FACTOR):
+    """Cross-fade weights for `masks` on their own grid.
+
+    Inside a pixel's covering set the weight is its distance to its own swath
+    boundary over the sum of those distances, `w_j = d_j / sum_i d_i`. One
+    covering path gives exactly 1, so a single-path pixel is untouched. Two give
+    the linear cross-fade that reaches 0 at one edge and 1 at the other. Three
+    or more stay continuous, which matters because 5.4% of S30W065 is reached by
+    three.
+
+    Returns:
+        `(paths, weight, inside)`. `paths` is ascending, and that order is
+        canonical: the weighted sum downstream runs in a fixed sequence, so
+        permuting the input cannot move a floating-point result. `weight` is
+        `(n_paths, h, w)` float32 summing to 1 where any path covers and 0
+        elsewhere. `inside` is `(n_paths, h, w)` bool.
+    """
+    import numpy as np
+
+    paths = tuple(sorted(masks))
+    n = len(paths)
+    if n == 0:
+        return (), np.zeros((0, 0, 0), "float32"), np.zeros((0, 0, 0), bool)
+
+    inside = np.stack([masks[p] for p in paths]).astype(bool)
+    height, width = inside.shape[1], inside.shape[2]
+    k = inside.sum(axis=0).astype("uint8")
+    weight = np.zeros((n, height, width), dtype="float32")
+
+    single = k == 1
+    if single.any():
+        for j in range(n):
+            weight[j][single & inside[j]] = 1.0
+
+    multi = k >= 2
+    if multi.any():
+        coarse_enough = (
+            factor > 1 and min(height // factor, width // factor) >= MIN_COARSE_EDGE
+        )
+        dist = (
+            _coarse_distances(masks, paths, transform, (height, width), factor)
+            if coarse_enough
+            else _exact_distances(
+                masks, paths, transform, (height, width), inside, multi
+            )
+        )
+        _blend(weight, dist, inside, multi, k)
+
+    return paths, weight, inside
+
+
+# --------------------------------------------------------------------------
+# Joining a loaded stack back to its scenes.
+#
+# `odc.stac` sorts the time axis by acquisition datetime, which is not the order
+# the item list arrives in, and it drops a step whose scenes miss the window
+# entirely. `tests/test_load_parity.py` pins the sort. So every per-scene
+# quantity joins on the time coordinate and never on position. The sibling paid
+# for this once: labels carried positionally against a stack that de-striping
+# had thinned from 1,031 steps to 912 killed all 35 composite shards with an
+# `IndexError`.
+# --------------------------------------------------------------------------
+
+
+def path_of(item) -> str:
+    """The WRS path of one item, kept as a string so zero padding survives."""
+    properties = item["properties"] if isinstance(item, dict) else item.properties
+    return str(properties["landsat:wrs_path"])
+
+
+def quad_of(item) -> tuple[str, str]:
+    """The `(path, row)` quad of one item."""
+    properties = item["properties"] if isinstance(item, dict) else item.properties
+    return (str(properties["landsat:wrs_path"]), str(properties["landsat:wrs_row"]))
+
+
+def scene_id_of(item) -> str:
+    properties = item["properties"] if isinstance(item, dict) else item.properties
+    return str(properties["landsat:scene_id"])
+
+
+def timestamp_of(item):
+    """One item's acquisition time, as the nanosecond stamp odc.stac loads."""
+    import datetime as dt
+
+    import numpy as np
+
+    properties = item["properties"] if isinstance(item, dict) else item.properties
+    text = str(properties["datetime"]).replace("Z", "+00:00")
+    parsed = dt.datetime.fromisoformat(text).astimezone(dt.UTC).replace(tzinfo=None)
+    return np.datetime64(parsed, "ns")
+
+
+def _by_timestamp(items, value_of, what: str) -> dict:
+    """Map each acquisition stamp to one value, refusing to guess on a clash.
+
+    Two scenes sharing a stamp is physically possible only across platforms, and
+    two of those carrying different values is a case nothing here can resolve.
+    Raising names it instead of averaging it away.
+    """
+    out: dict = {}
+    for item in items:
+        stamp = timestamp_of(item)
+        value = value_of(item)
+        if out.setdefault(stamp, value) != value:
+            msg = (
+                f"two scenes share the acquisition stamp {stamp} and disagree "
+                f"about {what} ({out[stamp]!r} against {value!r}). The time axis "
+                f"cannot carry a per-scene {what}. Run with --no-destripe "
+                f"--no-feather to composite pooled."
+            )
+            raise ValueError(msg)
+    return out
+
+
+def align_to_time(items, times, *, value_of, what: str, dtype):
+    """One per-scene value for each step of a loaded stack, joined on time.
+
+    Raises:
+        ValueError: if the stack carries a step no item accounts for. That is a
+            defect in the item list this shard was handed, not something to fill
+            in with a default.
+    """
+    import numpy as np
+
+    table = _by_timestamp(items, value_of, what)
+    loaded = np.asarray(times).astype("datetime64[ns]")
+    missing = [str(t) for t in loaded if t not in table]
+    if missing:
+        msg = (
+            f"the loaded stack carries {len(missing)} time steps no item "
+            f"accounts for, first {missing[0]}. The item list and the stack "
+            f"come from different searches."
+        )
+        raise ValueError(msg)
+
+    values = [table[t] for t in loaded]
+    if dtype is not object:
+        return np.array(values, dtype=dtype)
+    # A `(path, row)` quad is a tuple, and `np.array` of uniform tuples builds a
+    # two-dimensional array whose rows are arrays. Filling one cell at a time is
+    # what keeps a quad a hashable pair.
+    out = np.empty(len(values), dtype=object)
+    for i, value in enumerate(values):
+        out[i] = value
+    return out
+
+
+# --------------------------------------------------------------------------
+# Applying it. `composite.reduce_block` calls these on one block at a time.
+# --------------------------------------------------------------------------
+
+
+def subtract_offsets(celsius, offset):
+    """Remove each scene's bias in place, and do nothing else to it.
+
+    The same constant applies to every pixel of a scene, so this shifts that
+    scene's baseline and nothing more. It does not alter within-scene contrast,
+    create or erase a hot spot, sharpen or blur a feature, or move any value
+    relative to its neighbour.
+    """
+    import numpy as np
+
+    celsius -= np.asarray(offset, dtype="float32")[:, None, None]
+    return celsius
+
+
+def apply_to_stack(celsius, valid, items, times, correction):
+    """Reject, de-bias, and label one loaded stack in place.
+
+    Args:
+        celsius: `(n_steps, ny, nx)` float32 from `lst_qa.masked_celsius`.
+        valid: the boolean mask that produced it. The monthly counts come from
+            it, so a rejected scene has to leave it too. `qa_count` then says
+            what evidence is behind the P95 rather than what was available.
+        items: this shard's items, in the order `correction` runs parallel to.
+        times: the loaded time axis.
+        correction: the payload `shard_correction` built.
+
+    Returns:
+        `(labels, n_rejected)`. `labels` carries each step's WRS path, or None
+        for a step whose scene was rejected, which matches no path and so enters
+        no reduction.
+    """
+    import numpy as np
+
+    index_of = {scene_id_of(item): i for i, item in enumerate(items)}
+    position = align_to_time(
+        items,
+        times,
+        value_of=lambda item: index_of[scene_id_of(item)],
+        what="scene index",
+        dtype="int64",
+    )
+    labels = align_to_time(
+        items, times, value_of=path_of, what="WRS path", dtype=object
+    )
+    keep = np.asarray(correction["keep"], dtype=bool)[position]
+    offset = np.asarray(correction["offset"], dtype="float64")[position]
+
+    rejected = ~keep
+    if rejected.any():
+        celsius[rejected] = np.nan
+        valid[rejected] = False
+        labels[rejected] = None
+    subtract_offsets(celsius, np.where(keep, offset, 0.0))
+    return labels, int(rejected.sum())
+
+
+def feathered_percentile(celsius, path_of_scene, paths, weight, q=95.0):
+    """One percentile per WRS path, cross-faded on `weight`.
+
+    The blend happens in value space, between per-path estimates. Pooling the
+    samples and taking one weighted percentile is a different operation, and it
+    is the operation that produces the step: a pooled percentile already mixes
+    the two paths' distributions, which is why it jumps where one path's
+    coverage stops.
+
+    A path covering a pixel but observing nothing there drops out of that
+    pixel's blend and the remaining paths renormalise, so a thin path cannot
+    pull a value toward nodata.
+
+    A pixel no swath covers falls back to the pooled percentile of whatever
+    observed it. A swath is the ground at least `SWATH_QUAD_SHARE` of a quad's
+    scenes reached, so a pixel one path reaches on a third of its passes lies
+    outside every swath and still carries real observations. Returning NaN
+    there would discard them while `qa_count` went on counting them, and the
+    tiles that lose the most would be the cloudy ones that have the least.
+
+    The fallback is the blend, not an exception to it. Where no swath covers, no
+    path has an opinion about the ratio, so `w_j = d_j / sum_i d_i` degenerates
+    to the unweighted percentile. It meets the feathered value continuously at
+    the swath edge, because the scenes observing a pixel just outside path A's
+    swath are almost all A's.
+
+    Args:
+        celsius: `(n_scenes, ny, nx)` float32, already de-biased and masked.
+        path_of_scene: `(n_scenes,)` path labels, aligned to `celsius`.
+        paths: the path labels `weight` carries, in its own order.
+        weight: `(n_paths, ny, nx)` float32 on this shard's grid.
+
+    Returns:
+        `(field, pooled)`. `field` is `(ny, nx)` float32, NaN only where
+        nothing was observed. `pooled` is `(ny, nx)` bool, True where the
+        pixel took the fallback, which is how much of this block the
+        cross-fade could not describe. Callers that want the count sum it.
+    """
+    import numpy as np
+
+    labels = np.asarray(path_of_scene)
+    shape_hw = celsius.shape[1:]
+    numerator = np.zeros(shape_hw, dtype="float32")
+    denominator = np.zeros(shape_hw, dtype="float32")
+
+    for j, path in enumerate(paths):
+        sel = labels == path
+        if not sel.any():
+            continue
+        subset = celsius[sel]
+        present = np.isfinite(subset).any(axis=0)
+        if not present.any():
+            continue
+        with np.errstate(all="ignore"):
+            estimate = nan_percentile(subset, q)
+        effective = np.where(present, weight[j], np.float32(0.0))
+        numerator += np.where(present, estimate, np.float32(0.0)) * effective
+        denominator += effective
+
+    covered = denominator > 0
+    safe = np.where(covered, denominator, np.float32(1.0))
+    out = np.where(covered, numerator / safe, np.float32(np.nan)).astype("float32")
+
+    observed = np.isfinite(celsius).any(axis=0)
+    pooled = observed & ~covered
+    if pooled.any():
+        with np.errstate(all="ignore"):
+            # Reduces only the pixels it rescues, so the cost tracks the loss
+            # it prevents.
+            out[pooled] = nan_percentile(celsius[:, pooled], q)
+    return out, pooled
+
+
+def scene_digest(scene_ids, window: dict) -> str:
+    """A fingerprint of the scene set and the window an offset was fitted over.
+
+    Two prep files built from different scene lists under identical settings are
+    otherwise indistinguishable, and a composite built against the wrong one
+    finishes and looks ordinary. `nlebovits/landsat-lst` reaches the same place
+    by hashing the scene ids into its cache key. Its cache is gone from this
+    port and this is what replaces the protection the key was giving.
+
+    Scene ids are sorted because a catalogue returns them in no fixed order.
+    """
+    import hashlib
+
+    material = "\n".join(
+        [
+            *(f"{key}={window[key]}" for key in sorted(window)),
+            f"lst_valid_min={LST_VALID_MIN_C}",
+            f"lst_valid_max={LST_VALID_MAX_C}",
+            *sorted(str(s) for s in scene_ids),
+        ]
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class Prep:
+    """What `tile_prep` measured for one tile, as a slice reads it back.
+
+    `weight` and `inside` live on the swath grid of the padded prep bbox, which
+    is wider than the tile. A shard resamples its own window out of them.
+    """
+
+    tile: str
+    bbox: tuple[float, float, float, float]
+    pixels_per_degree: int
+    swath_factor: int
+    paths: tuple[str, ...]
+    weight: object
+    inside: object
+    offset: dict[str, float]
+    n_valid: dict[str, int]
+    meta: dict
+
+    @property
+    def digest(self) -> str:
+        return str(self.meta.get("scene_digest", ""))
+
+    @property
+    def window(self) -> dict:
+        return dict(self.meta.get("window", {}))
+
+    @property
+    def inventory(self) -> dict:
+        return dict(self.meta.get("inventory", {}))
+
+
+def load_prep(path) -> Prep:
+    """Read a `tile_prep` artifact. Both files, or neither.
+
+    The offsets are read; the rejection is not. `tile_prep` reports a rejected
+    share under the cap it was given, and the cap that decides a run is applied
+    here, so sweeping it costs one read of this file rather than another pass
+    over the tile.
+    """
+    import json
+    from pathlib import Path
+
+    import numpy as np
+
+    path = Path(path)
+    directory = path if path.is_dir() else path.parent
+    meta = json.loads((directory / "tile-prep.json").read_text())
+    payload = np.load(directory / "tile-prep.npz", allow_pickle=False)
+    ids = [str(s) for s in payload["scene_ids"]]
+    return Prep(
+        tile=meta["tile"],
+        bbox=tuple(meta["bbox"]),
+        pixels_per_degree=int(meta["pixels_per_degree"]),
+        swath_factor=int(meta["swath_factor"]),
+        paths=tuple(str(p) for p in payload["paths"]),
+        weight=payload["weight"],
+        inside=payload["inside"],
+        offset=dict(zip(ids, payload["offset"].tolist(), strict=True)),
+        n_valid=dict(zip(ids, payload["n_valid"].tolist(), strict=True)),
+        meta=meta,
+    )
+
+
+def prep_transform(prep: Prep):
+    """The affine of the swath grid `prep.weight` rests on."""
+    from masks import transform_for
+
+    return transform_for(prep.bbox, prep.pixels_per_degree // prep.swath_factor)
+
+
+def nan_percentile(values, q: float = 95.0):
+    """`np.nanpercentile(values, q, axis=0)` with numpy's `linear` rule, vectorised.
+
+    numpy's NaN-aware percentile is `apply_along_axis`, a Python call per
+    pixel. MEASURED on a 360 px block: about 3 s at any depth, 24 microseconds
+    a pixel, before any arithmetic. The rule itself is one sort and two
+    gathers: per pixel, order the finite values, take position `q/100 * (n-1)`,
+    and interpolate between its two neighbours. Done along axis 0 for the
+    whole block at once it is 5x faster at 800 scenes and 65x at 40, with the
+    same NaN pattern and a maximum difference of 4e-6 C from float32 rounding
+    in the interpolation, three orders of magnitude under the encoding step.
+
+    Works on `(n, ...)` of any trailing shape. A pixel with no finite value is
+    NaN. The sort copies the block once, which is the same copy numpy's
+    partition made.
+    """
+    import numpy as np
+
+    values = np.asarray(values, dtype="float32")
+    if values.shape[0] == 0:
+        # A block no scene reaches. numpy answers NaN here too.
+        return np.full(values.shape[1:], np.nan, dtype="float32")
+    n = np.isfinite(values).sum(axis=0)
+    ordered = np.sort(values, axis=0)  # NaN sorts last
+    last = values.shape[0] - 1
+    position = (q / 100.0) * (n - 1).astype("float64")
+    lower = np.clip(np.floor(position).astype("int64"), 0, max(last, 0))
+    upper = np.clip(np.minimum(lower + 1, np.maximum(n - 1, 0)), 0, max(last, 0))
+    fraction = (position - lower).astype("float32")
+    below = np.take_along_axis(ordered, lower[None], axis=0)[0]
+    above = np.take_along_axis(ordered, upper[None], axis=0)[0]
+    out = below + (above - below) * fraction
+    out[n == 0] = np.nan
+    return out.astype("float32")
+
+
+def pooled_percentile(celsius, q=95.0):
+    """The composite this repository built before feathering, for comparison.
+
+    A second reduction over the same block, so `--emit-pooled` costs one more
+    percentile per block and no more reads.
+    """
+    import numpy as np
+
+    with np.errstate(all="ignore"):
+        return nan_percentile(celsius, q)

@@ -53,7 +53,7 @@ RESOLUTION = 1.0 / 3600
 
 
 def _load(item_dicts, bbox):
-    """Load a scene stack the way `process_shard` does."""
+    """Load a scene stack the way the composite's block reader does."""
     import pystac
     from odc.stac import stac_load
 
