@@ -29,6 +29,20 @@ made from them.
         chunk^2 x n_scenes  x 4 B   the two uint16 bands dask holds
       + chunk^2 x n_present x 13 B  the decoded stack and its reduction
     360 px, 4,776 scenes, 820 present: 2.5 GB + 1.4 GB = 3.9 GB
+
+That graph's one remaining cost scales with the tile's time axis rather than
+with what a block reads. `odc.stac.load` puts two open tasks per item into it
+whatever the block count, and hands every band-load task all of them, so the
+driver's build MEASURED 15.5 s at 1,000 items and 60.5 s at 4,776 on the
+64-worker 8x8 window run, serial, 19% of the 82 s wall. `build_block_plan`
+carries the same information as a tuple of indices per block, from the
+boolean matmul `block_depths` already runs, and `submit_blocks` sends one
+task per block at the workers with only that block's scenes and vectors
+aboard. MEASURED on the same shape and the real inventory footprints: the
+plan, the vectors, and every block's subset together take 9 ms at 1,000 items
+and 27 ms at 4,776, against 9.6 s and 62.9 s for `build_graph` on this
+laptop. `--engine fused` selects that path; `--engine graph` is the default
+and stays the tested one.
 """
 
 from __future__ import annotations
@@ -36,11 +50,14 @@ from __future__ import annotations
 import fcntl
 import time
 import warnings
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 import destripe
+import observe
 from lst_qa import (
     LST_NODATA_DN,
     encode_celsius,
@@ -96,23 +113,29 @@ def raster_shape(bbox, pixels_per_degree: int) -> tuple[int, int]:
     )
 
 
-def block_depths(bbox, pixels_per_degree: int, chunk: int, item_bboxes):
-    """How many scenes intersect each block, as a `(rows, cols)` array.
+def block_edges(height: int, width: int, chunk: int):
+    """The pixel edges of the block grid, `(y_edges, x_edges)`.
 
-    The blocks are the dask chunks, anchored the way the raster is. The count
-    feeds the memory model and the summary; nothing else reads it.
+    The blocks are the dask chunks, anchored the way the raster is, so a tile
+    whose edge is not a multiple of `chunk` ends in a partial block rather
+    than an overhanging one.
     """
-    w, s, e, n = bbox
-    height, width = raster_shape(bbox, pixels_per_degree)
-    res = 1.0 / pixels_per_degree
     y_edges = np.arange(0, height + chunk, chunk).clip(max=height)
     x_edges = np.arange(0, width + chunk, chunk).clip(max=width)
-    norths = n - y_edges[:-1] * res
-    souths = n - y_edges[1:] * res
-    wests = w + x_edges[:-1] * res
-    easts = w + x_edges[1:] * res
-    if not item_bboxes:
-        return np.zeros((len(norths), len(wests)), dtype="int64")
+    return y_edges, x_edges
+
+
+def _overlap_masks(norths, souths, wests, easts, item_bboxes):
+    """Which scenes reach each block row and each block column.
+
+    Strict overlap in degrees, separably: a scene reaches a block when it
+    reaches the block's row band and its column band. `block_depths` sums the
+    product and `build_block_plan` reads the indices out of it, so both carry
+    one overlap rule between them.
+
+    Returns:
+        `(rows, cols)` boolean, `(n_block_rows, n)` and `(n_block_cols, n)`.
+    """
     boxes = np.asarray(item_bboxes, dtype="float64")  # (n, 4) w s e n
     rows = (boxes[:, 1][None, :] < norths[:, None]) & (
         boxes[:, 3][None, :] > souths[:, None]
@@ -120,6 +143,27 @@ def block_depths(bbox, pixels_per_degree: int, chunk: int, item_bboxes):
     cols = (boxes[:, 0][None, :] < easts[:, None]) & (
         boxes[:, 2][None, :] > wests[:, None]
     )
+    return rows, cols
+
+
+def block_depths(bbox, pixels_per_degree: int, chunk: int, item_bboxes):
+    """How many scenes intersect each block, as a `(rows, cols)` array.
+
+    The blocks are the dask chunks, anchored the way the raster is. The count
+    feeds the memory model, the summary, and `build_block_plan`, which returns
+    the indices behind these counts.
+    """
+    w, s, e, n = bbox
+    height, width = raster_shape(bbox, pixels_per_degree)
+    res = 1.0 / pixels_per_degree
+    y_edges, x_edges = block_edges(height, width, chunk)
+    norths = n - y_edges[:-1] * res
+    souths = n - y_edges[1:] * res
+    wests = w + x_edges[:-1] * res
+    easts = w + x_edges[1:] * res
+    if not len(item_bboxes):
+        return np.zeros((len(norths), len(wests)), dtype="int64")
+    rows, cols = _overlap_masks(norths, souths, wests, easts, item_bboxes)
     return (rows.astype("int64") @ cols.astype("int64").T).astype("int64")
 
 
@@ -158,6 +202,266 @@ def memory_guard(chunk, n_scenes, depths, slots, *, total_bytes=None) -> float:
         f"Use a smaller --chunk, fewer --workers, or pass --force."
     )
     raise SystemExit(msg)
+
+
+# --------------------------------------------------------------------------
+# The block plan. One block, its grid, and the scenes that reach it.
+#
+# The lazy graph pays for the tile's whole time axis twice over: `odc.stac`
+# builds two `open` tasks per item whatever the block count, and every
+# band-load task takes every open handle as a dependency, so the driver's
+# graph build ran 15.5 s at 1,000 items and 60.5 s at 4,776 on the 64-worker
+# 8x8 window run, MEASURED, serial, 19% of the 82 s wall. A plan carries the
+# same information as an integer per block: which scenes that block has to
+# read. `block_depths` already computes the intersection as one boolean
+# matmul, 9 ms for 2,500 blocks against 4,776 scenes, MEASURED; this reads the
+# indices out of the same masks.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BlockSpec:
+    """One block of the tile grid and the scenes that reach it.
+
+    `yslice` and `xslice` are the block's pixel window into the full raster,
+    `geobox` the same window as a grid the reader can load onto directly, and
+    `item_indices` the positions in the run's item list of the scenes whose
+    footprint overlaps the block, ordered by acquisition stamp.
+    """
+
+    row: int
+    col: int
+    geobox: Any
+    yslice: slice
+    xslice: slice
+    item_indices: tuple[int, ...]
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (
+            self.yslice.stop - self.yslice.start,
+            self.xslice.stop - self.xslice.start,
+        )
+
+    @property
+    def depth(self) -> int:
+        """How many scenes this block reads. Its entry in `block_depths`."""
+        return len(self.item_indices)
+
+
+def item_times(items) -> np.ndarray:
+    """The acquisition stamps of an item list, in the list's own order.
+
+    `destripe.timestamp_of` parses the same field `odc.stac` puts on the time
+    axis, so this is that axis without opening anything.
+    """
+    if not len(items):
+        return np.empty(0, dtype="datetime64[ns]")
+    return np.array([destripe.timestamp_of(item) for item in items], dtype="M8[ns]")
+
+
+def time_order(items) -> np.ndarray:
+    """The positions of `items` sorted by acquisition stamp, ties in list order.
+
+    `odc.stac` sorts the loaded stack this way, and every per-scene vector is
+    joined to it, so a plan that indexes in this order hands a block its
+    scenes and its vectors in the same order the graph path would have.
+    """
+    return np.argsort(item_times(items), kind="stable")
+
+
+def _geographic_block_edges(geobox, chunk: int):
+    """The pixel edges and the degree edges of a geobox's block grid.
+
+    Raises:
+        ValueError: on a rotated or a projected geobox. The overlap rule is
+            `block_depths`', which compares a scene's geographic bounding box
+            against a block's, and only a north-up geographic grid has one
+            block bounding box per row edge and column edge.
+    """
+    height, width = geobox.shape
+    y_edges, x_edges = block_edges(int(height), int(width), chunk)
+    a, b, c, d, e, f = tuple(geobox.transform)[:6]
+    if b or d:
+        msg = f"the tile geobox is rotated ({b}, {d}); the block plan needs north-up"
+        raise ValueError(msg)
+    if not geobox.crs.geographic:
+        msg = (
+            f"the tile geobox is on {geobox.crs}, and the block plan compares "
+            f"scene footprints in degrees, as block_depths does. Composite on "
+            f"a geographic grid."
+        )
+        raise ValueError(msg)
+    return (
+        y_edges,
+        x_edges,
+        f + e * y_edges[:-1],  # norths
+        f + e * y_edges[1:],  # souths
+        c + a * x_edges[:-1],  # wests
+        c + a * x_edges[1:],  # easts
+    )
+
+
+def build_block_plan(items, item_bboxes, geobox_full, chunk: int) -> list[BlockSpec]:
+    """One `BlockSpec` per block, carrying the scenes that reach that block.
+
+    The overlap rule is `block_depths`': a scene reaches a block when their
+    geographic bounding boxes strictly overlap. `len(spec.item_indices)`
+    therefore equals that block's entry in `block_depths`, and the whole plan
+    costs one boolean matmul plus one `flatnonzero` per block rather than a
+    footprint test per block and scene.
+
+    An empty block stays in the plan. It owns its windows of the output and
+    still has to write nodata into them, which is what the lazy graph's
+    all-fill block does today.
+
+    Returns:
+        The blocks in row-major order, so `plan[row * n_cols + col]` is the
+        block at `(row, col)`.
+    """
+    if len(item_bboxes) != len(items):
+        msg = (
+            f"{len(items)} items against {len(item_bboxes)} footprints. The "
+            f"plan indexes one list by the other's positions."
+        )
+        raise ValueError(msg)
+    y_edges, x_edges, norths, souths, wests, easts = _geographic_block_edges(
+        geobox_full, chunk
+    )
+    n_rows, n_cols = len(norths), len(wests)
+    order = time_order(items)
+    if len(items):
+        boxes = np.asarray(item_bboxes, dtype="float64")[order]
+        rows, cols = _overlap_masks(norths, souths, wests, easts, boxes)
+    else:
+        rows = np.zeros((n_rows, 0), dtype=bool)
+        cols = np.zeros((n_cols, 0), dtype=bool)
+
+    plan: list[BlockSpec] = []
+    for row in range(n_rows):
+        yslice = slice(int(y_edges[row]), int(y_edges[row + 1]))
+        in_row = rows[row]
+        for col in range(n_cols):
+            xslice = slice(int(x_edges[col]), int(x_edges[col + 1]))
+            # `in_row & cols[col]` is a mask over the time-sorted items, so
+            # `order` maps it straight back to list positions in time order.
+            hits = order[in_row & cols[col]]
+            plan.append(
+                BlockSpec(
+                    row=row,
+                    col=col,
+                    geobox=geobox_full[yslice, xslice],
+                    yslice=yslice,
+                    xslice=xslice,
+                    item_indices=tuple(int(i) for i in hits),
+                )
+            )
+    return plan
+
+
+def plan_depths(plan, shape=None) -> np.ndarray:
+    """The plan's scene counts as the `(rows, cols)` array `block_depths` returns."""
+    if shape is None:
+        shape = (
+            max((b.row for b in plan), default=-1) + 1,
+            max((b.col for b in plan), default=-1) + 1,
+        )
+    depths = np.zeros(shape, dtype="int64")
+    for block in plan:
+        depths[block.row, block.col] = block.depth
+    return depths
+
+
+# --------------------------------------------------------------------------
+# Per-scene vectors, and the subset one block sees
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SceneVectors:
+    """The per-scene arrays `reduce_block` takes, and the axis they sit on.
+
+    `times` is the acquisition axis the other four were joined to, so a subset
+    carries its own time coordinate with it and nothing downstream re-derives
+    one. Every array is in the item list's order, which is why a `BlockSpec`'s
+    time-ordered indices produce a time-ordered subset.
+    """
+
+    times: np.ndarray
+    offset: np.ndarray
+    keep: np.ndarray
+    path_code: np.ndarray
+    month: np.ndarray
+    paths: tuple
+
+    def __len__(self) -> int:
+        return int(len(self.times))
+
+    @property
+    def n_rejected(self) -> int:
+        return int((~self.keep).sum())
+
+    def take(self, indices) -> SceneVectors:
+        """The same five arrays at `indices`, in the order `indices` gives."""
+        idx = np.asarray(indices, dtype="int64")
+        return replace(
+            self,
+            times=self.times[idx],
+            offset=self.offset[idx],
+            keep=self.keep[idx],
+            path_code=self.path_code[idx],
+            month=self.month[idx],
+        )
+
+
+def months_of(times) -> np.ndarray:
+    """The calendar month of each stamp, 1 to 12, as `int8`.
+
+    The same integers `data["time"].dt.month` gives the graph path.
+    """
+    stamps = np.asarray(times, dtype="M8[ns]")
+    return (stamps.astype("M8[M]").astype("int64") % 12 + 1).astype("int8")
+
+
+def scene_vectors(
+    items,
+    prep=None,
+    *,
+    max_offset_c: float = destripe.DESTRIPE_MAX_OFFSET_C,
+    debias: bool = True,
+) -> SceneVectors:
+    """The run's per-scene vectors, from the item list alone.
+
+    The graph path reads the time axis off the loaded stack. There is no stack
+    on the driver here, so the axis comes from `destripe.timestamp_of` and the
+    join runs exactly as before: `per_scene_vectors` calls
+    `destripe.align_to_time`, which still refuses a stamp two items disagree
+    about and still refuses a step no item accounts for. Nothing joins on
+    position.
+    """
+    times = item_times(items)
+    offset, keep, path_code, paths = per_scene_vectors(
+        items, times, prep, max_offset_c=max_offset_c, debias=debias
+    )
+    return SceneVectors(
+        times=times,
+        offset=offset,
+        keep=keep,
+        path_code=path_code,
+        month=months_of(times),
+        paths=paths,
+    )
+
+
+def block_vectors(vectors: SceneVectors, block) -> SceneVectors:
+    """The per-scene vectors of one block, in time order.
+
+    `block` is a `BlockSpec` or a sequence of indices into the run's item
+    list. The result is what a block's kernel sees: its own scenes, its own
+    time coordinate, and no trace of the tile's other thousands.
+    """
+    indices = getattr(block, "item_indices", block)
+    return vectors.take(indices)
 
 
 # --------------------------------------------------------------------------
@@ -654,6 +958,52 @@ def _create_staging(path: Path, *, shape, count, dtype, nodata, transform, crs) 
         pass
 
 
+def staging_targets(
+    out_dir,
+    *,
+    shape,
+    transform,
+    crs: str,
+    months: int = 12,
+    emit_pooled: bool = False,
+):
+    """Create the staging GeoTIFFs the blocks write their windows into.
+
+    The band count, the dtype, and the nodata of each file follow
+    `reduce_block`'s outputs, so both engines write the same three files with
+    the same header. One implementation, called once per run.
+
+    Returns:
+        `(targets, paths)`. `targets` maps a name to `(path, FileLock)`, which
+        is what a worker's write needs and all it needs; `paths` maps the same
+        names to the driver's `Path` objects for the COG copy and the cleanup.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wanted = [
+        ("lst_p95", "uint16", LST_NODATA_DN, 1),
+        ("qa_count", "uint8", None, int(months)),
+    ]
+    if emit_pooled:
+        wanted.append(("lst_p95_pooled", "uint16", LST_NODATA_DN, 1))
+    paths: dict = {}
+    targets: dict = {}
+    for name, dtype, nodata, count in wanted:
+        path = out_dir / f"{name}.staging.tif"
+        _create_staging(
+            path,
+            shape=shape,
+            count=count,
+            dtype=dtype,
+            nodata=nodata,
+            transform=transform,
+            crs=crs,
+        )
+        paths[name] = path
+        targets[name] = (str(path), FileLock(str(path) + ".lock"))
+    return targets, paths
+
+
 def _write_window(path: str, lock, stack, y0: int, x0: int) -> None:
     import rasterio
     from rasterio.windows import Window
@@ -792,29 +1142,15 @@ def staging_writes(
         keep = xr.DataArray(np.array(True))
         gap = xr.DataArray(np.array(False))
 
-    paths: dict = {}
-    targets: dict = {}
-
-    def target(name, arr, nodata, count):
-        path = out_dir / f"{name}.staging.tif"
-        _create_staging(
-            path,
-            shape=(ny, nx),
-            count=count,
-            dtype=arr.dtype.name,
-            nodata=nodata,
-            transform=transform,
-            crs=crs,
-        )
-        paths[name] = path
-        targets[name] = (str(path), FileLock(str(path) + ".lock"))
-
-    target("lst_p95", out["lst_p95"], LST_NODATA_DN, 1)
-    target("qa_count", out["qa_count"], None, out.sizes["month"])
-    extra = []
-    if "lst_p95_pooled" in out:
-        target("lst_p95_pooled", out["lst_p95_pooled"], LST_NODATA_DN, 1)
-        extra = [out["lst_p95_pooled"]]
+    targets, paths = staging_targets(
+        out_dir,
+        shape=(ny, nx),
+        transform=transform,
+        crs=crs,
+        months=int(out.sizes["month"]),
+        emit_pooled="lst_p95_pooled" in out,
+    )
+    extra = [out["lst_p95_pooled"]] if "lst_p95_pooled" in out else []
 
     flags = xr.apply_ufunc(
         finalize_block,
@@ -841,6 +1177,132 @@ def compute_all(counts) -> dict:
     """Compute the one `(flag,)` DataArray and name its entries."""
     values = np.asarray(counts.compute().values).astype("int64")
     return {flag: int(value) for flag, value in zip(FLAGS, values, strict=True)}
+
+
+# --------------------------------------------------------------------------
+# The fused submission path. One task per block, submitted by the driver,
+# instead of one graph the scheduler unrolls into per-scene layers.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BlockOutputs:
+    """Where a block writes and what it masks, cut to one block.
+
+    `keep` and `gap` are the run's full-tile planes on the driver and one
+    block's window of them on a worker. Cutting them here is a slice of a
+    numpy array, not a computation: the alternative is shipping a whole
+    18,000 px plane, 324 MB per band, to every worker to have it read one
+    block of it.
+    """
+
+    targets: dict
+    keep: Any = None
+    gap: Any = None
+    hot_dn: Any = None
+
+    @property
+    def masked(self) -> bool:
+        return self.keep is not None
+
+    def for_block(self, block: BlockSpec) -> BlockOutputs:
+        """This block's window of the mask planes, and the same write targets."""
+        if self.keep is None:
+            return self
+        ys, xs = block.yslice, block.xslice
+        return replace(
+            self,
+            keep=np.ascontiguousarray(np.asarray(self.keep, dtype=bool)[ys, xs]),
+            gap=(
+                None
+                if self.gap is None
+                else np.ascontiguousarray(np.asarray(self.gap, dtype=bool)[ys, xs])
+            ),
+        )
+
+
+def _per_worker(client, addresses, value):
+    """Send one value to each worker once, and return it keyed by address.
+
+    Every block's task takes the same prep artifact, and frisky's `submit`
+    serialises its arguments on each call, so passing `prep` straight in would
+    pickle the swath weights once per block. Scattering it puts one copy on
+    each worker and hands the tasks a reference. `broadcast=True` is not
+    implemented in frisky 0.7.2, so this scatters per address.
+
+    Falls back to the value itself if the cluster exposes no addresses or the
+    scatter fails: correctness never depends on this.
+    """
+    if value is None or not addresses:
+        return dict.fromkeys(addresses or [None], value)
+    try:
+        return {addr: client.scatter(value, workers=[addr]) for addr in addresses}
+    except Exception:  # noqa: BLE001  an optimisation, never a failure
+        return dict.fromkeys(addresses, value)
+
+
+def submit_blocks(
+    client,
+    cluster,
+    plan,
+    fn,
+    *,
+    items,
+    vectors: SceneVectors,
+    prep=None,
+    out=None,
+    emit_pooled: bool = False,
+    marks: dict | None = None,
+) -> dict:
+    """Submit one `fn` per block, deepest first, round-robin over the workers.
+
+    Each task is handed its own block's scenes and its own block's vectors,
+    both already cut to `block.item_indices`, so nothing on the wire scales
+    with the tile's time axis. The deepest blocks go first because they are
+    the run's critical path: a block over 800 scenes cannot start late and
+    still finish with the rest.
+
+    Placement is `warm_workers`' pattern, `workers=[addr]` round-robin over
+    `cluster._worker_addresses`. Frisky's scheduler would otherwise be free to
+    pile the head of the queue, which is every deep block, onto one worker.
+
+    `observe.phase` marks stay the graph path's two: `graph_build` around the
+    planning and the submission, `compute` around the wait, so the summary
+    prints the same two figures against the same two names.
+
+    Returns:
+        The per-flag totals, summed over the blocks, in the shape
+        `compute_all` returns.
+    """
+    addresses = list(getattr(cluster, "_worker_addresses", None) or [])
+    deepest_first = sorted(plan, key=lambda block: -block.depth)
+
+    futures = []
+    with observe.phase("graph_build", count=len(plan), marks=marks):
+        shared_prep = _per_worker(client, addresses, prep)
+        for n, block in enumerate(deepest_first):
+            addr = addresses[n % len(addresses)] if addresses else None
+            kwargs = {"emit_pooled": emit_pooled}
+            if addr is not None:
+                kwargs["workers"] = [addr]
+            futures.append(
+                client.submit(
+                    fn,
+                    block,
+                    [items[i] for i in block.item_indices],
+                    block_vectors(vectors, block),
+                    shared_prep.get(addr, prep),
+                    out.for_block(block) if hasattr(out, "for_block") else out,
+                    **kwargs,
+                )
+            )
+
+    totals = dict.fromkeys(FLAGS, 0)
+    with observe.phase("compute", count=len(plan), marks=marks):
+        for future in futures:
+            for flag, value in (future.result() or {}).items():
+                totals[flag] = totals.get(flag, 0) + int(value)
+    return totals
 
 
 def finish_staging(path: Path, *, scale, offset, descriptions, nodata) -> list[dict]:
@@ -1027,22 +1489,35 @@ def warm_workers(client, cluster) -> int:
 
 __all__ = [
     "DEFAULT_CHUNK_PX",
+    "BlockOutputs",
+    "BlockSpec",
     "FileLock",
+    "SceneVectors",
     "block_bytes",
     "block_depths",
+    "block_edges",
+    "block_vectors",
+    "build_block_plan",
     "build_graph",
     "cleanup_staging",
     "compute_all",
     "finish_staging",
     "item_for_files",
+    "item_times",
     "lazy_weights",
     "memory_demand",
     "memory_guard",
+    "months_of",
     "open_stack",
     "per_scene_vectors",
+    "plan_depths",
     "raster_shape",
     "reduce_block",
     "rehearsal_items",
+    "scene_vectors",
     "spatial_dims",
+    "staging_targets",
     "staging_writes",
+    "submit_blocks",
+    "time_order",
 ]
