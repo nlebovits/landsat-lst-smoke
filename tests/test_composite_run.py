@@ -240,6 +240,68 @@ class TestTheWriter:
         assert flags["valid"] == int((want != LST_NODATA_DN).sum())
 
 
+class TestTheFusedEngine:
+    """`--engine fused` on the same cluster: one task per block, same pixels."""
+
+    @pytest.fixture(scope="class")
+    def both(self, tmp_path_factory):
+        import contextlib
+        import io
+
+        root = tmp_path_factory.mktemp("engines")
+        summaries = {}
+        for engine in ("graph", "fused"):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code, summary = rehearse(
+                    root / engine, "--no-catalog", "--engine", engine
+                )
+            assert code == 0, engine
+            summaries[engine] = summary
+        return root, summaries
+
+    def test_the_two_engines_write_the_same_cogs(self, both):
+        root, _ = both
+        for name in ("lst_p95.tif", "qa_count.tif"):
+            with (
+                rasterio.open(root / "graph" / name) as a,
+                rasterio.open(root / "fused" / name) as b,
+            ):
+                np.testing.assert_array_equal(a.read(), b.read(), err_msg=name)
+
+    def test_the_two_engines_report_the_same_figures(self, both):
+        _, summaries = both
+        assert summaries["fused"]["engine"] == "fused"
+        assert summaries["graph"]["engine"] == "graph"
+        for key in (
+            "valid_fraction",
+            "n_pooled_fallback",
+            "qa_count_per_month",
+            "min_c",
+            "mean_c",
+            "max_c",
+            "n_scenes_rejected",
+        ):
+            assert summaries["fused"][key] == summaries["graph"][key], key
+
+    def test_the_fused_engine_submits_one_task_per_block(self, both):
+        _, summaries = both
+        assert summaries["fused"]["n_tasks"] == summaries["fused"]["n_blocks"]
+        assert summaries["graph"]["n_tasks"] > summaries["graph"]["n_blocks"]
+
+    def test_it_keeps_the_phases_the_summary_prints(self, both):
+        root, summaries = both
+        assert summaries["fused"]["phases"]["graph_build_s"] > 0
+        assert summaries["fused"]["phases"]["compute_s"] > 0
+        phases = set(summaries["fused"]["frisky"]["client_phases"])
+        for phase in ("graph_build", "compute"):
+            assert phase in phases, phases
+        names = {
+            span["name"]
+            for span in json.loads((root / "fused" / "spans.json").read_text())
+        }
+        assert "worker.exec.fused_block" in names, sorted(names)[:20]
+
+
 class TestPooledBaseline:
     def test_emit_pooled_writes_a_third_cog(self, tmp_path):
         out = tmp_path / "run"

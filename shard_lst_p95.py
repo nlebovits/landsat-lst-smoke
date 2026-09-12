@@ -866,7 +866,13 @@ def run_fused(
         fused_block,
         items=item_dicts,
         vectors=vectors,
-        prep=prep,
+        # `--no-feather` is the absence of the swath geometry at the kernel:
+        # `fused_block` cross-fades when it is handed a prep artifact and
+        # composites pooled when it is not. The offsets and the rejection are
+        # already in `vectors`, which was built from the real prep, so
+        # withholding it here turns off exactly what the flag names, and the
+        # swath weights are not scattered to a worker that will not use them.
+        prep=None if args.no_feather else prep,
         out=outputs,
         emit_pooled=args.emit_pooled,
         marks=marks,
@@ -1248,6 +1254,7 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
         "pixels_per_degree": args.pixels_per_degree,
         "raster": [height, width],
         "chunk_px": args.chunk,
+        "engine": args.engine,
         "n_blocks": int(depths.size),
         "scenes_per_block": {
             "min": flat[0],
