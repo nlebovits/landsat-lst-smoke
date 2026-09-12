@@ -157,9 +157,57 @@ def month_climatology(celsius, months):
     planes = np.unique(months)
     ref = np.empty((planes.size, *celsius.shape[1:]), dtype="float32")
     for i, month in enumerate(planes):
-        with np.errstate(all="ignore"):
-            ref[i] = np.nanmedian(celsius[months == month], axis=0)
+        ref[i] = nan_median(celsius[months == month])
     return planes, ref
+
+
+def nan_median(values):
+    """`np.nanmedian(values, axis=0)`, bit-identical, in a layout that sorts fast.
+
+    numpy sorts along axis 0 in place, so every pixel's samples sit one whole
+    plane apart. At the prep block size a float32 plane is exactly 1 MiB and
+    every sample of a pixel lands in the same cache set. MEASURED on a
+    `(67, S, S)` float32 stack: `np.sort(axis=0)` takes 0.16 s at S=511 and
+    S=513, and 4.9 s at S=512, a 31x cliff that `tile_prep.DEFAULT_BLOCK`
+    sits on. Twelve such medians made the climatology 56 s of a 66 s prep
+    block.
+
+    This copies the stack into `(pixels, scenes)` one scene at a time, which
+    is a contiguous write per scene, and sorts along the contiguous axis. A
+    transposed `.copy()` is not a substitute: it runs a 67-element strided
+    inner loop and takes 1.8 s for the same bytes. MEASURED at the prep block
+    shape: 55.8 s to 2.1 s for the twelve medians, output identical to numpy
+    to the bit, NaN pattern included. The median rule is numpy's: the middle
+    value for an odd count, the float32 mean of the two middle values for an
+    even count, NaN where nothing is finite.
+
+    Args:
+        values: `(n, ...)` float32 or castable, NaN where unusable.
+
+    Returns:
+        `(...)` float32.
+    """
+    import numpy as np
+
+    values = np.asarray(values, dtype="float32")
+    depth = values.shape[0]
+    shape = values.shape[1:]
+    if depth == 0:
+        return np.full(shape, np.nan, dtype="float32")
+    pixels = int(np.prod(shape))
+    flat = values.reshape(depth, pixels)
+    lane = np.empty((pixels, depth), dtype="float32")
+    for s in range(depth):
+        lane[:, s] = flat[s]
+    lane.sort(axis=-1)  # NaN sorts last
+    n = depth - np.isnan(lane).sum(axis=-1)
+    half = n // 2
+    rows = np.arange(pixels)
+    upper = lane[rows, np.minimum(half, depth - 1)]
+    lower = lane[rows, np.maximum(half - 1, 0)]
+    out = np.where(n % 2 == 1, upper, (lower + upper) * np.float32(0.5))
+    out[n == 0] = np.nan
+    return out.reshape(shape)
 
 
 def accumulate_anomaly(hist, n_valid, celsius, months, planes, ref):

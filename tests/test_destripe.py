@@ -26,6 +26,7 @@ Nothing here reads S3 or opens a catalogue.
 from __future__ import annotations
 
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -722,6 +723,56 @@ class TestJoiningOnTime:
     def test_the_quad_carries_both_halves_and_keeps_its_padding(self):
         assert destripe.quad_of(self.ITEMS[0]) == ("228", "030")
         assert destripe.path_of(item("X", "2021-01-01T00:00:00Z", "007")) == "007"
+
+
+class TestTheLaneMedian:
+    """`destripe.nan_median` is `np.nanmedian(axis=0)` to the bit, in a fast layout."""
+
+    @pytest.mark.parametrize(
+        ("depth", "shape", "share"),
+        [
+            (1, (5, 7), 1.0),
+            (2, (5, 7), 0.5),
+            (67, (24, 24), 0.7),  # odd depth, mixed odd and even counts
+            (68, (24, 24), 0.7),  # even depth
+            (300, (8, 8), 0.3),
+        ],
+    )
+    def test_it_is_bit_identical_to_numpy(self, depth, shape, share):
+        a = TestTheVectorisedPercentile.stack(depth, shape, share, seed=depth)
+        a[:, 0, 0] = np.nan  # a pixel nothing observed
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            want = np.nanmedian(a, axis=0).astype("float32")
+        got = destripe.nan_median(a)
+        assert got.dtype == np.float32
+        assert got.shape == want.shape
+        np.testing.assert_array_equal(np.isnan(want), np.isnan(got))
+        finite = np.isfinite(want)
+        assert np.array_equal(want[finite].view("uint32"), got[finite].view("uint32"))
+
+    def test_the_climatology_uses_it_and_matches_numpy(self):
+        months = np.array([1, 1, 1, 7, 7, 7, 7, 12])
+        stack = TestTheVectorisedPercentile.stack(8, (6, 6), 0.8, seed=8)
+        planes, ref = destripe.month_climatology(stack, months)
+        assert list(planes) == [1, 7, 12]
+        for i, month in enumerate(planes):
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                want = np.nanmedian(stack[months == month], axis=0)
+            np.testing.assert_array_equal(np.nan_to_num(ref[i]), np.nan_to_num(want))
+            np.testing.assert_array_equal(np.isnan(ref[i]), np.isnan(want))
+
+    def test_it_does_not_touch_its_input(self):
+        a = TestTheVectorisedPercentile.stack(20, (4, 4), 0.9, seed=5)
+        before = a.copy()
+        destripe.nan_median(a)
+        np.testing.assert_array_equal(np.nan_to_num(a), np.nan_to_num(before))
+
+    def test_a_stack_with_no_scenes_is_all_nodata(self):
+        got = destripe.nan_median(np.empty((0, 3, 4), dtype="float32"))
+        assert got.shape == (3, 4)
+        assert np.isnan(got).all()
 
 
 class TestTheVectorisedPercentile:
