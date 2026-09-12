@@ -442,17 +442,23 @@ def _quad_coverage(valid, quads, ratio: int):
     A scene reaches a swath cell when any of the prep pixels under it carries a
     valid observation. Reaching, not covering: the question the swath asks is
     where the path contributed at all.
+
+    One `_block_any` over the whole stack, then one sum per quad. The per-scene
+    loop this replaces called `_block_any` about 800 times a block, each call
+    padding and reshaping its own copy. MEASURED at (800, 512, 512), ratio 2,
+    30 quads: 1.38 s to 0.09 s, byte-identical, keys in the same order. The
+    coarse stack it holds is `scenes * (ny/ratio) * (nx/ratio)` bytes, 52 MiB
+    at that shape, against the 1 MiB the loop held.
     """
     import numpy as np
 
-    out: dict[tuple[str, str], np.ndarray] = {}
-    for s in range(valid.shape[0]):
-        reach = destripe._block_any(valid[s], ratio)
-        quad = quads[s]
-        if quad in out:
-            out[quad] += reach.astype("uint16")
-        else:
-            out[quad] = reach.astype("uint16")
+    reach = destripe._block_any(valid, ratio)
+    rows: dict[tuple[str, str], list[int]] = {}
+    for s, quad in enumerate(quads):
+        rows.setdefault(quad, []).append(s)
+    out: dict[tuple[str, str], np.ndarray] = {
+        quad: reach[scenes].sum(axis=0, dtype="uint16") for quad, scenes in rows.items()
+    }
     return out
 
 
@@ -574,10 +580,42 @@ def load_items(args):
     return items, boxes, dropped, provenance(manifest)
 
 
+def deepest_first(work):
+    """The work list ordered by scene count, deepest block first.
+
+    Ties keep the grid order they came in, so two blocks of the same depth are
+    submitted north-west first and the order is a function of the plan rather
+    than of the sort's internals.
+    """
+    return sorted(work, key=lambda pair: -len(pair[1]))
+
+
 def run_blocks(
     args, work, item_dicts, resolution, ratio, on_result, report=None
 ) -> list:
     """Submit every block to a frisky cluster and fold results as they land.
+
+    Deepest block first. A block costs about what its scene count costs, the
+    blocks differ by a factor of six, and the last one submitted is the last
+    one to finish, so a deep block that enters late holds the whole phase open
+    while the rest of the cluster idles. Longest-processing-time-first is the
+    standard fix and it costs one sort of the work list.
+
+    Nothing else about placement is taken away from frisky, because the trace
+    says frisky is doing it well. MEASURED on rung 1, 169 blocks on 64 slots:
+    every one of the 64 workers ran between 2 and 4 blocks, so the root-task
+    pile-up the composite shows is not happening here. What is left is the
+    tail, 208.8 s of exec window against 174.3 s of perfectly balanced work.
+    DERIVED by replaying those 169 measured durations onto 64 free slots: 203.3
+    s in the submitted order, 189.2 s longest first. Pinning the blocks round
+    robin over `cluster._worker_addresses` instead, the `composite.warm_workers`
+    pattern, is worse than either, because a pinned block cannot move to a slot
+    that has gone idle: DERIVED 237.1 s in the submitted order and 232.6 s
+    longest first.
+
+    The artifact does not move. `accumulate` adds integers, so the order the
+    blocks land in cannot change the histograms, the counts or the coverage.
+    Only `block_stats` in the JSON, which is diagnostic, is reordered.
 
     `report`, when given, receives the frisky trace report and the warmed
     process count, collected before the cluster closes. The spans, events,
@@ -613,7 +651,7 @@ def run_blocks(
                 ratio,
                 args.read_threads,
             )
-            for block, idx in work
+            for block, idx in deepest_first(work)
         ]
         # One at a time, like `shard_lst_p95`: gathering the whole list at once
         # panicked the Rust scheduler there, and each result here is large.

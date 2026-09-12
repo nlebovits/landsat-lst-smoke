@@ -121,6 +121,51 @@ class TestQaBits:
         assert list(np.asarray(qa_clear(qa))) == [True, False, True, False]
 
 
+class TestTheDecodeIsOneCopy:
+    """`to_celsius` scales and offsets in place, and must not move a value.
+
+    The block stack is the largest array the pipeline holds, so the decode
+    keeps one float32 copy of it rather than three. The arithmetic is the same
+    two float32 operations in the same order, so the result is bit-identical
+    to the expression form, and this asserts that rather than trusting it.
+    """
+
+    @staticmethod
+    def expression_form(dn):
+        return dn.astype("float32") * np.float32(LWIR_SCALE) + np.float32(LWIR_OFFSET_C)
+
+    @pytest.mark.parametrize("shape", [(1,), (7, 5), (4, 8, 8)])
+    def test_it_is_bit_identical_to_the_expression_form(self, shape):
+        rng = np.random.default_rng(sum(shape))
+        dn = rng.integers(0, 65536, size=shape, dtype="uint16")
+        got = to_celsius(dn)
+        want = self.expression_form(dn)
+        assert got.dtype == np.float32
+        assert np.array_equal(got.view("uint32"), want.view("uint32"))
+
+    def test_it_does_not_touch_its_input(self):
+        dn = np.array([[100, 20000, 65535]], dtype="uint16")
+        before = dn.copy()
+        to_celsius(dn)
+        np.testing.assert_array_equal(dn, before)
+
+    def test_a_numpy_scalar_still_decodes(self):
+        """`in_trusted_range(to_celsius(np.uint16(5)))` is asserted below."""
+        assert float(to_celsius(np.uint16(5))) == float(
+            self.expression_form(np.uint16(5))
+        )
+
+    def test_a_dataarray_decodes_to_the_same_bits(self):
+        rng = np.random.default_rng(11)
+        dn = rng.integers(0, 65536, size=(3, 4, 4), dtype="uint16")
+        lazy = xr.DataArray(dn, dims=("time", "y", "x"))
+        got = to_celsius(lazy)
+        assert np.array_equal(
+            got.values.view("uint32"), self.expression_form(dn).view("uint32")
+        )
+        np.testing.assert_array_equal(lazy.values, dn)
+
+
 class TestFillAndPhysicalRange:
     def test_raw_fill_becomes_nan(self):
         value, valid = one(LWIR_FILL_DN, QA_CLEAR)
