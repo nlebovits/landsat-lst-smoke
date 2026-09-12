@@ -240,6 +240,86 @@ class TestOneBlock:
         assert big == []
 
 
+class TestQuadCoverage:
+    """One `_block_any` over the stack has to equal the per-scene loop exactly.
+
+    The loop this replaced coarsened one scene at a time and added the results
+    up in `uint16`. Every cell of every quad, the dtype, and the order the keys
+    were first seen in are all read by `accumulate` and by `swath_masks`, so
+    all three have to survive the change.
+    """
+
+    @staticmethod
+    def per_scene_oracle(valid, quads, ratio):
+        """The loop `_quad_coverage` replaced, kept here as the reference."""
+        out: dict = {}
+        for s in range(valid.shape[0]):
+            reach = TestQuadCoverage.reshape_any(valid[s], ratio)
+            quad = quads[s]
+            if quad in out:
+                out[quad] += reach.astype("uint16")
+            else:
+                out[quad] = reach.astype("uint16")
+        return out
+
+    @staticmethod
+    def reshape_any(mask, factor):
+        height, width = mask.shape
+        ch = -(-height // factor)
+        cw = -(-width // factor)
+        padded = np.zeros((ch * factor, cw * factor), dtype=bool)
+        padded[:height, :width] = mask
+        return padded.reshape(ch, factor, cw, factor).any(axis=(1, 3))
+
+    @staticmethod
+    def quad_array(n, n_quads, seed):
+        rng = np.random.default_rng(seed)
+        quads = np.empty(n, dtype=object)
+        for s in range(n):
+            which = int(rng.integers(0, n_quads))
+            quads[s] = (f"{220 + which // 5:03d}", f"{80 + which % 5:03d}")
+        return quads
+
+    @pytest.mark.parametrize(
+        ("n", "shape", "ratio", "n_quads"),
+        [(24, (16, 16), 2, 4), (40, (12, 12), 4, 6), (9, (11, 13), 2, 3)],
+    )
+    def test_it_matches_the_per_scene_loop(self, n, shape, ratio, n_quads):
+        rng = np.random.default_rng(n + ratio)
+        valid = rng.random((n, *shape)) < 0.6
+        quads = self.quad_array(n, n_quads, seed=n)
+        got = tile_prep._quad_coverage(valid, quads, ratio)
+        want = self.per_scene_oracle(valid, quads, ratio)
+        assert list(got) == list(want)
+        for quad in want:
+            assert got[quad].dtype == want[quad].dtype
+            np.testing.assert_array_equal(got[quad], want[quad])
+
+    def test_a_ragged_block_pads_rather_than_truncates(self):
+        """A prep block whose edge is not a whole number of swath cells.
+
+        `check_grid` refuses this configuration for a whole run, but an edge
+        block of a tile is smaller than `--block` and can still be ragged, and
+        the coverage it returns is clipped by `accumulate` rather than dropped.
+        """
+        valid = np.zeros((3, 5, 5), dtype=bool)
+        valid[:, 4, 4] = True
+        quads = np.empty(3, dtype=object)
+        quads[:] = [(WEST, "030")] * 3
+        got = tile_prep._quad_coverage(valid, quads, 2)
+        assert got[(WEST, "030")].shape == (3, 3)
+        assert got[(WEST, "030")][2, 2] == 3
+        assert got[(WEST, "030")].sum() == 3
+
+    def test_a_scene_that_reached_nothing_adds_nothing(self):
+        valid = np.zeros((4, 8, 8), dtype=bool)
+        valid[1] = True
+        quads = np.empty(4, dtype=object)
+        quads[:] = [(WEST, "030")] * 4
+        got = tile_prep._quad_coverage(valid, quads, 2)
+        assert (got[(WEST, "030")] == 1).all()
+
+
 class TestSplittingTheGrid:
     """The claim that buys back the second source traversal."""
 
@@ -377,6 +457,49 @@ class TestTheArtifact:
         assert len(scene_ids) == N_SCENES
         assert quad_scenes == {(WEST, "030"): 6, (EAST, "031"): 6}
         assert quads[0] == destripe.quad_of(items[0])
+
+
+class TestTheDeepestBlockGoesFirst:
+    """The submission order, which decides how long the tail is.
+
+    A block costs about what its scene count costs. Submitted in grid order,
+    the deepest block can be the last one to enter and then holds the phase
+    open on its own. MEASURED on rung 1: 169 blocks on 64 slots, an exec window
+    of 208.8 s against 174.3 s of perfectly balanced work. DERIVED by replaying
+    those durations: 203.3 s in grid order, 189.2 s deepest first.
+    """
+
+    @staticmethod
+    def work(depths):
+        return [
+            (
+                tile_prep.Shard(0, i, 0, i * 8, 8, 8, (0.0, 0.0, 1.0, 1.0)),
+                list(range(d)),
+            )
+            for i, d in enumerate(depths)
+        ]
+
+    def test_the_blocks_come_back_deepest_first(self):
+        got = tile_prep.deepest_first(self.work([3, 40, 1, 12]))
+        assert [len(idx) for _, idx in got] == [40, 12, 3, 1]
+
+    def test_it_keeps_every_block_exactly_once(self):
+        work = self.work([5, 5, 9, 2, 7])
+        got = tile_prep.deepest_first(work)
+        assert sorted(b.col for b, _ in got) == [0, 1, 2, 3, 4]
+        assert len(got) == len(work)
+
+    def test_equal_depths_keep_their_grid_order(self):
+        got = tile_prep.deepest_first(self.work([4, 9, 4, 9]))
+        assert [b.col for b, _ in got] == [1, 3, 0, 2]
+
+    def test_it_does_not_reorder_the_list_it_was_given(self):
+        work = self.work([1, 6, 2])
+        tile_prep.deepest_first(work)
+        assert [len(idx) for _, idx in work] == [1, 6, 2]
+
+    def test_an_empty_plan_is_not_an_error(self):
+        assert tile_prep.deepest_first([]) == []
 
 
 class TestTheDefaultsFillTheMachine:

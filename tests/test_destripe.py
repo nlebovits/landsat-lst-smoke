@@ -831,3 +831,59 @@ class TestTheVectorisedPercentile:
         got = destripe.nan_percentile(empty, 95)
         assert got.shape == (3, 4)
         assert np.isnan(got).all()
+
+
+class TestCoarseningAMaskOverAStack:
+    """`_block_any` coarsens the last two axes and carries the rest through.
+
+    `tile_prep._quad_coverage` used to call it once per scene. The stacked form
+    has to answer exactly what that loop answered, cell for cell, including at
+    a ragged edge, or a quad's swath moves.
+    """
+
+    @staticmethod
+    def reshape_oracle(mask, factor):
+        """The four-dimensional reshape this replaced, on one 2-D mask."""
+        height, width = mask.shape
+        ch = -(-height // factor)
+        cw = -(-width // factor)
+        padded = np.zeros((ch * factor, cw * factor), dtype=bool)
+        padded[:height, :width] = mask
+        return padded.reshape(ch, factor, cw, factor).any(axis=(1, 3))
+
+    @pytest.mark.parametrize(
+        ("shape", "factor"),
+        [((8, 8), 2), ((16, 16), 4), ((11, 13), 2), ((511, 509), 3), ((5, 5), 8)],
+    )
+    def test_one_mask_matches_the_reshape_it_replaced(self, shape, factor):
+        rng = np.random.default_rng(sum(shape) + factor)
+        mask = rng.random(shape) < 0.3
+        got = destripe._block_any(mask, factor)
+        want = self.reshape_oracle(mask, factor)
+        assert got.dtype == np.bool_
+        np.testing.assert_array_equal(got, want)
+
+    @pytest.mark.parametrize(("shape", "factor"), [((12, 12), 2), ((11, 13), 4)])
+    def test_a_stack_is_the_same_as_one_call_per_plane(self, shape, factor):
+        rng = np.random.default_rng(3)
+        stack = rng.random((7, *shape)) < 0.4
+        got = destripe._block_any(stack, factor)
+        assert got.shape[0] == 7
+        for s in range(stack.shape[0]):
+            np.testing.assert_array_equal(got[s], self.reshape_oracle(stack[s], factor))
+
+    def test_it_does_not_touch_its_input(self):
+        rng = np.random.default_rng(4)
+        stack = rng.random((3, 8, 8)) < 0.5
+        before = stack.copy()
+        destripe._block_any(stack, 2)
+        np.testing.assert_array_equal(stack, before)
+
+    def test_the_ragged_edge_still_grows_rather_than_shrinks(self):
+        """One true cell in the ragged last column has to survive the padding."""
+        mask = np.zeros((5, 5), dtype=bool)
+        mask[4, 4] = True
+        got = destripe._block_any(mask, 2)
+        assert got.shape == (3, 3)
+        assert got[2, 2]
+        assert got.sum() == 1
