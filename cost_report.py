@@ -264,7 +264,11 @@ def main() -> int:  # noqa: C901
         print(f"  WARNING rate not pinned for: {', '.join(missing_rate)}")
 
     ebs = ebs_gb_sec / SEC_PER_MONTH * EBS_GP3_GB_MONTH
-    ip4 = total_sec / 3600 * IPV4_HR * n_instances
+    # One address per instance, and `total_sec` already sums every instance's
+    # lifetime, so the count is in the seconds. Multiplying by it again read
+    # 4x high on a four-machine run, which hid at $0.014, and 3,076x high on a
+    # fleet-sized estimate, where it reached $8,437 against $2.74.
+    ip4 = total_sec / 3600 * IPV4_HR
     if have_ec2:
         print("\n=== DERIVED: storage and address ===")
         print(

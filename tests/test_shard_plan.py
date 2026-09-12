@@ -35,6 +35,7 @@ from shard_lst_p95 import (  # noqa: E402
     items_for_shard,
     plan_shards,
     shard_bytes,
+    slice_demand,
     worker_memory_guard,
 )
 
@@ -446,6 +447,36 @@ class TestWorkerMemoryGuard:
             360, [820] * 64, 8, self.TILE_PX, self.TILE_PX, total_bytes=247 * self.GIB
         )
         assert eight == pytest.approx(8 * shard_bytes(360, 820) + 4.8, abs=0.05)
+
+    def test_the_reported_demand_is_the_one_the_guard_refuses_on(self):
+        """The dry run used to print a verdict the guard disagreed with.
+
+        `worst shard x slots` is the reading this guard replaced after it
+        over-reserved by 2.77x. The dry run kept printing it, and only the
+        superseded one carried a verdict. MEASURED on the real inventory at
+        512 px and 64 workers: N45E100 read `OVER by 5.5 GiB` on a 256 GiB
+        machine the guard accepts at 225.3 GiB, and eleven other tiles did the
+        same.
+        """
+        depths = [1027] + [400] * 63
+        demand = slice_demand(512, depths, 64, self.TILE_PX, self.TILE_PX)
+        naive = shard_bytes(512, 1027) * 64 + client_bytes(self.TILE_PX, self.TILE_PX)
+        assert demand < naive
+
+        # A machine between the two verdicts proves they are one model now.
+        # The guard returns the figure it would have refused on.
+        between = int((demand + naive) / 2 * self.GIB)
+        assert worker_memory_guard(
+            512, depths, 64, self.TILE_PX, self.TILE_PX, total_bytes=between
+        ) == pytest.approx(demand)
+
+    def test_both_demands_count_the_pooled_baseline(self):
+        depths = [820] * 8
+        assert slice_demand(
+            360, depths, 8, self.TILE_PX, self.TILE_PX, emit_pooled=True
+        ) - slice_demand(360, depths, 8, self.TILE_PX, self.TILE_PX) == pytest.approx(
+            self.TILE_PX**2 * 2 / self.GIB, abs=0.01
+        )
 
     def test_an_empty_slice_demands_only_the_client_arrays(self):
         demand = worker_memory_guard(

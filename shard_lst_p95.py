@@ -315,6 +315,35 @@ def client_bytes(width: int, height: int, *, emit_pooled: bool = False) -> float
     return width * height * per_pixel / GIB
 
 
+def slice_demand(
+    shard_px: int,
+    depths,
+    workers: int,
+    width: int,
+    height: int,
+    *,
+    emit_pooled: bool = False,
+) -> float:
+    """What one machine needs to run a slice, in GiB.
+
+    The sum of the deepest `workers` shards plus the client's full-tile arrays.
+    Only that many count: beyond them the slice queues rather than running
+    wider, and the client gathers into its arrays while the workers are still
+    allocating.
+
+    `worker_memory_guard` refuses on this figure and the dry run reports it, so
+    they are the same number by construction. They used to be two expressions,
+    and the dry run's was `worst shard x slots`: the reading
+    `worker_memory_guard` replaced after it over-reserved by 2.77x. On
+    `N45E100` at 512 px the two read 261.5 GiB and 225.3 GiB, so a dry run
+    printed `OVER by 5.5 GiB` about a run this guard accepts with 30 GiB to
+    spare.
+    """
+    ordered = sorted(depths, reverse=True)[:workers]
+    arrays = sum(shard_bytes(shard_px, n) for n in ordered)
+    return arrays + client_bytes(width, height, emit_pooled=emit_pooled)
+
+
 def worker_memory_guard(
     shard_px: int,
     depths,
@@ -367,11 +396,13 @@ def worker_memory_guard(
 
         total_bytes = psutil.virtual_memory().total
     ordered = sorted(depths, reverse=True)[:workers]
-    if not ordered:
-        return client_bytes(width, height, emit_pooled=emit_pooled)
-    arrays = sum(shard_bytes(shard_px, n) for n in ordered)
     client = client_bytes(width, height, emit_pooled=emit_pooled)
-    demand = arrays + client
+    if not ordered:
+        return client
+    arrays = sum(shard_bytes(shard_px, n) for n in ordered)
+    demand = slice_demand(
+        shard_px, depths, workers, width, height, emit_pooled=emit_pooled
+    )
     total = total_bytes / GIB
     if demand <= total:
         return demand
@@ -838,17 +869,20 @@ def drive_shards(
     return stats, submit_s
 
 
-def _target_verdict(args, per_shard_gib, slots, client_gib) -> str:
+def _target_verdict(args, demand_gib: float) -> str:
     """`  fits` or `  OVER by N GiB` against `--target-memory-gib`.
 
     A dry run plans for a machine that has not been launched, so the figure it
     checks against has to be named rather than read from the host. Without the
     flag there is nothing to compare and this adds nothing to the line.
+
+    The caller passes the demand rather than its parts, because the dry run
+    reports two different demands and only one of them is `worst x slots`. See
+    `slice_demand`.
     """
     if not args.target_memory_gib:
         return ""
-    demand = per_shard_gib * slots + client_gib
-    over = demand - args.target_memory_gib
+    over = demand_gib - args.target_memory_gib
     return f"   OVER by {over:.1f} GiB" if over > 0 else "   fits"
 
 
@@ -1699,7 +1733,8 @@ def main(argv=None) -> int:  # noqa: C901
             print(
                 f"  at {n:>5} scenes: {per:5.2f} GiB per shard, "
                 f"{per * concurrency + client_gib:6.1f} GiB across "
-                f"{concurrency} slots{_target_verdict(args, per, concurrency, client_gib)}"
+                f"{concurrency} slots"
+                f"{_target_verdict(args, per * concurrency + client_gib)}"
             )
 
         refused = False
@@ -1728,11 +1763,21 @@ def main(argv=None) -> int:  # noqa: C901
                     f"max {worst}   <- what this machine holds"
                 )
             per = shard_bytes(args.shard, worst)
+            # The deepest `concurrency` shards, not the worst one repeated.
+            # Real depths spread, so the two differ by up to 2.77x and only
+            # this one is what `worker_memory_guard` refuses on.
+            demand = slice_demand(
+                args.shard,
+                mine_counts,
+                concurrency,
+                width,
+                height,
+                emit_pooled=args.emit_pooled,
+            )
             print(
-                f"  worst shard: {per:.2f} GiB, "
-                f"{per * concurrency + client_gib:.1f} GiB across "
-                f"{concurrency} slots"
-                f"{_target_verdict(args, per, concurrency, client_gib)}"
+                f"  worst shard: {per:.2f} GiB.  deepest {concurrency} shards "
+                f"plus client output: {demand:.1f} GiB"
+                f"{_target_verdict(args, demand)}"
             )
             print(
                 f"  total shard-scene reads: {sum(counts):,} "

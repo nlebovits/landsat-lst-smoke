@@ -17,18 +17,18 @@ this document disagree, read the PR.
 - **No section here is a recommended configuration.** The `Headline` run is four
   unstaged `c6i.16xlarge` at a 512 px shard under the old QA mask. Steady state
   is one staged `m6id.16xlarge` a tile at `--shard 360`. See `What to run`.
-- **No figure here is a per-tile price.** The $4.28 below bought one tile on
+- **No figure here is a per-tile price.** The $4.27 below bought one tile on
   four machines that read every shard from S3. A staged tile is $1.68 to $1.87
   and 26 to 29 minutes on one instance. See `Cost`.
 
 ## Headline
 
 Four `c6i.16xlarge` instances built the full tile `S30W065`, 18,000 x 18,000 px
-over 3,910 scenes, in **4.8 minutes of wall clock** for **$4.28**.
+over 3,910 scenes, in **4.8 minutes of wall clock** for **$4.27**.
 
 Read every number in this section as one tile on four machines, reading every
 shard from S3, at a 512 px shard, on 2026-09-08. The 4.8 minutes is the slowest
-of four parallel slices, not the time one machine takes. The $4.28 is the whole
+of four parallel slices, not the time one machine takes. The $4.27 is the whole
 tile, not a per-machine or per-hour rate. Staging, the 360 px shard, and the
 current mask all postdate it, and `What to run` has the configuration that
 replaced it.
@@ -55,7 +55,7 @@ sits below the trusted minimum and 90.6 C sits above any land skin temperature,
 so both become nodata. The figures stand as what was measured. They are not what
 the pipeline would write today.
 
-S3 requester-pays requests are 54% of that $4.28 and EC2 is 45%. That run read
+S3 requester-pays requests are 54% of that $4.27 and EC2 is 45%. That run read
 every shard straight from S3, which opens each scene about 155 times at 4.77
 requests an open. Staging fetches each object once instead, which takes the
 per-tile S3 line from **$2.31 to $0.0031** and the 769-tile total from
@@ -609,7 +609,7 @@ cost per tile does not change as wall time falls.
 
 Those three figures project from compute time alone, excluding boot, install,
 the catalogue search, and every S3 request charge. The measured fleet cost $1.94
-of EC2 time and $4.28 in total. `c6i` outperformed the `r6i` of the early
+of EC2 time and $4.27 in total. `c6i` outperformed the `r6i` of the early
 measurements on both axes, because the 26.5 GiB peak of 96 means the
 memory-optimised instance rented RAM the job never touched.
 
@@ -783,10 +783,10 @@ Elastic Block Store (EBS) line covers four 150 GB root volumes.
 |---|---|---|
 | S3 GET requests | 605,617 x 2 x 4.77 / 1000 x $0.0004 | **$2.31** |
 | EC2, full-tile fleet | 2,568 s / 3600 x $2.72 | **$1.94** |
-| Public IPv4 | 0.7133 instance-hours x $0.005 | $0.014 |
+| Public IPv4 | 0.7133 instance-hours x $0.005 | $0.004 |
 | EBS | 4 x 150 GB x 642 s / 2,628,000 x $0.08 | $0.012 |
 | S3 to EC2 transfer, same region | | $0.00 |
-| **total** | | **$4.28** |
+| **total** | | **$4.27** |
 
 The S3 line exceeds the compute. Earlier versions of this document guessed at it
 instead of counting it. The $2.72/hr rate now has a **VERIFIED** label against
@@ -1471,7 +1471,7 @@ against 2 GETs staged.
 
 Per tile, the staged column is **$1.68 to $1.87** and **26 to 29 minutes** on
 one `m6id.16xlarge`. Divide either total by 769; the minutes follow from the
-EC2 line at $3.7968/hr. Quote these two for one tile. The headline's $4.28 and
+EC2 line at $3.7968/hr. Quote these two for one tile. The headline's $4.27 and
 4.8 minutes describe four unstaged machines working on one tile together.
 
 Staging cuts the total by **1.7x to 1.9x on demand and 4.6x to 5.3x on spot**.
@@ -1497,7 +1497,7 @@ worth spending memory on.
 The department-scale phase, across five EC2 sessions, eight completed
 department runs, one 200-scene quarter-tile smoke run, and two quarter-tile
 attempts that never finished, cost about **$4.45**. The full-tile fleet cost
-**$4.28** on top of it. The staged and memory-sweep instances are unpriced.
+**$4.27** on top of it. The staged and memory-sweep instances are unpriced.
 
 ### How to price a run
 
@@ -1523,7 +1523,7 @@ aws ec2 describe-instances --region us-west-2 \
 Terminated instances stay queryable for about an hour. After that both fields
 disappear and the API can no longer supply the lifetime, so **run the report
 immediately after teardown**. The fleet here aged out first, so `--recorded`
-takes the lifetimes directly, and this command produced the $4.28 total:
+takes the lifetimes directly, and this command produced the $4.27 total:
 
 ```bash
 ./cost_report.py --tag purpose=lst-benchmark --region us-west-2 \
@@ -2384,6 +2384,15 @@ records the same count for one that would rather read a file.
 
 Every entry is a claim an earlier version stated as fact. Each shares one
 mistake: it presented an estimate as a measurement.
+
+**The public IPv4 line charged each machine once per machine.**
+`cost_report.py` computed it as `total_sec / 3600 x rate x n_instances`, and
+`total_sec` already sums every instance's lifetime, so the count entered twice.
+The printed formula showed the right one, which is how it survived review. On
+the four-machine full-tile run the error is $0.014 against $0.0036 and the
+total moves from $4.28 to $4.27, so nothing caught it. Priced across
+a 3,076-machine fleet the same line reads $8,437 against $2.74, which is most
+of an estimate. Every $4.28 in this document is now $4.27.
 
 **Masking never changes a temperature.** The claim was that USGS wrote a gap
 pixel as `ST_B10` fill, `lst_qa.not_fill` rejected it, and `qa_count` already
