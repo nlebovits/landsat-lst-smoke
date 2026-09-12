@@ -767,9 +767,11 @@ def report_staging(report) -> None:
         f"{report['bytes'] / GIB:.1f} GiB in {report['seconds']:.1f}s "
         f"-> {report['stage_dir']}"
     )
+    reused = report.get("reused", 0)
+    already = f", {reused:,} already staged" if reused else ""
     print(
         f"              {report['get_requests']:,} billable GETs, "
-        f"{report['retries']} retries"
+        f"{report['retries']} retries{already}"
     )
 
 

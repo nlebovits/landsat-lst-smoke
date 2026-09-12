@@ -310,6 +310,72 @@ class TestStageScenes:
         assert report["get_requests"] == 6
         assert report["retries"] == 0
 
+    def test_a_second_run_into_a_warm_directory_pays_nothing(
+        self, real_items, tmp_path
+    ):
+        """The tile now takes two traversals, and it used to fetch twice.
+
+        `tile_prep` stages the tile and `shard_lst_p95` stages the same objects
+        behind it. Refetching them cost 322 s and 297 GB on a mean tile, which
+        is 21% of the run, and doubled the GET count.
+
+        Existence is enough to trust because `_fetch_one` unlinks on every
+        failure path including a short read, so a file that is there is whole.
+        A HEAD would confirm it and would be billable, which is most of what
+        skipping saves.
+        """
+        items, _ = real_items
+        # `repoint_items` rewrites hrefs in place, and a second process builds
+        # its own items from the inventory rather than inheriting these.
+        fresh = copy.deepcopy(items)
+        first = FakeS3()
+        a = staging.stage_scenes(
+            items, [0, 1], tmp_path, threads=2, client_factory=lambda _n: first
+        )
+        second = FakeS3()
+        b = staging.stage_scenes(
+            fresh, [0, 1], tmp_path, threads=2, client_factory=lambda _n: second
+        )
+
+        assert a["get_requests"] == 4
+        assert a["reused"] == 0
+        assert len(second.calls) == 0
+        assert b["get_requests"] == 0
+        assert b["reused"] == 4
+        assert b["objects"] == 4
+
+    def test_a_reused_object_is_not_counted_as_a_negative_retry(
+        self, real_items, tmp_path
+    ):
+        # `retries` is requests minus objects fetched. Counting a skipped
+        # object as fetched makes a warm rerun report -4 retries.
+        items, _ = real_items
+        fresh = copy.deepcopy(items)
+        staging.stage_scenes(
+            items, [0, 1], tmp_path, threads=2, client_factory=lambda _n: FakeS3()
+        )
+        report = staging.stage_scenes(
+            fresh, [0, 1], tmp_path, threads=2, client_factory=lambda _n: FakeS3()
+        )
+        assert report["retries"] == 0
+
+    def test_a_partial_file_is_never_left_to_be_trusted(self, real_items, tmp_path):
+        """What makes existence a safe test, restated where the skip reads it.
+
+        A truncated GeoTIFF would produce a wrong percentile in silence. If a
+        short read ever left one behind, the skip above would adopt it.
+        """
+        items, _ = real_items
+        with pytest.raises(staging.StagingError):
+            staging.stage_scenes(
+                items,
+                [0],
+                tmp_path,
+                threads=1,
+                client_factory=lambda _n: FakeS3(short_by=3),
+            )
+        assert not list(tmp_path.rglob("*.TIF"))
+
     def test_every_request_declares_the_requester_pays(self, real_items, tmp_path):
         items, _ = real_items
         fake = FakeS3()
@@ -449,6 +515,29 @@ class TestOneClientForEveryThread:
 
 
 class TestDiskGuard:
+    def test_it_reserves_nothing_for_what_is_already_staged(self, real_items, tmp_path):
+        """A rerun must not be refused by the volume already holding the data.
+
+        The guard reserves the whole manifest before the first GET. Once the
+        fetch skips what is present, counting those objects would refuse the
+        second traversal on exactly the volume that makes it free.
+        """
+        items, _ = real_items
+        manifest = staging.staging_manifest(items, range(len(items)))
+        cold = staging.estimated_bytes(manifest, tmp_path)
+        assert cold == staging.estimated_bytes(manifest)
+
+        for item_id, band, href in manifest:
+            key = staging.split_s3_uri(href)[1]
+            dest = staging.staged_path(tmp_path, item_id, band, key)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"staged")
+
+        assert staging.estimated_bytes(manifest, tmp_path) == 0
+        # And the guard passes on a volume with nothing free, because the
+        # objects are on it already.
+        assert staging.disk_guard(manifest, tmp_path) == 0
+
     def test_it_refuses_a_slice_that_does_not_fit(
         self, real_items, tmp_path, monkeypatch
     ):

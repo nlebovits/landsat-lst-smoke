@@ -1500,6 +1500,34 @@ department runs, one 200-scene quarter-tile smoke run, and two quarter-tile
 attempts that never finished, cost about **$4.45**. The full-tile fleet cost
 **$4.27** on top of it. The staged and memory-sweep instances are unpriced.
 
+### A tile staged itself twice
+
+The seam correction adds a traversal. `tile_prep.py` reads the tile, then
+`shard_lst_p95.py` reads the same scenes behind it, and each staged the same
+objects from scratch. `_fetch_one` had no skip, so pointing both at one
+`--stage-dir` fetched everything again.
+
+DERIVED from the measured staging rate of 922 MB/s and 78.5 MB a scene, on a
+mean tile of 3,779 scenes:
+
+| | |
+|---|---|
+| refetched | 297 GB |
+| time | 322 s, or 21% of a 26-minute tile |
+| GETs | 2 per scene became 4 |
+
+The fetch now skips an object already on disk. Existence is the whole test,
+because `_fetch_one` unlinks on every failure path including a short read, so
+a file that is there is complete. A HEAD would confirm it and is billable,
+which is most of what skipping saves.
+
+`staging.json` gains `reused`, and `retries` is measured against the objects
+actually fetched rather than the whole manifest. Without that a warm rerun
+reports negative retries. `estimated_bytes` takes the stage directory and
+leaves out what is present, because the guard reserves the manifest before the
+first GET and would otherwise refuse the second traversal on the one volume
+that makes it free.
+
 ### The unstaged path is gone
 
 `--no-stage` read every shard straight from S3, as the pipeline did before

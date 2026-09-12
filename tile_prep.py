@@ -650,10 +650,12 @@ def main(argv=None) -> int:  # noqa: C901
         report = staging.stage_scenes(
             items, sorted({i for _, idx in work for i in idx}), args.stage_dir
         )
+        reused = report.get("reused", 0)
+        already = f", {reused:,} already staged" if reused else ""
         print(
             f"              {report['objects']:,} objects, "
             f"{report['bytes'] / GIB:.1f} GiB, "
-            f"{report['get_requests']:,} billable GETs"
+            f"{report['get_requests']:,} billable GETs{already}"
         )
 
     hist = np.zeros((len(items), destripe.N_ANOMALY_BINS), dtype="uint32")

@@ -208,9 +208,21 @@ def repoint_items(item_dicts, indices, stage_dir):
     return manifest
 
 
-def estimated_bytes(manifest) -> int:
-    """Bytes the manifest is expected to need on disk, with the safety factor."""
-    raw = sum(ESTIMATED_BYTES.get(band, 0) for _, band, _ in manifest)
+def estimated_bytes(manifest, stage_dir=None) -> int:
+    """Bytes the manifest is expected to need on disk, with the safety factor.
+
+    Given `stage_dir`, objects already staged there are left out. They occupy
+    the volume rather than asking it for more, so counting them would refuse a
+    rerun on the one volume already holding the data.
+    """
+    entries = manifest
+    if stage_dir is not None:
+        entries = [
+            e
+            for e in manifest
+            if not staged_path(stage_dir, e[0], e[1], split_s3_uri(e[2])[1]).exists()
+        ]
+    raw = sum(ESTIMATED_BYTES.get(band, 0) for _, band, _ in entries)
     return int(raw * DISK_SAFETY_FACTOR)
 
 
@@ -226,7 +238,7 @@ def disk_guard(manifest, stage_dir: Path) -> int:
     Returns:
         The estimated bytes, so the caller can report what it reserved.
     """
-    need = estimated_bytes(manifest)
+    need = estimated_bytes(manifest, stage_dir)
     free = shutil.disk_usage(stage_dir).free
     if free < need:
         msg = (
@@ -391,7 +403,7 @@ class StagingRun:
         #: caller can tell a quiet moment from a finished fetch.
         self.outstanding = len(self.manifest)
         self.seconds = 0.0
-        self._counters = {"bytes": 0, "requests": 0}
+        self._counters = {"bytes": 0, "requests": 0, "reused": 0}
         self._lock = threading.Lock()
         self._queue: queue.SimpleQueue = queue.SimpleQueue()
         # Resolved in `start`, not bound here. A default argument would
@@ -436,10 +448,23 @@ class StagingRun:
             raise StagingError(msg)
         bucket, key = split_s3_uri(href)
         dest = staged_path(self.stage_dir, item_id, band, key)
-        written, attempts = _fetch_one(client, bucket, key, dest)
+        if dest.exists():
+            # Already here, so it is complete. `_fetch_one` unlinks on every
+            # failure path including a short read, which is what makes
+            # existence enough to trust and a HEAD unnecessary. A HEAD is
+            # billable, so checking would cost most of what skipping saves.
+            #
+            # This is the second traversal a tile now takes. `tile_prep` stages
+            # the tile and `shard_lst_p95` stages the same objects behind it,
+            # and refetching them cost 322 s and 297 GB on a mean tile, or 21%
+            # of the run.
+            written, attempts = dest.stat().st_size, 0
+        else:
+            written, attempts = _fetch_one(client, bucket, key, dest)
         with self._lock:
             self._counters["bytes"] += written
             self._counters["requests"] += attempts
+            self._counters["reused"] += attempts == 0
             free = shutil.disk_usage(self.stage_dir).free
         if free < FREE_SPACE_FLOOR_BYTES:
             msg = (
@@ -503,16 +528,25 @@ class StagingRun:
     def report(self, *, reserved: int = 0, owns_stage_dir: bool = True) -> dict:
         """This run's S3 line, counted rather than derived.
 
-        Objects, bytes, seconds, billable GETs, retries, and the estimate the
-        disk guard reserved. `cost_report.py --s3-get-requests` prices
-        `get_requests` directly, so these key names are an interface.
+        Objects, bytes, seconds, billable GETs, retries, how many objects were
+        already on disk, and the estimate the disk guard reserved.
+        `cost_report.py --s3-get-requests` prices `get_requests` directly, so
+        these key names are an interface.
+
+        `reused` objects cost no request, so they leave `get_requests` and come
+        out of the fetched count that `retries` is measured against. Without
+        that subtraction a rerun into a warm directory reports negative
+        retries, which is the shape of a run that paid less than once per
+        object and is worth saying out loud rather than hiding in a maximum.
         """
+        fetched = len(self.manifest) - self._counters["reused"]
         return {
             "objects": len(self.manifest),
             "bytes": self._counters["bytes"],
             "seconds": self.seconds,
             "get_requests": self._counters["requests"],
-            "retries": self._counters["requests"] - len(self.manifest),
+            "retries": self._counters["requests"] - fetched,
+            "reused": self._counters["reused"],
             "reserved_bytes": reserved,
             "stage_dir": str(self.stage_dir),
             "owns_stage_dir": owns_stage_dir,
