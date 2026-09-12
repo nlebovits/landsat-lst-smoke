@@ -172,8 +172,6 @@ class TestARunPointedAtABarrenTile:
                 "2",
                 "--threads-per-worker",
                 "1",
-                "--read-threads",
-                "2",
                 "--out-dir",
                 str(tmp_path / "out"),
             ]
@@ -198,10 +196,11 @@ class TestARunPointedAtABarrenTile:
         _, summary, _ = run
         assert summary["inventory"]["source_sha256"]
 
-    def test_it_writes_no_parts(self, run):
-        # Nothing merged this tile, so nothing should look mergeable.
+    def test_it_writes_no_rasters(self, run):
+        # Nothing composited this tile, so nothing should look publishable.
         _, _, out_dir = run
-        assert not list(out_dir.glob("part-*.npz"))
+        assert not list(out_dir.rglob("*.tif"))
+        assert not list(out_dir.rglob("*.npy"))
 
     def test_it_reaches_no_cluster_and_no_bucket(self, run):
         # The check runs before staging and before the cluster, so a barren

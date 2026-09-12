@@ -57,30 +57,30 @@ def loaded():
     if not ARTIFACT.exists():
         pytest.skip("run usgs_inventory.py to build artifacts/")
 
-    import pystac
-    from odc.stac import stac_load
+    import dask
 
+    import composite
     import shard_lst_p95
     from tile_inventory import items_for_tile
 
     shard_lst_p95.configure_read_env("earth-search")
     inventory, boxes = items_for_tile(ARTIFACT, TILE)
-    idx = shard_lst_p95.items_for_shard(
-        shard_lst_p95.Shard(0, 0, 0, 0, 1, 1, SHARD_BBOX), boxes
-    )
+    w, s, e, n = SHARD_BBOX
+    idx = [
+        i
+        for i, (iw, isouth, ie, inorth) in enumerate(boxes)
+        if iw < e and ie > w and isouth < n and inorth > s
+    ]
     item_dicts = [inventory[i] for i in idx][:MAX_SCENES]
     if len(item_dicts) < 2:
-        pytest.skip(f"only {len(item_dicts)} scenes over the fixed shard")
+        pytest.skip(f"only {len(item_dicts)} scenes over the fixed window")
 
-    data = stac_load(
-        [pystac.Item.from_dict(d) for d in item_dicts],
-        bands=("lwir11", "qa_pixel"),
-        crs=CRS,
-        resolution=RESOLUTION,
-        bbox=SHARD_BBOX,
-        groupby="landsat:scene_id",
-        chunks={"time": 1, "latitude": -1, "longitude": -1},
-    ).compute(scheduler="threads", num_workers=4)
+    # The loader exactly as the graph opens it: time in one chunk.
+    stack = composite.open_stack(
+        item_dicts, SHARD_BBOX, crs=CRS, resolution=RESOLUTION, chunk=1024
+    )
+    with dask.config.set(scheduler="threads"):
+        data = stack.compute()
     return item_dicts, data
 
 

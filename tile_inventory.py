@@ -261,9 +261,9 @@ def _tile_local_bbox(west, south, east, north, crossing, bounds):
     """A scene bbox trimmed to the tile's own longitude span.
 
     A footprint that wraps the antimeridian has `west > east` in the STAC
-    convention, and `items_for_shard` compares plain intervals. Trimming to
-    the tile removes the wrap without changing which shards overlap, because
-    every shard lies inside the tile.
+    convention, and `composite.block_depths` compares plain intervals.
+    Trimming to the tile removes the wrap without changing which blocks the
+    scene reaches, because every block lies inside the tile.
     """
     if not crossing:
         return (west, south, east, north)

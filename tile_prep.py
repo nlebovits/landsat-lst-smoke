@@ -65,6 +65,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import destripe
+import observe
 import staging
 from land_tiles import tile_bounds
 from lst_qa import masked_celsius
@@ -73,8 +74,6 @@ from shard_lst_p95 import (
     DEFAULT_STAGE_DIR,
     READ_SOURCES,
     configure_read_env,
-    items_for_shard,
-    plan_shards,
 )
 from stac_window import (
     DEFAULT_CLOUD_COVER_LT,
@@ -115,47 +114,87 @@ GIB = 1024.0**3
 
 
 # --------------------------------------------------------------------------
-# Instrumentation. frisky carries the stage timings, so `frisky observe
-# prefixes` can attribute this pass without a second telemetry path.
+# Instrumentation. Every stage is a frisky client phase through `observe`, so
+# the dashboard shows it live and the driver's own span dump keeps it. The
+# driver's tracing is off until `observe.enable` runs, which `main` does first;
+# before that, the spans this module recorded were silently dropped.
 # --------------------------------------------------------------------------
 
 
 @contextmanager
 def span(name: str, **keys):
-    """Time one stage and emit a frisky span for it. Never fails the run."""
+    """Time one stage as a frisky client phase. Never fails the run."""
     t0 = time.perf_counter()
-    start_ns = _now_ns()
-    try:
+    count = next(iter(keys.values()), None) if keys else None
+    with observe.phase(f"prep_{name}", count=count):
         yield
-    finally:
-        _record(f"prep.{name}", start_ns, _now_ns(), keys)
-        print(f"{name:<14}{time.perf_counter() - t0:8.1f}s")
-
-
-def _now_ns() -> int:
-    try:
-        import frisky
-
-        return int(frisky.now_ns())
-    except Exception:
-        return time.time_ns()
-
-
-def _record(name: str, t0_ns: int, t1_ns: int, keys: dict) -> None:
-    try:
-        import frisky
-
-        frisky.record_span(
-            name, t0_ns, t1_ns, keys=[f"{k}={v}" for k, v in keys.items()] or None
-        )
-    except Exception:
-        pass
+    print(f"{name:<14}{time.perf_counter() - t0:8.1f}s")
 
 
 # --------------------------------------------------------------------------
 # The grid. Three resolutions, each an exact divisor of the output grid, so no
 # block edge is ragged and no swath cell straddles two prep blocks.
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Block geometry. The prep pass cuts the padded tile into blocks and reads
+# each one coarse. The composite no longer plans blocks here: its blocks are
+# the dask chunks of one lazy graph.
+# --------------------------------------------------------------------------
+
+
+class Shard:
+    """One block of the prep grid, addressed in pixels and in degrees."""
+
+    __slots__ = ("row", "col", "y0", "x0", "ny", "nx", "bbox")
+
+    def __init__(self, row, col, y0, x0, ny, nx, bbox):
+        self.row, self.col = row, col
+        self.y0, self.x0 = y0, x0
+        self.ny, self.nx = ny, nx
+        self.bbox = bbox
+
+    def __repr__(self):
+        return f"Shard(r{self.row} c{self.col} {self.ny}x{self.nx} {self.bbox})"
+
+
+def plan_shards(
+    bbox, pixels_per_degree: int, shard: int
+) -> tuple[list[Shard], int, int]:
+    """Cut a grid into shard x shard pixel blocks.
+
+    The grid is anchored to whole degrees, not to the bbox, so a block lands on
+    the same pixels no matter which request produced it. Edge blocks are
+    smaller rather than overhanging.
+    """
+    w, s, e, n = bbox
+    res = 1.0 / pixels_per_degree
+    height = int(round((n - s) * pixels_per_degree))
+    width = int(round((e - w) * pixels_per_degree))
+
+    shards = []
+    for row, y0 in enumerate(range(0, height, shard)):
+        ny = min(shard, height - y0)
+        # Row 0 is the northern edge; latitude decreases as y grows.
+        north = n - y0 * res
+        south = north - ny * res
+        for col, x0 in enumerate(range(0, width, shard)):
+            nx = min(shard, width - x0)
+            west = w + x0 * res
+            east = west + nx * res
+            shards.append(Shard(row, col, y0, x0, ny, nx, (west, south, east, north)))
+    return shards, height, width
+
+
+def items_for_shard(shard: Shard, item_bboxes) -> list[int]:
+    """Indices of items whose footprint intersects this block."""
+    w, s, e, n = shard.bbox
+    return [
+        i
+        for i, (iw, isouth, ie, inorth) in enumerate(item_bboxes)
+        if iw < e and ie > w and isouth < n and inorth > s
+    ]
 
 
 def prep_bbox(tile_bbox, margin_deg: float):
@@ -574,6 +613,8 @@ def main(argv=None) -> int:  # noqa: C901
     import numpy as np
 
     args = parse_args(argv)
+    # Before any span. Without this the driver records nothing.
+    observe.enable()
     ratio = check_grid(
         args.pixels_per_degree, args.prep_factor, args.swath_factor, args.block
     )

@@ -35,9 +35,9 @@ so it cannot change spatial structure at all. Feathering never touches a pixel
 one path reaches.
 
 This module holds the rules. It reads nothing and writes nothing. `tile_prep`
-calls the estimation half once per tile; `shard_lst_p95.process_shard` and
-`profile_lst_p95.build_graph` call the application half, so the two P95 paths
-cannot drift. Same arrangement as `lst_qa`.
+calls the estimation half once per tile, and `composite.reduce_block` calls
+the application half on every block of the lazy graph. One implementation of
+each rule, the same arrangement as `lst_qa`.
 """
 
 from __future__ import annotations
@@ -649,55 +649,8 @@ def align_to_time(items, times, *, value_of, what: str, dtype):
 
 
 # --------------------------------------------------------------------------
-# Applying it. `shard_lst_p95` and `profile_lst_p95` call these.
+# Applying it. `composite.reduce_block` calls these on one block at a time.
 # --------------------------------------------------------------------------
-
-
-def weights_for_window(weight, inside, src_transform, dst_transform, shape_hw):
-    """Resample the tile's weight field onto one shard's grid.
-
-    Containment is resampled nearest and the ramp bilinearly, then the shares
-    are renormalised on the resampled containment. Bilinear alone would leak a
-    small weight to a path that does not cover the pixel, and the leak would
-    land on the swath edge, which is the one place this has to be right.
-
-    The field is a property of the tile, never of a shard. Deriving it per shard
-    would let two shards disagree and invent a seam on the shard grid, which is
-    the defect this would be trading the WRS seam for.
-    """
-    import numpy as np
-    from rasterio.enums import Resampling
-    from rasterio.warp import reproject
-
-    height, width = shape_hw
-    n = weight.shape[0]
-    out = np.zeros((n, height, width), dtype="float32")
-    cover = np.zeros((n, height, width), dtype="uint8")
-    for j in range(n):
-        for source, destination, method in (
-            (weight[j], out[j], Resampling.bilinear),
-            (inside[j].astype("uint8"), cover[j], Resampling.nearest),
-        ):
-            reproject(
-                source=source,
-                destination=destination,
-                src_transform=src_transform,
-                src_crs=GRID_CRS,
-                dst_transform=dst_transform,
-                dst_crs=GRID_CRS,
-                resampling=method,
-            )
-    covered = cover.astype(bool)
-    out[~covered] = 0.0
-    total = out.sum(axis=0)
-    out /= np.where(total > 0, total, np.float32(1.0))
-    k = covered.sum(axis=0)
-    degenerate = (total <= 0) & (k > 0)
-    if degenerate.any():
-        for j in range(n):
-            sel = degenerate & covered[j]
-            out[j][sel] = 1.0 / k[sel]
-    return out
 
 
 def subtract_offsets(celsius, offset):
@@ -789,10 +742,10 @@ def feathered_percentile(celsius, path_of_scene, paths, weight, q=95.0):
         weight: `(n_paths, ny, nx)` float32 on this shard's grid.
 
     Returns:
-        `(field, n_pooled)`. `field` is `(ny, nx)` float32, NaN only where
-        nothing was observed. `n_pooled` counts the pixels that took the
-        fallback, which is how much of this shard the cross-fade could not
-        describe.
+        `(field, pooled)`. `field` is `(ny, nx)` float32, NaN only where
+        nothing was observed. `pooled` is `(ny, nx)` bool, True where the
+        pixel took the fallback, which is how much of this block the
+        cross-fade could not describe. Callers that want the count sum it.
     """
     import numpy as np
 
@@ -833,7 +786,7 @@ def feathered_percentile(celsius, path_of_scene, paths, weight, q=95.0):
             out[pooled] = np.nanpercentile(
                 celsius[:, pooled], q, axis=0, overwrite_input=True
             ).astype("float32")
-    return out, int(pooled.sum())
+    return out, pooled
 
 
 def scene_digest(scene_ids, window: dict) -> str:
@@ -931,166 +884,13 @@ def prep_transform(prep: Prep):
     return transform_for(prep.bbox, prep.pixels_per_degree // prep.swath_factor)
 
 
-def shard_correction(
-    prep: Prep,
-    item_dicts,
-    shard_bbox,
-    shape_hw,
-    *,
-    pixels_per_degree: int,
-    max_offset_c=DESTRIPE_MAX_OFFSET_C,
-    debias: bool = True,
-    feather: bool = True,
-    emit_pooled: bool = False,
-):
-    """Everything one shard needs, cut down to that shard, in the driver.
-
-    The tile's weight field is hundreds of megabytes and every shard wants a few
-    hundred kilobytes of it. Resampling the window here keeps the field in one
-    process and the task payload small, and it is the same reason
-    `items_for_shard` sends a subset of the item list rather than all of it.
-
-    Returned lists run parallel to `item_dicts`, which is the order the shard
-    already holds. The shard joins them to its loaded time axis itself.
-    """
-    import numpy as np
-    from masks import transform_for
-
-    ids = [scene_id_of(d) for d in item_dicts]
-    if debias:
-        offset = np.array([prep.offset.get(s, np.nan) for s in ids], dtype="float64")
-        n_valid = np.array([prep.n_valid.get(s, 0) for s in ids], dtype="int64")
-        keep = keep_mask(
-            offset, n_valid, floor=DESTRIPE_MIN_PREP_SAMPLES, max_offset_c=max_offset_c
-        )
-    else:
-        # Every scene at its own baseline, and none of them rejected. Rejection
-        # is part of the correction, not a separate screen: a scene is discarded
-        # because its offset cannot be trusted, and without the offset there is
-        # nothing to distrust.
-        offset = np.zeros(len(ids), dtype="float64")
-        keep = np.ones(len(ids), dtype=bool)
-
-    weight = None
-    if feather and prep.paths:
-        weight = weights_for_window(
-            prep.weight,
-            prep.inside,
-            prep_transform(prep),
-            transform_for(shard_bbox, pixels_per_degree),
-            shape_hw,
-        )
-    return {
-        "offset": offset,
-        "keep": keep,
-        "paths": prep.paths if weight is not None else (),
-        "weight": weight,
-        "emit_pooled": emit_pooled,
-    }
-
-
 def pooled_percentile(celsius, q=95.0):
     """The composite this repository built before feathering, for comparison.
 
-    Not free here. The sharded path is eager, so this is a second reduction over
-    the whole stack rather than one more expression on a graph already held.
+    A second reduction over the same block, so `--emit-pooled` costs one more
+    percentile per block and no more reads.
     """
     import numpy as np
 
     with np.errstate(all="ignore"):
         return np.nanpercentile(celsius, q, axis=0).astype("float32")
-
-
-# --------------------------------------------------------------------------
-# The same two corrections, kept lazy for `profile_lst_p95.build_graph`.
-#
-# That path is the array-graph architecture this repository measured and left
-# behind, retained as a profiling harness. It still has to agree with the
-# sharded path pixel for pixel, which `tests/test_pipeline_paths.py` asserts, so
-# the corrections have to reach it too. Rejection drops time steps here rather
-# than filling them with NaN: a lazy subset costs nothing, where an eager one
-# would copy the stack.
-# --------------------------------------------------------------------------
-
-
-def apply_to_stack_xr(lst, items, correction):
-    """Drop rejected steps and subtract the offsets, lazily.
-
-    Returns `(debiased, labels, n_rejected)`, where `labels` runs parallel to
-    the surviving time axis.
-    """
-    import numpy as np
-    import xarray as xr
-
-    index_of = {scene_id_of(item): i for i, item in enumerate(items)}
-    times = lst["time"].values
-    position = align_to_time(
-        items,
-        times,
-        value_of=lambda item: index_of[scene_id_of(item)],
-        what="scene index",
-        dtype="int64",
-    )
-    labels = align_to_time(
-        items, times, value_of=path_of, what="WRS path", dtype=object
-    )
-    keep = np.asarray(correction["keep"], dtype=bool)[position]
-    offset = np.asarray(correction["offset"], dtype="float64")[position]
-
-    kept = np.flatnonzero(keep)
-    survivors = lst.isel(time=kept)
-    shift = xr.DataArray(
-        offset[kept].astype("float32"),
-        dims=["time"],
-        coords={"time": survivors["time"]},
-    )
-    return survivors - shift, labels[kept], int(keep.size - kept.size)
-
-
-def feathered_quantile_xr(lst, path_of_scene, paths, weight, dims, q=0.95):
-    """`feathered_percentile` as one expression on a graph already held.
-
-    Every per-path subset is taken from `lst` after whatever rechunk the caller
-    has already applied, so all of them descend from the same source blocks and
-    one `dask.compute` reads each block once. Rechunking a subset here would
-    give the scheduler two incompatible consumers of the same stack, and it
-    would hold the whole thing rather than stream it.
-
-    A pixel no swath covers falls back to the pooled quantile, for the reason
-    `feathered_percentile` gives. The fallback is one more reduction over the
-    same source blocks, so it joins the same compute rather than adding a pass.
-
-    This returns the field alone. `feathered_percentile` also returns how many
-    pixels took the fallback, which is a count a lazy graph cannot produce
-    without forcing a compute the caller did not ask for.
-
-    Returns None when no path matched a single step, which leaves the caller to
-    composite pooled.
-    """
-    import numpy as np
-    import xarray as xr
-
-    labels = np.asarray(path_of_scene)
-    coords = {d: lst[d] for d in dims}
-    numerator = None
-    denominator = None
-    for j, path in enumerate(paths):
-        steps = np.flatnonzero(labels == path)
-        if steps.size == 0:
-            continue
-        subset = lst.isel(time=steps)
-        present = subset.notnull().sum(dim="time") > 0
-        estimate = subset.quantile(q, dim="time").drop_vars("quantile", errors="ignore")
-        effective = xr.DataArray(weight[j], dims=list(dims), coords=coords).where(
-            present, 0.0
-        )
-        contribution = xr.where(present, estimate, 0.0) * effective
-        numerator = contribution if numerator is None else numerator + contribution
-        denominator = effective if denominator is None else denominator + effective
-
-    if numerator is None or denominator is None:
-        return None
-    covered = denominator > 0
-    feathered = xr.where(covered, numerator / denominator.where(covered, 1.0), np.nan)
-    pooled = lst.quantile(q, dim="time").drop_vars("quantile", errors="ignore")
-    return xr.where(covered, feathered, pooled)

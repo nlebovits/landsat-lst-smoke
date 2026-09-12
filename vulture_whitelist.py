@@ -1,32 +1,13 @@
-"""Vulture whitelist for false positives.
+"""Vulture whitelist. Empty, and that is the finding.
 
-Add entries here for code that vulture incorrectly flags as unused.
-Format: module.attribute or just attribute
+A whitelist names symbols vulture flags that are reached by something it
+cannot see: a framework, a plugin interface, a fixture. Every name this file
+carried was copied from `nlebovits/landsat-lst`, a package with Pydantic
+models and Click commands, and none of them existed here. A whitelist of
+absent names silences nothing and hides the next real one.
+
+Run the gate as `prek.toml` and `.github/workflows/ci.yml` run it. At
+`--min-confidence 80` it currently reports nothing over the checked modules,
+so there is nothing to suppress. Add an entry here only with the reason the
+symbol is reached, next to it.
 """
-
-# Pydantic computed fields are used by the framework
-_.name  # noqa: F821
-_.bbox  # noqa: F821
-_.datetime_range  # noqa: F821
-_.is_daytime  # noqa: F821
-
-# Click CLI commands are discovered dynamically
-_.process  # noqa: F821
-_.list_tiles  # noqa: F821
-_.tile_info  # noqa: F821
-
-# Dask WorkerPlugin API: setup/teardown receive `worker` (called as
-# plugin.setup(worker=...)), required by the interface even when unused.
-_.worker  # noqa: F821
-
-# pytest fixtures
-_.tiny_bbox  # noqa: F821
-_.pergamino_bbox  # noqa: F821
-_.sample_tile  # noqa: F821
-_.sample_job  # noqa: F821
-_.mock_qa_pixel  # noqa: F821
-_.mock_lwir_band  # noqa: F821
-_.fixtures_dir  # noqa: F821
-_.data_cache_dir  # noqa: F821
-_.fast_barriers  # noqa: F821
-_.s3_backend  # noqa: F821

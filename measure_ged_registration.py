@@ -12,9 +12,9 @@ a static ancillary input, ASTER GED is the input the Collection 2 algorithm
 reads, and a check against GED is the step that would make the claim measured.
 This script is that step.
 
-It needs no new data. `fulltile/` holds the finished S30W065 composite, 18,000
-by 18,000 at 3,600 pixels per degree over `[-65, -35, -60, -30]`, with its
-monthly observation counts beside it. Everything below reads those two arrays
+It needs no new data. A finished S30W065 run publishes the two COGs this
+reads, `lst_p95.tif` and `qa_count.tif`, 18,000 by 18,000 at 3,600 pixels per
+degree over `[-65, -35, -60, -30]`. Everything below reads those two rasters
 and the NumObs artifact.
 
 Three measurements, and each one can fail in a way that matters.
@@ -40,7 +40,7 @@ the tiles that hold nothing but L2SR should hold little or no land with
 emissivity. This is the check `FINDINGS.md:987` names.
 
     uv run measure_ged_registration.py \\
-        --raster fulltile/tile/lst_p95_dn.npy \\
+        --raster run/lst_p95.tif --qa run/qa_count.tif \\
         --tile S30W065 --out artifacts/ged_registration.json
 """
 
@@ -54,6 +54,17 @@ import aster_ged
 import masks
 from land_tiles import tile_bounds
 from lst_qa import LST_NODATA_DN
+
+#: Where a `--no-catalog` run leaves the two COGs. A catalog run puts them
+#: under `<out-dir>/catalog/<collection>/<tile>/`, so point `--raster` and
+#: `--qa` there instead.
+DEFAULT_RASTER = Path("run/lst_p95.tif")
+DEFAULT_QA = Path("run/qa_count.tif")
+
+#: Rows per window when the temperature band is read. A whole-band read holds
+#: the decoded tile twice, once inside GDAL and once in the array it hands
+#: back; a strip at a time holds it once and 66 MB besides.
+WINDOW_ROWS = 1024
 
 #: How far the registration scan looks, in GED cells, on each axis.
 SHIFT_CELLS = 2
@@ -197,7 +208,7 @@ def tile_level_claim(inventory_uri, land_tiles_uri, numobs_uri, land_geometry_ur
             }
         )
     rows.sort(key=lambda row: row["share_with_emissivity"], reverse=True)
-    over = sum(1 for row in rows if row["share_with_emissivity"] > 0.01)
+    over = sum(1 for row in rows if float(row["share_with_emissivity"]) > 0.01)
     ungranuled = sum(1 for row in rows if row["land_cells_with_granule"] == 0)
     return {
         "tiles_without_thermal": len(rows),
@@ -416,18 +427,47 @@ def rule_table(numobs_uri, bbox, shape, lst, land, pixels_per_degree: int) -> li
     return rows
 
 
-def any_observation_mask(qa_path, shape):
-    """True where the monthly counts sum above zero, read a month at a time.
+def raster_size(path) -> tuple[int, int]:
+    """`(height, width)` from a raster's header, without decoding a pixel."""
+    import rasterio
 
-    The array is 12 by 18,000 by 18,000, which is 3.9 GB. Memory-mapping it and
-    reducing month by month holds one 324 MB plane at a time instead.
+    with rasterio.open(path) as src:
+        return (src.height, src.width)
+
+
+def read_temperature(path):
+    """The encoded composite, read window by window out of its COG.
+
+    `src.read(1)` would decode the whole band into a second array on top of
+    the one it returns. Filling one array a strip at a time holds the tile
+    once, which is what the memory map this replaced did.
     """
     import numpy as np
+    import rasterio
+    from rasterio.windows import Window
 
-    qa = np.load(qa_path, mmap_mode="r")
+    with rasterio.open(path) as src:
+        out = np.empty((src.height, src.width), dtype=src.dtypes[0])
+        for row in range(0, src.height, WINDOW_ROWS):
+            rows = min(WINDOW_ROWS, src.height - row)
+            window = Window.from_slices(slice(row, row + rows), slice(0, src.width))
+            out[row : row + rows] = src.read(1, window=window)
+    return out
+
+
+def any_observation_mask(qa_path, shape):
+    """True where the monthly counts sum above zero, read a band at a time.
+
+    The asset is 12 uint8 bands of 18,000 by 18,000, which is 3.9 GB. Reducing
+    one band at a time holds one 324 MB plane, the way the memory map did.
+    """
+    import numpy as np
+    import rasterio
+
     seen = np.zeros(shape, dtype=bool)
-    for month in range(qa.shape[0]):
-        seen |= np.asarray(qa[month]) > 0
+    with rasterio.open(qa_path) as src:
+        for band in range(1, src.count + 1):
+            seen |= src.read(band) > 0
     return seen
 
 
@@ -435,8 +475,18 @@ def main(argv=None) -> int:  # noqa: C901 - one report, one branch per section
     import numpy as np
 
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--raster", type=Path, default=Path("fulltile/tile/lst_p95_dn.npy"))
-    p.add_argument("--qa", type=Path, default=Path("fulltile/tile/qa_count.npy"))
+    p.add_argument(
+        "--raster",
+        type=Path,
+        default=DEFAULT_RASTER,
+        help="the published lst_p95.tif of a finished run",
+    )
+    p.add_argument(
+        "--qa",
+        type=Path,
+        default=DEFAULT_QA,
+        help="the published qa_count.tif beside it, 12 uint8 bands",
+    )
     p.add_argument("--tile", default="S30W065")
     p.add_argument("--pixels-per-degree", type=int, default=3600)
     p.add_argument("--numobs-uri", type=Path, default=aster_ged.DEFAULT_NUMOBS_URI)
@@ -455,8 +505,9 @@ def main(argv=None) -> int:  # noqa: C901 - one report, one branch per section
         return 1
 
     bbox = tile_bounds(args.tile)
-    lst = np.load(args.raster, mmap_mode="r")
-    shape = tuple(lst.shape)
+    # The header first, so a raster of the wrong shape costs a header read
+    # rather than a full decode of the tile.
+    shape = raster_size(args.raster)
     expected = masks.raster_shape(bbox, args.pixels_per_degree)
     if shape != expected:
         print(
@@ -464,7 +515,7 @@ def main(argv=None) -> int:  # noqa: C901 - one report, one branch per section
             f"px/deg is {expected}"
         )
         return 1
-    lst = np.asarray(lst)
+    lst = read_temperature(args.raster)
     print(f"composite     {args.tile} {shape[1]:,} x {shape[0]:,} from {args.raster}")
 
     missing = lst == LST_NODATA_DN

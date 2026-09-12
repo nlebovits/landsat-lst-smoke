@@ -149,12 +149,12 @@ class TestManifest:
 
 
 class TestStagedPaths:
-    """The href is named before the GET, so a shard can run while others land."""
+    """The href is named before the GET, so the graph can be built while it runs."""
 
     def test_the_rewrite_agrees_with_what_the_fetch_writes(self, real_items, tmp_path):
         # The two used to be one statement. They are now a prediction and a
-        # write, and if they disagree every shard opens a file that is not
-        # there. `measure_shard_memory.staged_items` reads this layout too.
+        # write, and if they disagree every block opens a file that is not
+        # there.
         items, _ = real_items
         fake = FakeS3()
 
@@ -551,13 +551,14 @@ class TestDiskGuard:
         with pytest.raises(staging.StagingError) as exc:
             staging.disk_guard(manifest, tmp_path)
 
-        # Both figures and both escapes, because the next decision is whether
-        # to resize the volume or to cut the slice. Reading from S3 is not one:
-        # the unstaged path is gone.
+        # Both figures, the escape, and the one route it must not offer.
+        # Reading from S3 is not a fallback: the unstaged path is gone, and
+        # the message says so rather than leaving a reader to wonder.
         message = str(exc.value)
         assert f"{need / 1024**3:.1f} GiB" in message
+        assert f"{len(manifest):,} objects" in message
         assert "--stage-dir" in message
-        assert "--shard-slice" in message
+        assert "no unstaged path" in message
         assert "--no-stage" not in message
 
     def test_no_entry_point_can_be_told_to_skip_staging(self):

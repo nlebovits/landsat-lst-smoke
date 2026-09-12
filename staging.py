@@ -1,23 +1,25 @@
-"""Fetch each scene object once, instead of once per shard that touches it.
+"""Fetch each scene object once, instead of once per block that touches it.
 
 Requester-pays bills requests, not bytes. In-region S3 to EC2 transfer is
 $0.00, so S3 charges for the shape of an access pattern rather than its volume,
-and the sharded read path has the worst shape available.
+and reading straight from the bucket, block by block, has the worst shape
+available.
 
-The multiplier is geometry. A 512 px shard at 3600 px per degree covers about
+The multiplier is geometry. A 512 px block at 3600 px per degree covers about
 209 km². A Landsat scene covers 185 x 180 km, or 33,300 km². So about 155
-shards touch each scene, and each one opens the file again, in a different
+blocks touch each scene, and each one opens the file again, in a different
 worker process, with no shared cache. `measure_s3_requests.py` counts 4.77
 ranged GETs per open. The product is 739 requests per object, and across 895
-tiles it comes to about $1,822 against $807 to $928 of on-demand compute.
+tiles it comes to about $1,822 against $807 to $928 of on-demand compute. The
+default 360 px block is smaller still, so it can only make the count worse.
 
-The bytes were never the problem either. MEASURED on one shard of three real
-scenes: the windowed reads pull 0.342 MB per object, so the 155 shards pull
-53.0 MB against 33.6 MB for the whole object. Staging moves 0.63x the bytes,
-because the overlapping windows fetch the same blocks again for every shard
-that touches them.
+The bytes were never the problem either. MEASURED on one 512 px block of three
+real scenes: the windowed reads pull 0.342 MB per object, so the 155 blocks
+pull 53.0 MB against 33.6 MB for the whole object. Staging moves 0.63x the
+bytes, because the overlapping windows fetch the same blocks again for every
+one that touches them.
 
-This module fetches every object the slice needs with one GET, writes it to
+This module fetches every object the tile needs with one GET, writes it to
 local disk, and rewrites the item hrefs to point there. The 155 reads still
 happen. They stop being billable, and the run's S3 line becomes a counted total
 rather than a figure derived from a sampled requests-per-read.
@@ -27,7 +29,7 @@ because the destination is a pure function of the item id, the band, and the
 source key. Nothing depends on that ordering now, and it costs nothing: the
 manifest is built once and read twice.
 
-The fetch finishes before the cluster starts. Running it beside the shards it
+The fetch finishes before the cluster starts. Running it beside the blocks it
 feeds was tried and MEASURED as a loss. The same 1,998 objects and 78.9 GiB
 stage in 91.9 s on an idle `m6id.16xlarge` and in 358.7 s beside 64 busy
 workers, because this phase spends its time on TLS, HTTP and the copy loop and
@@ -45,7 +47,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
-#: The two assets `process_shard` loads. Staging fetches these and nothing else.
+#: The two bands `composite.open_stack` loads. Staging fetches these and
+#: nothing else.
 BANDS = ("lwir11", "qa_pixel")
 
 #: Bytes to reserve per object before the first GET, so the disk guard can run
@@ -94,17 +97,18 @@ def drop_scenes_without_thermal(item_dicts, item_bboxes):
 
     `tile_inventory.build_item` omits the `lwir11` asset entirely when the
     inventory row has no `thermal_href`, which is what Earth Search returns for
-    an `OLI_TIRS_L2SR` product. Those scenes reach `process_shard`, load as
-    fill, and contribute nothing.
+    an `OLI_TIRS_L2SR` product. Those scenes reach the graph, load as fill, and
+    contribute nothing.
 
     The removal is output-neutral by construction. `lst_qa.valid_observation`
     starts with `not_fill`, so a scene of pure fill is false everywhere in both
-    the percentile and the monthly counts. It still costs a `qa_pixel` fetch and
-    a layer on the time axis of every shard it touches, and that time axis is
-    what caps shard size at 94% of the worker memory limit.
+    the percentile and the monthly counts. It still costs a `qa_pixel` fetch
+    and a step on the time axis of every block it touches, and that time axis
+    is what `composite.block_bytes` prices the block against the worker memory
+    limit.
 
     `item_bboxes` is index-parallel to `item_dicts`. Filtering one without the
-    other would leave every shard reading the wrong scenes, so both are
+    other would leave every block reading the wrong scenes, so both are
     filtered together and returned together.
 
     Returns:
@@ -140,7 +144,7 @@ def split_s3_uri(href: str) -> tuple[str, str]:
 def staging_manifest(item_dicts, indices):
     """The distinct objects a slice needs, as `(item_id, band, href)`.
 
-    One scene appearing in 155 shards produces two objects, not 310. That
+    One scene appearing in 155 blocks produces two objects, not 310. That
     collapse is the entire saving, so it happens here, before anything is
     fetched.
 
@@ -166,9 +170,9 @@ def staged_path(stage_dir, item_id: str, band: str, key: str) -> Path:
     """Where one staged object lands: `<stage_dir>/<item_id>/<band><suffix>`.
 
     One definition, read by the fetch and by the href rewrite that now runs in
-    front of it. `measure_shard_memory.staged_items` reads this layout back off
-    disk to build items from a `--keep-staged` directory, so the shape is a
-    contract rather than an implementation detail.
+    front of it. A `--keep-staged` directory is read back off disk by name
+    alone, with no manifest, so the shape is a contract rather than an
+    implementation detail.
     """
     return Path(stage_dir) / item_id / f"{band}{_suffix(key)}"
 
@@ -178,9 +182,10 @@ def repoint_items(item_dicts, indices, stage_dir):
 
     The destination is a pure function of the item id, the band, and the source
     key, so it can be named before anything is fetched. That is what lets a
-    shard be submitted while other scenes are still arriving: the item table is
-    final from the start, and the only thing that changes is whether a given
-    file has landed yet. The caller releases a shard when its own objects have.
+    unit of work be submitted while other scenes are still arriving: the item
+    list is final from the start, and the only thing that changes is whether a
+    given file has landed yet. The caller releases a unit when its own objects
+    have.
 
     The rewrite used to run after the whole fetch pool drained, which is what
     forced staging to finish before the cluster could start.
@@ -230,10 +235,11 @@ def disk_guard(manifest, stage_dir: Path) -> int:
     """Refuse to start a fetch that cannot finish.
 
     Runs before the first GET, off the estimate rather than a HEAD per object,
-    because HEAD is billable too. The message names both figures and the two
-    escapes, which are a larger volume or a smaller slice. Reading from S3
-    instead is no longer one of them: the unstaged path costs about 739
-    requests per object against one, and runs about twice as slow.
+    because HEAD is billable too. The message names both figures and the one
+    escape, which is a larger volume: a run composites one whole tile on one
+    machine, so there is no smaller slice of it to fall back to. Reading from
+    S3 instead is not an escape either, because the unstaged path costs about
+    739 requests per object against one, and runs about twice as slow.
 
     Returns:
         The estimated bytes, so the caller can report what it reserved.
@@ -244,9 +250,10 @@ def disk_guard(manifest, stage_dir: Path) -> int:
         msg = (
             f"staging {len(manifest):,} objects needs about "
             f"{need / 1024**3:.1f} GiB and {stage_dir} has "
-            f"{free / 1024**3:.1f} GiB free. Point --stage-dir at a larger "
-            f"volume, or cut the work with --shard-slice and run the slices "
-            f"in sequence. There is no unstaged path to fall back to."
+            f"{free / 1024**3:.1f} GiB free. Point --stage-dir at a volume "
+            f"that holds the tile: one machine composites one whole tile, so "
+            f"there is no smaller slice to cut it into, and there is no "
+            f"unstaged path to fall back to."
         )
         raise StagingError(msg)
     return need
@@ -308,9 +315,9 @@ def _release_page_cache(fh) -> None:
     network-bound at the 922 MB/s an `m6id.16xlarge` measured in region, which
     is 3.4x below the slower figure.
 
-    This is not what fixed the run that died at cluster start. That was
-    `shard_bytes` under-reporting by 3.9x, and a corrected budget alone would
-    have fit. The justification here is the written volume against RAM, which
+    This is not what fixed the run that died at cluster start. That was the
+    per-unit memory model under-reporting by 3.9x, and a corrected budget alone
+    would have fit; `composite.block_bytes` is the corrected model. The justification here is the written volume against RAM, which
     holds independently.
 
     Best effort. `posix_fadvise` is Linux-only and advisory everywhere.
@@ -381,7 +388,7 @@ class StagingRun:
 
     Two callers, one fetch. `stage_scenes` drains this to the end and returns a
     report, which is what `--no-overlap` does. An overlapped run drains it a few
-    objects at a time between gathering shard results, and releases each shard
+    objects at a time between gathering results, and releases each unit of work
     as the last object it waits on arrives.
 
     The fetch itself is the same either way, so the two orderings cannot
@@ -565,7 +572,7 @@ def stage_scenes(
 
     The serial form: nothing else runs until the last object lands. An
     overlapped run drives `StagingRun` directly instead, so that it can submit
-    shards while the fetch continues.
+    work while the fetch continues.
 
     Mutates the asset hrefs of the staged items in place, through
     `repoint_items`, before the first GET rather than after the last one.

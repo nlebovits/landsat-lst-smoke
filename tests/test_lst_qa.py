@@ -35,10 +35,8 @@ from lst_qa import (  # noqa: E402
     QA_EXCLUDED_BIT_NUMBERS,
     QA_EXCLUDED_BITS,
     encode_celsius,
-    encode_celsius_xr,
     in_trusted_range,
     masked_celsius,
-    masked_celsius_xr,
     qa_clear,
     to_celsius,
 )
@@ -298,35 +296,24 @@ class TestEncoding:
         assert list(back) == pytest.approx([30.0, 45.5, 79.9], abs=LST_SCALE)
 
 
-class TestBothWrappersAgree:
-    """The numpy and xarray wrappers are the same rule, twice."""
+class TestThePredicatesTakeDataArrays:
+    """The predicates are one rule for numpy and xarray alike.
 
-    def _arrays(self):
+    `composite.reduce_block` hands numpy to `masked_celsius`; the predicates it
+    is built from also answer a DataArray, which is what lets a test or a
+    notebook ask the same question of a lazy stack.
+    """
+
+    def test_the_validity_rule_agrees_on_both(self):
+        from lst_qa import valid_observation
+
         rng = np.random.default_rng(7)
         dn = rng.integers(0, 65536, size=(5, 8, 8), dtype="uint16")
         dn[0, 0, :] = 0  # a fill row
         dn[1, 1, :] = 3  # a reprojected-edge row
         qa = rng.integers(0, 4096, size=(5, 8, 8)).astype("uint16")
-        return dn, qa
-
-    def test_the_masked_stacks_are_identical(self):
-        dn, qa = self._arrays()
-        eager, _ = masked_celsius(dn.copy(), qa)
-        lazy = masked_celsius_xr(
-            xr.DataArray(dn, dims=("time", "y", "x")),
-            xr.DataArray(qa, dims=("time", "y", "x")),
-        )
-        np.testing.assert_array_equal(np.isnan(eager), np.isnan(lazy.values))
-        np.testing.assert_allclose(
-            np.nan_to_num(eager, nan=0.0), np.nan_to_num(lazy.values, nan=0.0)
-        )
-
-    def test_the_encoders_are_identical(self):
-        celsius = np.array(
-            [-124.15, -50.0, -49.99, -49.98, 0.0, 30.0, 80.0, 700.0, np.nan],
-            dtype="float32",
-        )
-        eager = encode_celsius(celsius)
-        lazy = encode_celsius_xr(xr.DataArray(celsius, dims=("p",)))
+        _, eager = masked_celsius(dn.copy(), qa)
+        lazy_dn = xr.DataArray(dn, dims=("time", "y", "x"))
+        lazy_qa = xr.DataArray(qa, dims=("time", "y", "x"))
+        lazy = valid_observation(lazy_dn, lazy_qa, to_celsius(lazy_dn))
         np.testing.assert_array_equal(eager, lazy.values)
-        assert lazy.dtype == np.uint16

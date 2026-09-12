@@ -1,11 +1,8 @@
-"""One definition of a usable LST observation, shared by every P95 path.
+"""One definition of a usable LST observation.
 
-Two paths compute the composite. `shard_lst_p95.process_shard` reduces one
-shard eagerly in numpy; `profile_lst_p95.build_graph` builds a lazy xarray
-graph. They must agree on which pixels count, or the two answers differ for
-reasons that have nothing to do with the architecture under test. The
-predicates below are the agreement. Each path wraps them in the array library
-it uses, and nothing else decides validity.
+`composite.reduce_block` calls `masked_celsius` on every block of the lazy
+graph, and nothing else decides validity. The predicates below are that
+definition, and they work on numpy arrays and DataArrays alike.
 
 The rules come from `nlebovits/landsat-lst` (`qa.py`, `encoding.py`, and the
 composite validation in `pipeline.py`). Four of them matter:
@@ -153,7 +150,7 @@ def encodable_dn(dn):
 
 
 # --------------------------------------------------------------------------
-# numpy wrappers, for the eager shard path.
+# numpy wrappers, called inside one block of the graph.
 # --------------------------------------------------------------------------
 
 
@@ -185,26 +182,3 @@ def encode_celsius(celsius):
 
     dn = np.rint((celsius - LST_OFFSET) / LST_SCALE)
     return np.where(encodable_dn(dn), dn, LST_NODATA_DN).astype("uint16")
-
-
-# --------------------------------------------------------------------------
-# xarray wrappers, for the lazy array-graph path. Same predicates, kept lazy.
-# --------------------------------------------------------------------------
-
-
-def masked_celsius_xr(thermal_dn, qa_pixel):
-    """`masked_celsius` for a DataArray. Builds no task the eager path lacks."""
-    celsius = to_celsius(thermal_dn)
-    return celsius.where(valid_observation(thermal_dn, qa_pixel, celsius))
-
-
-def encode_celsius_xr(celsius):
-    """`encode_celsius` for a DataArray, without collapsing the graph.
-
-    `np.where` would return a numpy array and compute the whole composite here,
-    so this goes through `xr.where`.
-    """
-    import xarray as xr
-
-    dn = ((celsius - LST_OFFSET) / LST_SCALE).round()
-    return xr.where(encodable_dn(dn), dn, LST_NODATA_DN).astype("uint16")

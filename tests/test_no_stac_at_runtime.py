@@ -6,16 +6,16 @@ turns a configuration mistake into hundreds of machines doing the slow thing,
 and it would pass every other test in this suite.
 
 So two checks. A static one, that the runtime modules do not name a STAC
-client. A live one, that the inventory read and the shard plan finish with
+client. A live one, that the inventory read and the block plan finish with
 every socket in the process blocked.
 
 What the live check covers, precisely: everything from the manifest gate
-through `process_shard`, which is the whole run. Staging closed the gap that
-used to end this list at `items_for_shard`. The run now has two phases, a stage
-phase that opens S3 and a shard phase that reads local files, so the composite
-itself can be computed under the socket guard rather than asserted to be
-reachable without one. `tests/test_load_parity.py` still covers the unstaged
-read, against the bucket, under the `s3` marker.
+through `composite.build_graph` and its compute, which is the whole run.
+Staging closed the gap that used to end this list at the read. The run has two
+phases, a stage phase that opens S3 and a compute phase that reads local
+files, so the composite itself can be computed under the socket guard rather
+than asserted to be reachable without one. `tests/test_load_parity.py` still
+covers the unstaged read, against the bucket, under the `s3` marker.
 
 These tests run against `artifacts/inventory_slice.parquet`, which is committed.
 They used to run against the 167 MB build, which is gitignored, so on a clean
@@ -33,6 +33,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import composite  # noqa: E402
 import masks  # noqa: E402
 import shard_lst_p95  # noqa: E402
 import staging  # noqa: E402
@@ -45,12 +46,13 @@ TILE = "S30W065"
 #: The modules a VM imports to turn a tile into a composite.
 RUNTIME_MODULES = (
     "shard_lst_p95",
+    "composite",
+    "observe",
     "tile_inventory",
     "land_tiles",
     "masks",
     "aster_ged",
     "staging",
-    "item_table",
     "memory_sampler",
     "destripe",
     "tile_prep",
@@ -98,9 +100,16 @@ class TestNoCatalogueInTheRuntime:
         assert not hasattr(shard_lst_p95, "search_items")
 
     def test_the_reference_search_is_not_imported_by_the_runtime(self):
-        """stac_reference may exist. It may not be reachable from here."""
+        """stac_reference may exist. It may not be reachable from here.
+
+        Imported here rather than read out of `sys.modules`, because some of
+        these reach the runtime through a deferred import inside a function
+        and a missing key would read as a pass.
+        """
+        import importlib
+
         for name in RUNTIME_MODULES:
-            module = sys.modules[name]
+            module = importlib.import_module(name)
             for attr in vars(module).values():
                 mod = getattr(attr, "__module__", "")
                 assert mod != "stac_reference", (
@@ -152,10 +161,10 @@ class TestNoCatalogueInTheRuntime:
 
 
 class TestTheMaskBuildsOffline:
-    """The mask runs between the gather and the summary, inside the run.
+    """The mask is built inside the run, before the cluster starts.
 
     This module's docstring claims the run is offline from the manifest gate
-    through `process_shard`. The mask sits inside that span and reads two files
+    through the compute. The mask sits inside that span and reads two files
     that both have network-fetching builders behind them.
     """
 
@@ -221,14 +230,14 @@ class TestRuntimeWorksOffline:
         assert prov["source_url"].startswith("https://landsat.usgs.gov/")
         assert len(prov["source_sha256"]) == 64
 
-    def test_the_shard_plan_runs_offline(self, no_network, slice_artifact):
+    def test_the_block_plan_runs_offline(self, no_network, slice_artifact):
         """Everything that decides what to read, up to the read itself.
 
-        `items_for_shard` is the last step before the read. Running it under
-        the socket guard covers the whole decision path: the manifest gate, the
-        row-group read, `build_item`, the shard geometry, and the per-shard
-        overlap filter. `TestTheComputePathIsOffline` carries it through the
-        read as well.
+        `composite.block_depths` is the last step before the graph. Running it
+        under the socket guard covers the whole decision path: the manifest
+        gate, the row-group read, `build_item`, the block geometry, and the
+        per-block overlap count that feeds the memory model.
+        `TestTheComputePathIsOffline` carries it through the read as well.
         """
         args = shard_lst_p95.parse_args(
             ["--tile", TILE, "--inventory-uri", str(slice_artifact)]
@@ -237,11 +246,10 @@ class TestRuntimeWorksOffline:
         assert tile_id == TILE
         items, boxes, _ = shard_lst_p95.load_tile_items(args, tile_id)
 
-        shards, _, _ = shard_lst_p95.plan_shards(bbox, args.pixels_per_degree, 512)
-        assert shards
-        hit = [len(shard_lst_p95.items_for_shard(sh, boxes)) for sh in shards]
-        assert sum(hit) > 0, "no shard overlapped any scene in the slice"
-        assert max(hit) <= len(items)
+        depths = composite.block_depths(bbox, args.pixels_per_degree, args.chunk, boxes)
+        assert depths.size == 50 * 50
+        assert depths.sum() > 0, "no block overlapped any scene in the slice"
+        assert depths.max() <= len(items)
 
 
 #: A small EPSG:4326 raster, so the synthetic scenes need no reprojection and
@@ -301,7 +309,7 @@ def scenes_in_a_bucket(tmp_path):
     64 px raster rather than a whole Landsat scene.
 
     Returns:
-        The item dicts, the shard covering them, and the object store contents.
+        The item dicts, the bbox covering them, and the object store contents.
     """
     from conftest import make_row
     from tile_inventory import build_item
@@ -341,22 +349,24 @@ def scenes_in_a_bucket(tmp_path):
         ]
         items.append(item)
 
-    half = SCENE_PX // 2
-    shard = shard_lst_p95.Shard(
-        0,
-        0,
-        0,
-        0,
-        half,
-        half,
-        (
-            SCENE_WEST,
-            SCENE_SOUTH,
-            SCENE_WEST + half * SCENE_RES,
-            SCENE_SOUTH + half * SCENE_RES,
-        ),
+    bbox = (SCENE_WEST, SCENE_SOUTH, east, north)
+    return items, bbox, blobs
+
+
+def composite_of(items, bbox):
+    """The whole graph, computed in this process with no scheduler at all.
+
+    `scheduler="sync"` runs every task inline, so a socket the compute would
+    open is opened here, under the guard, rather than inside a worker process
+    the guard cannot reach.
+    """
+    import dask
+
+    out = composite.build_graph(
+        items, bbox, crs="EPSG:4326", resolution=SCENE_RES, chunk=SCENE_PX // 2
     )
-    return items, shard, blobs
+    with dask.config.set(scheduler="sync"):
+        return out.compute()
 
 
 class TestTheComputePathIsOffline:
@@ -375,7 +385,7 @@ class TestTheComputePathIsOffline:
     ):
         import numpy as np
 
-        items, shard, blobs = scenes_in_a_bucket
+        items, bbox, blobs = scenes_in_a_bucket
         fake = FileBackedS3(blobs)
 
         report = staging.stage_scenes(
@@ -386,7 +396,7 @@ class TestTheComputePathIsOffline:
             client_factory=lambda _n: fake,
         )
 
-        # Three scenes, two bands, one GET each. Not one per shard that reads
+        # Three scenes, two bands, one GET each. Not one per block that reads
         # them, which is the entire point of the phase.
         assert report["objects"] == 6
         assert report["get_requests"] == 6
@@ -396,58 +406,25 @@ class TestTheComputePathIsOffline:
             for band in ("lwir11", "qa_pixel")
         )
 
-        out = shard_lst_p95.process_shard(shard, items, "EPSG:4326", SCENE_RES)
+        out = composite_of(items, bbox)
 
-        assert out["n_scenes"] == 3
-        assert out["lst_p95"].shape == (SCENE_PX // 2, SCENE_PX // 2)
+        assert out.attrs["n_scenes"] == 3
+        assert out["lst_p95"].shape == (SCENE_PX, SCENE_PX)
         # Every pixel is clear in every scene, so nothing is nodata and the
         # monthly counts hold all three observations.
-        assert not np.any(out["lst_p95"] == shard_lst_p95.LST_NODATA_DN)
-        assert int(out["qa_count"].sum(axis=0).max()) == 3
-
-    def test_the_table_path_gives_the_same_pixels(
-        self, no_network, scenes_in_a_bucket, tmp_path
-    ):
-        """What `shard_task` changed, checked against the arrays.
-
-        A shard used to receive its item dicts in the task message. It now
-        receives a path and a list of positions, and the dicts make a round
-        trip through JSON on the way. That round trip turns each geometry
-        corner from a tuple into a list, which is the one thing it alters, and
-        this is the check that the alteration reaches no pixel.
-        """
-        import numpy as np
-
-        import item_table
-
-        items, shard, blobs = scenes_in_a_bucket
-        staging.stage_scenes(
-            items,
-            range(len(items)),
-            tmp_path / "stage",
-            threads=2,
-            client_factory=lambda _n: FileBackedS3(blobs),
-        )
-
-        direct = shard_lst_p95.process_shard(shard, items, "EPSG:4326", SCENE_RES)
-        report = item_table.write(tmp_path / "item-table.json", items)
-        through = shard_lst_p95.shard_task(
-            shard, report["path"], list(range(len(items))), "EPSG:4326", SCENE_RES
-        )
-
-        assert np.array_equal(direct["lst_p95"], through["lst_p95"])
-        assert np.array_equal(direct["qa_count"], through["qa_count"])
-        assert direct["n_scenes"] == through["n_scenes"]
+        assert not np.any(out["lst_p95"].values == shard_lst_p95.LST_NODATA_DN)
+        assert int(out["qa_count"].values.sum(axis=0).max()) == 3
 
     def test_the_staged_run_reads_no_object_twice(
         self, no_network, scenes_in_a_bucket, tmp_path
     ):
-        """Two shards over the same scenes, and still six GETs.
+        """Two composites over the same scenes, and still six GETs.
 
-        The unstaged path pays 4.77 requests per shard-scene read, so two
-        shards over three scenes would cost about 28 requests instead of six.
+        The unstaged path pays 4.77 requests per block-scene read, so a tile
+        of blocks over three scenes would cost hundreds of requests instead of
+        six. Nothing after the stage phase may reach the object store again.
         """
-        items, shard, blobs = scenes_in_a_bucket
+        items, bbox, blobs = scenes_in_a_bucket
         fake = FileBackedS3(blobs)
 
         staging.stage_scenes(
@@ -460,7 +437,7 @@ class TestTheComputePathIsOffline:
 
         assert len(fake.calls) == 6
         for _ in range(2):
-            shard_lst_p95.process_shard(shard, items, "EPSG:4326", SCENE_RES)
+            composite_of(items, bbox)
         assert len(fake.calls) == 6
 
 

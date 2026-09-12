@@ -22,6 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import composite  # noqa: E402
 import destripe  # noqa: E402
 import shard_lst_p95  # noqa: E402
 import tile_prep  # noqa: E402
@@ -38,10 +39,17 @@ WINDOW = {
 }
 
 
-def item(scene_id: str, path: str = WEST) -> dict:
+def item(scene_id: str, path: str = WEST, *, minute: int = 0) -> dict:
+    """One item. Each carries its own stamp, because the join is on time.
+
+    `composite.per_scene_vectors` maps every value onto the loaded time axis
+    through `destripe.align_to_time`, which refuses two scenes that share a
+    stamp and disagree. A fixture that gave every scene the same minute could
+    not exercise the join at all.
+    """
     return {
         "properties": {
-            "datetime": "2021-01-05T14:02:11.123456Z",
+            "datetime": f"2021-01-05T14:{minute:02d}:11.123456Z",
             "landsat:scene_id": scene_id,
             "landsat:wrs_path": path,
             "landsat:wrs_row": "030",
@@ -50,7 +58,9 @@ def item(scene_id: str, path: str = WEST) -> dict:
 
 
 def items(n: int = 4) -> list[dict]:
-    return [item(f"SCENE{i:02d}", WEST if i % 2 == 0 else EAST) for i in range(n)]
+    return [
+        item(f"SCENE{i:02d}", WEST if i % 2 == 0 else EAST, minute=i) for i in range(n)
+    ]
 
 
 def write_prep(directory: Path, item_dicts, **overrides) -> Path:
@@ -98,17 +108,6 @@ def run_args(prep_dir: Path | None, **overrides):
         **WINDOW,
     }
     return argparse.Namespace(**(base | overrides))
-
-
-def merge_args(**overrides):
-    """What `merge_parts` reads besides the parts themselves.
-
-    The catalog is off. These tests fabricate a part-meta to make two parts
-    disagree about one rule, and a fabricated meta carries none of the window
-    a catalog item needs. `tests/test_output_mask_run.py` covers the catalog
-    against a meta a real run wrote.
-    """
-    return argparse.Namespace(**({"no_catalog": True} | overrides))
 
 
 PROVENANCE = {"schema_version": 1, "built_at": "2026-09-01"}
@@ -272,153 +271,6 @@ class TestTheCorrectionRule:
         assert rule["max_offset_c"] is None
 
 
-def write_part(directory: Path, rule, *, pooled=None) -> Path:
-    """One part file and its meta, covering a 4 x 4 tile in a single shard.
-
-    `pooled` is the baseline array `--emit-pooled` would have written. Nothing
-    in the meta records the flag, so the merge finds the key by looking, and
-    this is what a part that ran without it looks like.
-    """
-    directory.mkdir(parents=True, exist_ok=True)
-    arrays = {
-        "lst_0_0": np.zeros((4, 4), dtype="uint16"),
-        "qa_0_0": np.zeros((12, 4, 4), dtype="uint8"),
-    }
-    if pooled is not None:
-        arrays["pooled_0_0"] = pooled
-    # numpy declares savez_compressed(**kwds: ArrayLike) alongside a bool
-    # allow_pickle, so a dict of arrays collides with the named parameter.
-    np.savez_compressed(
-        directory / "part-000.npz",
-        **arrays,  # ty: ignore[invalid-argument-type]
-    )
-    (directory / "part-meta.json").write_text(
-        json.dumps(
-            {
-                "raster": [4, 4],
-                "bbox": list(BBOX),
-                "crs": "EPSG:4326",
-                "pixels_per_degree": PPD,
-                "shard_px": 4,
-                "n_shards": 1,
-                "mask_rule": None,
-                "correction_rule": rule,
-            }
-        )
-    )
-    return directory
-
-
-class TestTheMergedPooledBaseline:
-    """`--emit-pooled` wrote a raster the merge used to drop on the floor.
-
-    Every part carried `pooled_<y0>_<x0>` keys and `merge_parts` skipped every
-    key that did not start with `lst_`, so the baseline existed only inside
-    part files, one per slice, and the README promised a raster beside the
-    product.
-    """
-
-    def test_a_run_without_the_flag_writes_no_baseline(self, tmp_path):
-        a = write_part(tmp_path / "a", None)
-        assert shard_lst_p95.merge_parts([a], tmp_path / "out", merge_args()) in (0, 2)
-        assert not (tmp_path / "out" / "lst_p95_pooled_dn.npy").exists()
-        record = json.loads((tmp_path / "out" / "merge.json").read_text())
-        assert record["pooled_coverage"] is None
-
-    def test_the_baseline_is_assembled_beside_the_product(self, tmp_path):
-        pooled = np.full((4, 4), 4_242, dtype="uint16")
-        a = write_part(tmp_path / "a", None, pooled=pooled)
-        assert shard_lst_p95.merge_parts([a], tmp_path / "out", merge_args()) in (0, 2)
-        written = np.load(tmp_path / "out" / "lst_p95_pooled_dn.npy")
-        assert np.array_equal(written, pooled)
-        record = json.loads((tmp_path / "out" / "merge.json").read_text())
-        assert record["pooled_coverage"] == 1.0
-
-    def test_one_slice_without_the_flag_reports_partial_coverage(self, tmp_path):
-        """A diagnostic raster is no reason to refuse a product.
-
-        The mask and correction rules stop a merge because they decide pixel
-        values. This one is a baseline for comparison, so a partial one is
-        reported and the tile still merges.
-        """
-        pooled = np.full((2, 2), 7, dtype="uint16")
-        a = tmp_path / "a"
-        a.mkdir(parents=True)
-        np.savez_compressed(
-            a / "part-000.npz",
-            lst_0_0=np.zeros((2, 2), dtype="uint16"),
-            qa_0_0=np.zeros((12, 2, 2), dtype="uint8"),
-            pooled_0_0=pooled,
-            lst_2_0=np.zeros((2, 2), dtype="uint16"),
-            qa_2_0=np.zeros((12, 2, 2), dtype="uint8"),
-        )
-        (a / "part-meta.json").write_text(
-            json.dumps(
-                {
-                    "raster": [4, 2],
-                    "bbox": list(BBOX),
-                    "crs": "EPSG:4326",
-                    "pixels_per_degree": PPD,
-                    "shard_px": 2,
-                    "n_shards": 2,
-                    "mask_rule": None,
-                    "correction_rule": None,
-                }
-            )
-        )
-        assert shard_lst_p95.merge_parts([a], tmp_path / "out", merge_args()) in (0, 2)
-        record = json.loads((tmp_path / "out" / "merge.json").read_text())
-        assert record["pooled_coverage"] == 0.5
-        assert record["coverage"] == 1.0
-
-
-class TestMergingRefusesMixedParts:
-    def part(self, directory: Path, rule) -> Path:
-        directory.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            directory / "part-000.npz",
-            lst_0_0=np.zeros((4, 4), dtype="uint16"),
-            qa_0_0=np.zeros((12, 4, 4), dtype="uint8"),
-        )
-        (directory / "part-meta.json").write_text(
-            json.dumps(
-                {
-                    "raster": [4, 4],
-                    "bbox": list(BBOX),
-                    "crs": "EPSG:4326",
-                    "pixels_per_degree": PPD,
-                    "shard_px": 4,
-                    "n_shards": 1,
-                    "mask_rule": None,
-                    "correction_rule": rule,
-                }
-            )
-        )
-        return directory
-
-    def test_one_corrected_part_beside_one_uncorrected_stops_the_merge(self, tmp_path):
-        a = self.part(tmp_path / "a", {"prep_scene_digest": "abc", "feather": True})
-        b = self.part(tmp_path / "b", None)
-        with pytest.raises(SystemExit, match="corrected under 2 different rules"):
-            shard_lst_p95.merge_parts([a, b], tmp_path / "out", merge_args())
-
-    def test_parts_built_against_different_prep_files_stop_the_merge(self, tmp_path):
-        rule = {"prep_scene_digest": "abc", "feather": True}
-        a = self.part(tmp_path / "a", rule)
-        b = self.part(tmp_path / "b", rule | {"prep_scene_digest": "def"})
-        with pytest.raises(SystemExit, match="corrected under 2 different rules"):
-            shard_lst_p95.merge_parts([a, b], tmp_path / "out", merge_args())
-
-    def test_matching_parts_merge(self, tmp_path):
-        rule = {"prep_scene_digest": "abc", "feather": True}
-        a = self.part(tmp_path / "a", rule)
-        b = self.part(tmp_path / "b", dict(rule))
-        assert shard_lst_p95.merge_parts([a, b], tmp_path / "out", merge_args()) in (
-            0,
-            2,
-        )
-
-
 class TestEveryRejectedScene:
     def test_the_run_stops_rather_than_writing_an_empty_tile(self, tmp_path):
         """An empty composite is not a tile with no data.
@@ -439,53 +291,132 @@ class TestEveryRejectedScene:
         summary = json.loads((tmp_path / "summary.json").read_text())
         assert summary["status"] == "no-scene-survives-destriping"
         assert summary["n_scenes"] == 4
-        assert not list(tmp_path.glob("part-*.npz"))
+        assert not list(tmp_path.glob("*.tif"))
 
 
-class TestTheShardSliceOfThePrepFile:
-    def test_it_runs_parallel_to_the_item_list_it_was_given(self, tmp_path):
+def vectors(prep_dir: Path, item_dicts, times, **overrides):
+    """`per_scene_vectors` under the flags the driver would have parsed."""
+    args = run_args(prep_dir, **overrides)
+    return composite.per_scene_vectors(
+        item_dicts,
+        times,
+        destripe.load_prep(prep_dir),
+        max_offset_c=args.max_offset_c,
+        debias=not args.no_destripe,
+    )
+
+
+class TestThePerSceneVectors:
+    """The offsets, the keep flags and the path codes the kernel is handed.
+
+    One value per step of the loaded time axis, joined on the acquisition stamp
+    and never on position. The sibling paid for a positional join once: labels
+    carried positionally against a stack that de-striping had thinned killed
+    all 35 of its shards with an `IndexError`. `composite.build_graph` calls
+    this and hands the result to `reduce_block` as an `apply_ufunc` core
+    dimension, so a vector out of step with the stack corrects the wrong scene
+    and says nothing.
+    """
+
+    def test_they_run_parallel_to_the_time_axis_they_were_given(self, tmp_path):
         write_prep(tmp_path, items(4), offset=np.array([0.0, 1.0, 2.0, 3.0]))
-        prep = destripe.load_prep(tmp_path)
-        # The shard holds two of the four scenes, in its own order.
-        subset = [items(4)[3], items(4)[1]]
-        shard = shard_lst_p95.Shard(0, 0, 0, 0, 8, 8, (-61.0, -33.0, -60.9, -32.9))
-        correction = shard_lst_p95.shard_correction_for(
-            run_args(tmp_path), prep, shard, subset
-        )
-        assert list(correction["offset"]) == [3.0, 1.0]
-        assert list(correction["keep"]) == [True, True]
-        assert correction["weight"].shape == (2, 8, 8)
+        # The stack holds two of the four scenes, in neither the item order nor
+        # the prep order.
+        scenes = items(4)
+        times = [destripe.timestamp_of(scenes[3]), destripe.timestamp_of(scenes[1])]
+        offset, keep, path_code, paths = vectors(tmp_path, scenes, times)
+        assert list(offset) == [3.0, 1.0]
+        assert list(keep) == [True, True]
+        # Both of those scenes are on the eastern path, which is the prep
+        # file's second, so both codes are 1.
+        assert list(path_code) == [1, 1]
+        assert paths == (WEST, EAST)
 
     def test_turning_the_offsets_off_zeroes_them_and_keeps_every_scene(self, tmp_path):
         write_prep(tmp_path, items(4), offset=np.full(4, -73.0))
-        prep = destripe.load_prep(tmp_path)
-        shard = shard_lst_p95.Shard(0, 0, 0, 0, 8, 8, (-61.0, -33.0, -60.9, -32.9))
-        correction = shard_lst_p95.shard_correction_for(
-            run_args(tmp_path, no_destripe=True), prep, shard, items(4)
-        )
-        assert not correction["offset"].any()
-        assert correction["keep"].all()
-
-    def test_turning_the_cross_fade_off_sends_no_weights(self, tmp_path):
-        write_prep(tmp_path, items(4))
-        prep = destripe.load_prep(tmp_path)
-        shard = shard_lst_p95.Shard(0, 0, 0, 0, 8, 8, (-61.0, -33.0, -60.9, -32.9))
-        correction = shard_lst_p95.shard_correction_for(
-            run_args(tmp_path, no_feather=True), prep, shard, items(4)
-        )
-        assert correction["weight"] is None
-        assert correction["paths"] == ()
+        scenes = items(4)
+        times = [destripe.timestamp_of(d) for d in scenes]
+        offset, keep, _, _ = vectors(tmp_path, scenes, times, no_destripe=True)
+        assert not offset.any()
+        assert keep.all()
 
     def test_a_scene_the_prep_file_never_saw_is_rejected(self, tmp_path):
         """Not defaulted to zero. An unknown offset is not a zero offset."""
         write_prep(tmp_path, items(4))
-        prep = destripe.load_prep(tmp_path)
-        shard = shard_lst_p95.Shard(0, 0, 0, 0, 8, 8, (-61.0, -33.0, -60.9, -32.9))
-        correction = shard_lst_p95.shard_correction_for(
-            run_args(tmp_path), prep, shard, [item("SCENE99")]
+        unknown = item("SCENE99", minute=41)
+        offset, keep, _, _ = vectors(
+            tmp_path, [unknown], [destripe.timestamp_of(unknown)]
         )
-        assert np.isnan(correction["offset"][0])
-        assert not correction["keep"][0]
+        assert np.isnan(offset[0])
+        assert not keep[0]
+
+    def test_no_prep_file_keeps_every_scene_at_its_own_baseline(self):
+        scenes = items(3)
+        times = [destripe.timestamp_of(d) for d in scenes]
+        offset, keep, path_code, paths = composite.per_scene_vectors(
+            scenes,
+            times,
+            None,
+            max_offset_c=destripe.DESTRIPE_MAX_OFFSET_C,
+            debias=True,
+        )
+        assert not offset.any()
+        assert keep.all()
+        # -1 matches no path, so the cross-fade has nothing to blend.
+        assert list(path_code) == [-1, -1, -1]
+        assert paths == ()
+
+    def test_a_stack_step_no_item_accounts_for_is_refused(self, tmp_path):
+        """A vector shorter than the stack is the failure this join prevents."""
+        write_prep(tmp_path, items(4))
+        scenes = items(4)
+        stranger = destripe.timestamp_of(item("SCENE99", minute=55))
+        with pytest.raises(ValueError, match="no item accounts for"):
+            vectors(
+                tmp_path,
+                scenes,
+                [*[destripe.timestamp_of(d) for d in scenes], stranger],
+            )
+
+
+class TestThePooledBaseline:
+    """`--emit-pooled` writes a second raster beside the product.
+
+    The pooled percentile after the offsets are applied, from the same graph
+    and the same blocks, so the two can be differenced pixel for pixel. It used
+    to exist only inside part files, one per slice, while the README promised a
+    raster beside the product.
+    """
+
+    @pytest.mark.timeout(300)
+    def test_the_flag_writes_the_baseline_beside_the_summary(self, tmp_path):
+        out = tmp_path / "run"
+        code = shard_lst_p95.main(
+            [
+                "--bbox=-65.0,-32.5,-64.5,-32.0",
+                "--rehearse",
+                "6",
+                "--pixels-per-degree",
+                "120",
+                "--chunk",
+                "30",
+                "--workers",
+                "2",
+                "--threads-per-worker",
+                "1",
+                "--no-output-mask",
+                "--no-catalog",
+                "--emit-pooled",
+                "--out-dir",
+                str(out),
+            ]
+        )
+        assert code == 0
+        assert (out / "summary.json").is_file()
+        assert (out / "lst_p95_pooled.tif").is_file()
+        assert (out / "lst_p95.tif").is_file()
+        # And nothing of the staging files it was assembled from survives.
+        assert not list(out.glob("*.staging.tif"))
 
 
 class TestThePrepMemoryModel:

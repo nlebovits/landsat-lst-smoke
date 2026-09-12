@@ -29,7 +29,6 @@ import xarray as xr
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import destripe  # noqa: E402
-import shard_lst_p95  # noqa: E402
 import tile_prep  # noqa: E402
 from lst_qa import LWIR_OFFSET_C, LWIR_SCALE  # noqa: E402
 
@@ -93,7 +92,7 @@ def dataset_for(items, warm=None, fill=()):
 
 @pytest.fixture
 def block():
-    return shard_lst_p95.Shard(0, 0, 0, 0, NY, NX, (-62.0, -34.0, -61.9, -33.9))
+    return tile_prep.Shard(0, 0, 0, 0, NY, NX, (-62.0, -34.0, -61.9, -33.9))
 
 
 @pytest.fixture
@@ -210,7 +209,7 @@ class TestOneBlock:
             assert (reach == N_SCENES // 2).all()
 
     def test_the_block_reports_its_own_corner_on_the_swath_grid(self, loaded):
-        offset_block = shard_lst_p95.Shard(
+        offset_block = tile_prep.Shard(
             1, 1, 8, 16, NY, NX, (-62.0, -34.0, -61.9, -33.9)
         )
         result = tile_prep.prep_block(

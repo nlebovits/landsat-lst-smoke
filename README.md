@@ -1,5 +1,18 @@
 # landsat-lst-smoke
 
+## The composite
+
+One tile is one lazy dask-xarray graph. `odc.stac.load` opens every scene of
+the tile once, chunked in space and never in time, because a percentile over
+time needs every scene of a pixel in one block. Each block is masked,
+corrected, reduced and encoded inside one task, and the blocks stream from
+the workers into the two COGs the catalog publishes. The driver receives
+nothing larger than one block. Every phase the driver runs around that graph
+is a frisky client phase, so the dashboard shows the current phase and its
+elapsed time while it runs.
+`--rehearse N` runs the whole pipeline over N synthetic scenes on local disk,
+with no S3 reads, and tags every line and every artifact `REHEARSAL:`.
+
 ## Removing the WRS seam
 
 A composite pixel is reduced from the scenes overlapping it, so the value jumps
@@ -11,18 +24,14 @@ prep file.
 Build the prep file once per tile, then composite against it:
 
 ```bash
-uv run tile_prep.py \
-  --tile S30W065 \
-  --out-dir ./tile-prep
-
-uv run shard_lst_p95.py \
-  --tile S30W065 \
-  --tile-prep ./tile-prep \
-  --out-dir ./shard-run
+uv run tile_prep.py --tile S30W065 --out-dir ./tile-prep
+uv run shard_lst_p95.py --tile S30W065 --tile-prep ./tile-prep \
+    --stage-dir /mnt/nvme/stage --out-dir ./run
+frisky observe overview ./run/spans.json
 ```
 
 `tile_prep.py` reads the tile once at a quarter of the output resolution and
-writes two things a shard cannot work out for itself.
+writes two things a block cannot work out for itself.
 
 **One offset per scene.** Landsat Collection 2 surface temperature is
 atmospherically corrected one scene at a time, with a published error of 1 to
@@ -52,23 +61,20 @@ there is one estimate to weigh, so the blend is the pooled value already. The
 run summary counts them as `n_pooled_fallback`. A nodata pixel keeps the meaning
 it had: nothing was observed there.
 
-Both corrections run on the stack a shard has already loaded, so neither adds a
-read and neither adds a pass. The prep file is the extra traversal, taken once
-per tile and shared by every slice.
+Both corrections run inside the block the graph has already loaded, so neither
+adds a read and neither adds a pass. The prep file is the extra traversal,
+taken once per tile and shared by every block of it.
 
 Turn either off with `--no-destripe` or `--no-feather`. Add `--emit-pooled` to
-write a pooled percentile beside the product, as `lst_p95_pooled_dn.npy` after
-the merge. It is taken from the same load after the offsets are applied, so it
-isolates the cross-fade and says nothing about the offsets. It also costs 2
-bytes per output pixel of client memory, which `worker_memory_guard` counts.
-For the offsets, and for both together, run `measure_seam.py`: it composites
-four arms from one load on a shard that straddles a swath and reports what each
-one removed.
+write `lst_p95_pooled.tif` beside the product. It comes out of the same blocks
+after the offsets are applied, so it isolates the cross-fade and says nothing
+about the offsets. It also costs 2 bytes per output pixel, which
+`composite.block_bytes` counts against the machine before the cluster starts.
 
 **Not yet measured here.** Every number above comes from
 `nlebovits/landsat-lst` on its own grid. No tile in this repository has been
-prepped and no shard has been composited with a correction on. See "What is not
-settled" in `FINDINGS.md`.
+prepped and no block has been composited with a correction on. See "What is
+not settled" in `FINDINGS.md`.
 
 ## Known issues
 
@@ -84,8 +90,8 @@ a 21.8% scene rejection.
 
 Every published item states its rule in `processing:lineage`, beside the mask
 rules and naming the scene set the offsets were fitted over. Read it before
-comparing two tiles. `merge_parts` refuses to assemble parts built under two
-rules, so one tile has one rule. A collection can still hold tiles built under
+comparing two tiles. One graph composites one tile under one rule, so a tile
+cannot be built under two. A collection can still hold tiles built under
 several, so the item is where the claim belongs.
 
 ### Hot pixels left by ASTER GED coverage gaps

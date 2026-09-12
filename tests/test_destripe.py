@@ -519,12 +519,13 @@ class TestTheFeatheredPercentile:
         masks[WEST][:, :4] = False
         masks[EAST][:, :4] = False
         paths, weight, _inside = destripe.path_weights(masks, grid_transform())
-        out, n_pooled = destripe.feathered_percentile(stack, labels, paths, weight)
+        out, pooled = destripe.feathered_percentile(stack, labels, paths, weight)
 
         assert not np.isnan(out[:, :4]).any()
         assert np.allclose(out[:, :4], destripe.pooled_percentile(stack)[:, :4])
         assert not np.isnan(out[:, 10:]).any()
-        assert n_pooled == out[:, :4].size
+        assert int(pooled.sum()) == out[:, :4].size
+        assert pooled[:, :4].all()
 
     def test_a_pixel_nothing_observed_is_still_nodata(self):
         """The one remaining meaning of a nodata pixel in the composite."""
@@ -534,16 +535,16 @@ class TestTheFeatheredPercentile:
         masks[WEST][:, :4] = False
         masks[EAST][:, :4] = False
         paths, weight, _inside = destripe.path_weights(masks, grid_transform())
-        out, n_pooled = destripe.feathered_percentile(stack, labels, paths, weight)
+        out, pooled = destripe.feathered_percentile(stack, labels, paths, weight)
 
         assert np.isnan(out[:, :4]).all()
-        assert n_pooled == 0
+        assert int(pooled.sum()) == 0
 
     def test_the_fallback_leaves_a_covered_pixel_bit_identical(self):
         """Rescuing the uncovered pixels must not move the feathered ones."""
         stack, labels = self.stack_and_labels()
         paths, weight, inside = destripe.path_weights(two_paths(), grid_transform())
-        full, n_pooled = destripe.feathered_percentile(stack, labels, paths, weight)
+        full, pooled = destripe.feathered_percentile(stack, labels, paths, weight)
 
         narrowed = two_paths()
         narrowed[WEST][:, :4] = False
@@ -553,35 +554,109 @@ class TestTheFeatheredPercentile:
 
         covered = inside.any(axis=0)
         covered[:, :4] = False
-        assert n_pooled == 0
+        assert int(pooled.sum()) == 0
         assert np.array_equal(full[covered], cut[covered])
 
 
-class TestTheWindowResample:
-    def test_a_shard_window_still_sums_to_one(self):
-        _paths, weight, inside = destripe.path_weights(two_paths(), grid_transform())
-        src = grid_transform()
-        # One shard: the middle 4 degrees, at four times the swath resolution.
-        shard_bbox = (-2.0, 0.0, 2.0, 1.0)
-        dst = transform_for(shard_bbox, CELLS_PER_DEGREE * 4)
-        shape_hw = (1 * CELLS_PER_DEGREE * 4, 4 * CELLS_PER_DEGREE * 4)
-        out = destripe.weights_for_window(weight, inside, src, dst, shape_hw)
-        total = out.sum(axis=0)
+def resample_window_oracle(weight, inside, src_transform, dst_transform, shape_hw):
+    """The eager window resample the shard path used, kept here as the oracle.
+
+    Containment nearest, ramp bilinear, shares renormalised on the resampled
+    containment. `composite.lazy_weights` does the same thing block by block
+    on the workers, and this is what pins it.
+    """
+    from rasterio.enums import Resampling
+    from rasterio.warp import reproject
+
+    height, width = shape_hw
+    n = weight.shape[0]
+    out = np.zeros((n, height, width), dtype="float32")
+    cover = np.zeros((n, height, width), dtype="uint8")
+    for j in range(n):
+        for source, destination, method in (
+            (weight[j], out[j], Resampling.bilinear),
+            (inside[j].astype("uint8"), cover[j], Resampling.nearest),
+        ):
+            reproject(
+                source=source,
+                destination=destination,
+                src_transform=src_transform,
+                src_crs=destripe.GRID_CRS,
+                dst_transform=dst_transform,
+                dst_crs=destripe.GRID_CRS,
+                resampling=method,
+            )
+    covered = cover.astype(bool)
+    out[~covered] = 0.0
+    total = out.sum(axis=0)
+    out /= np.where(total > 0, total, np.float32(1.0))
+    k = covered.sum(axis=0)
+    degenerate = (total <= 0) & (k > 0)
+    if degenerate.any():
+        for j in range(n):
+            sel = degenerate & covered[j]
+            out[j][sel] = 1.0 / k[sel]
+    return out
+
+
+def lazy_field(masks, dst_bbox, factor: int, chunk: int):
+    """`composite.lazy_weights` over `dst_bbox` at `factor` x the swath grid."""
+    import dask
+    from odc.geo.geobox import GeoBox
+
+    import composite
+
+    paths, weight, inside = destripe.path_weights(masks, grid_transform())
+    prep = destripe.Prep(
+        tile="T",
+        bbox=BBOX,
+        pixels_per_degree=CELLS_PER_DEGREE,
+        swath_factor=1,
+        paths=paths,
+        weight=weight,
+        inside=inside,
+        offset={},
+        n_valid={},
+        meta={},
+    )
+    w, s, e, n = dst_bbox
+    ppd = CELLS_PER_DEGREE * factor
+    shape_hw = (int(round((n - s) * ppd)), int(round((e - w) * ppd)))
+    dst = GeoBox(shape_hw, transform_for(dst_bbox, ppd), destripe.GRID_CRS)
+    lazy = composite.lazy_weights(prep, dst, chunk=chunk, dims=("y", "x"))
+    assert lazy.chunks[0] == (len(paths),), "the path axis must be one chunk"
+    assert all(c <= chunk for c in lazy.chunks[1] + lazy.chunks[2])
+    with dask.config.set(scheduler="sync"):
+        got = lazy.values
+    want = resample_window_oracle(
+        weight, inside, grid_transform(), dst.affine, shape_hw
+    )
+    return got, want
+
+
+class TestTheLazyWeights:
+    """`composite.lazy_weights` against the eager window resample it replaces."""
+
+    def test_a_window_still_sums_to_one(self):
+        got, _ = lazy_field(two_paths(), (-2.0, 0.0, 2.0, 1.0), 4, chunk=16)
+        total = got.sum(axis=0)
         assert np.allclose(total[total > 0], 1.0, atol=1e-6)
+
+    def test_it_matches_the_eager_resample_across_block_edges(self):
+        """Blocks of 16 px over a 96 px field: five interior block edges."""
+        got, want = lazy_field(two_paths(), (-2.0, 0.0, 2.0, 1.0), 4, chunk=16)
+        assert got.shape == want.shape
+        assert np.abs(got - want).max() <= 0.013
 
     def test_it_never_gives_weight_to_a_path_that_does_not_cover(self):
         masks = two_paths()
         masks[EAST][:] = False
         masks[EAST][:, 50:] = True
-        _paths, weight, inside = destripe.path_weights(masks, grid_transform())
-        dst = transform_for(BBOX, CELLS_PER_DEGREE * 4)
-        shape_hw = (HEIGHT * 4, WIDTH * 4)
-        out = destripe.weights_for_window(
-            weight, inside, grid_transform(), dst, shape_hw
-        )
+        got, want = lazy_field(masks, BBOX, 4, chunk=40)
         # Column 49 of the swath grid is columns 196 to 199 here, and the east
         # path does not reach it. Bilinear alone would leak a share across.
-        assert not out[1, :, :196].any()
+        assert not got[1, :, :196].any()
+        assert not want[1, :, :196].any()
 
 
 def item(scene_id: str, stamp: str, path: str, row: str = "030") -> dict:

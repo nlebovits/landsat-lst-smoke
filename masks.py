@@ -124,7 +124,7 @@ def geometry_checksum(path: Path | str) -> str:
 
 
 def raster_shape(bbox, pixels_per_degree: int) -> tuple[int, int]:
-    """`(height, width)` of the tile raster, as `plan_shards` computes it."""
+    """`(height, width)` of the tile raster, as `composite.raster_shape` does."""
     west, south, east, north = bbox
     return (
         int(round((north - south) * pixels_per_degree)),
@@ -328,7 +328,11 @@ def apply_output_mask(lst, qa, keep, gap=None, *, hot_dn=None, scope="tile") -> 
     that this pixel was screened rather than never seen.
 
     Passing no `gap` applies the water rule alone, which is what
-    `--no-output-mask` and the merge path want.
+    `--no-output-mask` wants.
+
+    The graph applies the same two rules lazily, block by block, in
+    `composite._apply_masks`. This is the eager statement of them, for an
+    array already in memory.
 
     Args:
         lst: `(height, width)` uint16 of encoded temperature.
@@ -336,15 +340,15 @@ def apply_output_mask(lst, qa, keep, gap=None, *, hot_dn=None, scope="tile") -> 
         keep: `(height, width)` boolean from `output_mask`.
         gap: `(height, width)` boolean from `output_mask`, or None.
         hot_dn: encoded threshold, default `gap_hot_dn()`.
-        scope: what the returned counts describe. `"tile"` for a whole-tile
-            run, or the `--shard-slice` string for one machine's slice.
+        scope: what the returned counts describe. `"tile"` for a whole tile,
+            which is what a run composites; anything narrower has to say so.
 
     Returns:
-        What the mask cost. Every count here is scoped to the pixels this
-        process assembled, unlike the tile-wide counts from `output_mask`, and
-        `scope` is what says so. `valid_removed_by_mask` counts pixels that
-        held a temperature before and nodata after. It cannot be recovered
-        from the masks alone.
+        What the mask cost. Every count here is scoped to the pixels passed
+        in, unlike the tile-wide counts from `output_mask`, and `scope` is
+        what says so. `valid_removed_by_mask` counts pixels that held a
+        temperature before and nodata after. It cannot be recovered from the
+        masks alone.
     """
     import numpy as np
 

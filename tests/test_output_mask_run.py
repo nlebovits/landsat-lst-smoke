@@ -3,11 +3,10 @@
 `test_masks.py` checks the rules. This checks the four things only a whole run
 can get wrong.
 
-That the mask reaches the artifacts. The summary statistics, the part file, and
-a merge of parts from several machines all have to describe the same product.
-The mask therefore goes on between the gather and everything that reads the
-arrays, and a run that masked only its printout would pass every test in
-`test_masks.py`.
+That the mask reaches the artifacts. The summary statistics and the published
+COGs have to describe the same product, so the mask goes on inside the graph,
+before anything reads a block, and a run that masked only its printout would
+pass every test in `test_masks.py`.
 
 That it stops early. The mask depends on the tile's bbox and two artifacts, and
 on nothing the run computes. A tile it empties should cost no staged object and
@@ -22,8 +21,8 @@ That `lst_p95` and `qa_count` stay consistent. A `qa_count` above zero beside a
 nodata temperature means the pixel had observations and lost them to the
 reduction, which is a different fact from a masked pixel.
 
-The runs here are rehearsals. `--rehearse` fills the shards with synthetic
-pixels and reads no object, but `--tile` fixes the bbox on the production grid,
+The runs here are rehearsals. `--rehearse` writes synthetic scenes to local
+disk and reads no object, but `--tile` fixes the bbox on the production grid,
 so the geography the mask sees is the real one. That is the whole reason the
 rehearsal is masked like any other run.
 """
@@ -44,6 +43,7 @@ import aster_ged  # noqa: E402
 import masks  # noqa: E402
 import shard_lst_p95  # noqa: E402
 from conftest import needs_land_geometry, write_numobs  # noqa: E402
+from land_tiles import tile_bounds  # noqa: E402
 from lst_qa import LST_NODATA_DN  # noqa: E402
 
 #: Interior South America. Every pixel is land, so the land rule removes
@@ -53,11 +53,18 @@ INLAND = "S30W065"
 #: 4.43% land.
 COASTAL = "N40W075"
 
-#: Small enough to rehearse in a second, and a whole number of degrees, so the
+#: Small enough to rehearse in seconds, and a whole number of degrees, so the
 #: GED cells still land on pixel boundaries.
 PPD = 360
 
-pytestmark = [needs_land_geometry, pytest.mark.timeout(180)]
+#: The dask block edge. 1,800 px over 100 gives 18 x 18 blocks.
+CHUNK = 100
+
+#: The collection the default 2021-2025 window earns. A tile's item id is its
+#: tile id, because the grid names both from the same north and west edges.
+COLLECTION_ID = "lst-p95-2021-2025"
+
+pytestmark = [needs_land_geometry, pytest.mark.timeout(600)]
 
 
 def rehearse(out_dir, tile, numobs_uri, land_geometry, *extra):
@@ -73,8 +80,8 @@ def rehearse(out_dir, tile, numobs_uri, land_geometry, *extra):
         str(land_geometry),
         "--pixels-per-degree",
         str(PPD),
-        "--shard",
-        "512",
+        "--chunk",
+        str(CHUNK),
         "--workers",
         "2",
         "--threads-per-worker",
@@ -88,11 +95,42 @@ def rehearse(out_dir, tile, numobs_uri, land_geometry, *extra):
     return code, summary
 
 
+def item_dir(out_dir: Path, tile: str) -> Path:
+    return Path(out_dir) / "catalog" / COLLECTION_ID / tile
+
+
+def published_bands(out_dir: Path, tile: str):
+    """The two COGs the run published, as arrays.
+
+    The pixels are read back from the files a consumer would download, not
+    from anything the run kept in memory. That is the whole point: a mask that
+    ran after the statistics and before the write, or the other way round,
+    would leave the two disagreeing and only a read can tell.
+    """
+    import rasterio
+
+    here = item_dir(out_dir, tile)
+    with rasterio.open(here / "lst_p95.tif") as src:
+        lst = src.read(1)
+    with rasterio.open(here / "qa_count.tif") as src:
+        qa = src.read()
+    return lst, qa
+
+
+@pytest.fixture(scope="module")
+def masked_coastal(tmp_path_factory, numobs_artifact, land_geometry):
+    """One masked rehearsal of the coastal tile, shared by every test that
+    reads it. Each of these drives a real cluster over 324 blocks, so a
+    function-scoped fixture would put minutes on the file for nothing.
+    """
+    out = tmp_path_factory.mktemp("masked")
+    return rehearse(out, COASTAL, numobs_artifact, land_geometry) + (out,)
+
+
 class TestAMaskedRun:
-    @pytest.fixture(scope="class")
-    def run(self, tmp_path_factory, numobs_artifact, land_geometry):
-        out = tmp_path_factory.mktemp("masked")
-        return rehearse(out, COASTAL, numobs_artifact, land_geometry) + (out,)
+    @pytest.fixture(scope="module")
+    def run(self, masked_coastal):
+        return masked_coastal
 
     def test_it_succeeds(self, run):
         code, _, _ = run
@@ -107,6 +145,9 @@ class TestAMaskedRun:
             "pixels_emissivity_gap",
             "pixels_kept",
             "valid_removed_by_mask",
+            "valid_removed_by_water",
+            "valid_removed_by_emissivity",
+            "qa_count_pixels_zeroed",
         ):
             assert field in summary["mask"]
 
@@ -117,124 +158,95 @@ class TestAMaskedRun:
         assert mask["pixels_total"] == height * width
         assert mask["pixels_kept"] + mask["pixels_water"] == mask["pixels_total"]
 
+    def test_the_removals_add_up(self, run):
+        _, summary, _ = run
+        mask = summary["mask"]
+        assert (
+            mask["valid_removed_by_water"] + mask["valid_removed_by_emissivity"]
+            == mask["valid_removed_by_mask"]
+        )
+
     def test_it_names_the_artifacts_that_decided(self, run):
         # A masked tile is only reproducible if the two artifacts are named.
         # `summary.json` is the operator's record and keeps the paths, because
-        # an operator rerunning one slice does want them.
+        # an operator rerunning one tile does want them.
         _, summary, _ = run
         assert summary["mask"]["numobs_uri"]
         assert summary["mask"]["land_geometry_uri"]
         assert summary["mask"]["aster_ged"]["short_name"] == "AG1km"
 
-    def test_the_part_names_the_artifacts_by_identity_not_by_path(self, run):
-        # `part-meta.json` reaches the published catalog, and an absolute path
-        # on the masking machine tells a reader of it nothing. It would also
-        # carry the operator's home directory into a public file.
+    def test_the_item_names_the_artifacts_by_identity_not_by_path(
+        self, run, numobs_artifact, land_geometry
+    ):
+        # The item reaches the published catalog, and an absolute path on the
+        # masking machine tells a reader of it nothing. It would also carry the
+        # operator's home directory into a public file.
         _, _, out = run
-        rule = json.loads((out / "part-meta.json").read_text())["mask_rule"]
-        assert "numobs_uri" not in rule
-        assert "land_geometry_uri" not in rule
-        assert rule["land_geometry_sha256"]
-        assert rule["aster_ged"]["doi"].startswith("10.5067/")
-        # The digest rides along, empty here: a raster cannot hold its own, and
-        # this fixture writes no sidecar to carry it.
-        assert "raster_sha256" in rule["aster_ged"]
+        item = json.loads((item_dir(out, COASTAL) / f"{COASTAL}.json").read_text())
+        text = json.dumps(item)
+        assert str(numobs_artifact) not in text
+        assert str(land_geometry) not in text
+        lineage = item["properties"]["processing:lineage"]
+        assert "Land geometry sha256" in lineage
+        assert "AG1km" in lineage
+        assert item["properties"]["sci:publications"][0]["doi"].startswith("10.5067/")
 
-    def test_the_statistics_describe_the_masked_product(self, run):
-        # The mask goes on before anything is measured. A summary computed
-        # first would report a valid fraction the raster does not have.
-        _, summary, out = run
-        with np.load(out / "part-000.npz") as parts:
-            written = sum(
-                int((parts[key] != LST_NODATA_DN).sum())
-                for key in parts.files
-                if key.startswith("lst_")
-            )
-        assert summary["valid_fraction"] == pytest.approx(
-            written / summary["mask"]["pixels_total"]
-        )
-
-    def test_the_part_file_is_already_masked(self, run):
-        """`merge_parts` needs no mask of its own.
-
-        Masking at merge instead would let two machines' parts disagree about
-        the rule, and would leave a single-machine run unmasked.
-        """
+    def test_the_mask_reaches_the_published_raster(
+        self, run, numobs_artifact, land_geometry
+    ):
         _, _, out = run
-        with np.load(out / "part-000.npz") as parts:
-            for key in parts.files:
-                if not key.startswith("qa_"):
-                    continue
-                lst = parts["lst_" + key[3:]]
-                qa = parts[key]
-                assert np.array_equal(lst == LST_NODATA_DN, qa.sum(axis=0) == 0)
-
-
-class TestTheMergeInheritsTheMask:
-    """`merge_parts` applies no rule of its own, and must not need to.
-
-    Every part it reads was masked by the machine that wrote it. If that were
-    not true, a tile assembled from four slices could carry four different
-    answers about the same coastline, and a single-machine run would carry
-    none.
-    """
-
-    @pytest.fixture(scope="class")
-    def merged(self, tmp_path_factory, numobs_artifact, land_geometry):
-        out = tmp_path_factory.mktemp("tomerge")
-        rehearse(out, COASTAL, numobs_artifact, land_geometry)
-        tile = out.parent / "merged"
-        code = shard_lst_p95.main(["--merge", str(out), "--out-dir", str(tile)])
-        return code, tile
-
-    def test_the_merge_succeeds(self, merged):
-        code, _ = merged
-        assert code == 0
-
-    def test_the_merged_raster_is_masked(self, merged, numobs_artifact, land_geometry):
-        _, tile = merged
-        lst = np.load(tile / "lst_p95_dn.npy")
+        lst, _ = published_bands(out, COASTAL)
         keep, _, _ = masks.output_mask(
-            shard_lst_p95.tile_bounds(COASTAL),
+            tile_bounds(COASTAL),
             PPD,
             numobs_uri=numobs_artifact,
             land_geometry_uri=land_geometry,
         )
         assert not (lst[~keep] != LST_NODATA_DN).any()
 
-    def test_the_merge_records_the_rule_every_part_agreed_on(self, merged):
-        _, tile = merged
-        report = json.loads((tile / "merge.json").read_text())
-        rule = report["mask_rule"]
-        assert rule["gap_hot_threshold_c"] == masks.GAP_HOT_THRESHOLD_C
-        assert rule["gap_buffer_cells"] == masks.GAP_BUFFER_CELLS
+    def test_the_statistics_describe_the_masked_product(self, run):
+        # The mask goes on before anything is measured. A summary computed
+        # first would report a valid fraction the raster does not have.
+        _, summary, out = run
+        lst, _ = published_bands(out, COASTAL)
+        written = int((lst != LST_NODATA_DN).sum())
+        assert summary["valid_fraction"] == pytest.approx(
+            written / summary["mask"]["pixels_total"]
+        )
 
-    def test_parts_masked_under_different_rules_are_refused(
-        self, merged, tmp_path, numobs_artifact, land_geometry
+    def test_the_water_rule_zeroes_both_bands_together(
+        self, run, numobs_artifact, land_geometry
     ):
-        # Two machines that masked the same tile differently make one raster
-        # that no single rule describes. The merge stops rather than blending.
-        _, tile = merged
-        first = tmp_path / "a"
-        second = tmp_path / "b"
-        rehearse(first, COASTAL, numobs_artifact, land_geometry)
-        rehearse(second, COASTAL, numobs_artifact, land_geometry, "--no-output-mask")
-        with pytest.raises(SystemExit, match="different rules"):
-            shard_lst_p95.main(
-                ["--merge", str(first), str(second), "--out-dir", str(tmp_path / "m")]
-            )
+        """`lst_p95` and `qa_count` cannot disagree about a masked pixel.
 
-    def test_the_merged_bands_agree(self, merged):
-        _, tile = merged
-        lst = np.load(tile / "lst_p95_dn.npy")
-        qa = np.load(tile / "qa_count.npy")
-        assert np.array_equal(lst == LST_NODATA_DN, qa.sum(axis=0) == 0)
+        Water removes the temperature and the counts together, because the
+        pixel was never this product's subject. The emissivity rule removes
+        only the temperature, so the converse does not hold and is not
+        asserted: a nodata pixel with counts is a hot retrieval inside the gap.
+        """
+        _, _, out = run
+        lst, qa = published_bands(out, COASTAL)
+        keep, _, _ = masks.output_mask(
+            tile_bounds(COASTAL),
+            PPD,
+            numobs_uri=numobs_artifact,
+            land_geometry_uri=land_geometry,
+        )
+        assert not qa.sum(axis=0)[~keep].any()
+        assert (lst[qa.sum(axis=0) == 0] == LST_NODATA_DN).all()
+
+    def test_the_run_says_it_is_a_whole_tile(self, run):
+        # `output_mask` runs over the whole bbox, so `pixels_total` and its
+        # siblings describe the tile rather than any part of it. The scope
+        # says so, because summing them across machines would multiply it.
+        _, summary, _ = run
+        assert summary["mask"]["scope"] == "tile"
 
 
 class TestAnInlandTileKeepsEverything:
     """The land rule must not eat a tile that is entirely land."""
 
-    @pytest.fixture(scope="class")
+    @pytest.fixture(scope="module")
     def run(self, tmp_path_factory, numobs_artifact, land_geometry):
         out = tmp_path_factory.mktemp("inland")
         return rehearse(out, INLAND, numobs_artifact, land_geometry) + (out,)
@@ -252,44 +264,9 @@ class TestAnInlandTileKeepsEverything:
         assert summary["mask"]["valid_removed_by_mask"] == 0
         assert summary["mask"]["pixels_kept"] == summary["mask"]["pixels_total"]
 
-
-class TestASliceSaysWhatItsCountsDescribe:
-    """Some counts are tile-wide and some are this machine's, so say which.
-
-    `output_mask` runs over the whole bbox in every run, slice or not, so
-    `pixels_total` and its siblings are the same number on every machine.
-    `valid_removed_by_mask` counts only the pixels this process assembled.
-    Summing the first group across four slices would multiply the tile by four.
-    """
-
-    @pytest.fixture(scope="class")
-    def slice_run(self, tmp_path_factory, numobs_artifact, land_geometry):
-        out = tmp_path_factory.mktemp("slice")
-        return rehearse(
-            out, INLAND, numobs_artifact, land_geometry, "--shard-slice", "8:16"
-        )
-
-    def test_the_scope_names_the_slice(self, slice_run):
-        _, summary = slice_run
-        assert summary["mask"]["scope"] == "shards[8:16]"
-
-    def test_the_tile_wide_counts_still_describe_the_tile(
-        self, slice_run, run_whole_tile
-    ):
-        # Identical on every machine, which is what makes them unsummable.
-        _, sliced = slice_run
-        _, whole, _ = run_whole_tile
-        for field in ("pixels_total", "pixels_water", "pixels_kept"):
-            assert sliced["mask"][field] == whole["mask"][field]
-
-    def test_a_whole_tile_run_says_so(self, run_whole_tile):
-        _, summary, _ = run_whole_tile
-        assert summary["mask"]["scope"] == "tile"
-
-    @pytest.fixture(scope="class")
-    def run_whole_tile(self, tmp_path_factory, numobs_artifact, land_geometry):
-        out = tmp_path_factory.mktemp("whole")
-        return rehearse(out, INLAND, numobs_artifact, land_geometry) + (out,)
+    def test_no_count_is_zeroed(self, run):
+        _, summary, _ = run
+        assert summary["mask"]["qa_count_pixels_zeroed"] == 0
 
 
 class TestATileOfNothingButGapStillPublishes:
@@ -301,7 +278,7 @@ class TestATileOfNothingButGapStillPublishes:
     only the ones that fail upward come out.
     """
 
-    @pytest.fixture(scope="class")
+    @pytest.fixture(scope="module")
     def run(self, tmp_path_factory, land_geometry):
         out = tmp_path_factory.mktemp("allgap")
         gapped = write_numobs(
@@ -326,9 +303,10 @@ class TestATileOfNothingButGapStillPublishes:
         assert mask["pixels_kept"] == mask["pixels_total"]
         assert summary.get("status") != "no-unmasked-pixels"
 
-    def test_it_writes_a_part(self, run):
+    def test_it_publishes_both_cogs(self, run):
         _, _, out = run
-        assert list(out.glob("part-*.npz"))
+        assert (item_dir(out, INLAND) / "lst_p95.tif").is_file()
+        assert (item_dir(out, INLAND) / "qa_count.tif").is_file()
 
     def test_only_the_hot_pixels_come_out(self, run):
         # The region covers every pixel of the tile. The rule still removes
@@ -349,7 +327,7 @@ class TestATileWithNoLand:
     hand does.
     """
 
-    @pytest.fixture(scope="class")
+    @pytest.fixture(scope="module")
     def run(self, tmp_path_factory, numobs_artifact, land_geometry):
         out = tmp_path_factory.mktemp("nolands")
         # Open Pacific, well outside the 25 km buffer of any land.
@@ -364,8 +342,8 @@ class TestATileWithNoLand:
             str(land_geometry),
             "--pixels-per-degree",
             str(PPD),
-            "--shard",
-            "512",
+            "--chunk",
+            str(CHUNK),
             "--workers",
             "2",
             "--threads-per-worker",
@@ -378,8 +356,8 @@ class TestATileWithNoLand:
         return code, summary, out
 
     def test_it_succeeds(self, run):
-        # A correct outcome reading as a dead machine is the distinction the
-        # barren-shard records exist to preserve.
+        # A correct outcome reading as a dead machine is the distinction these
+        # early-exit records exist to preserve.
         code, _, _ = run
         assert code == 0
 
@@ -389,7 +367,7 @@ class TestATileWithNoLand:
         assert summary["mask"]["pixels_kept"] == 0
 
     def test_the_scene_count_is_unknown_rather_than_zero(self, run):
-        # This path runs before the search, so the archive was never asked.
+        # This path runs before the scene list is built, so nothing was asked.
         _, summary, _ = run
         assert summary["n_scenes"] is None
 
@@ -398,9 +376,10 @@ class TestATileWithNoLand:
         assert summary["mask"]["aster_ged"]["short_name"] == "AG1km"
         assert summary["mask"]["numobs_uri"]
 
-    def test_it_writes_no_parts(self, run):
+    def test_it_writes_no_rasters(self, run):
         _, _, out = run
-        assert not list(out.glob("part-*.npz"))
+        assert not list(out.rglob("*.tif"))
+        assert not (out / "catalog").exists()
 
     def test_it_reaches_no_cluster(self, run):
         # Both masks are built before staging and before the cluster, so an
@@ -413,9 +392,11 @@ class TestATileWithNoLand:
 
 class TestTheEscapeHatchAndTheGuards:
     def test_no_output_mask_writes_the_unmasked_raster(
-        self, tmp_path, numobs_artifact, land_geometry
+        self, tmp_path, masked_coastal, numobs_artifact, land_geometry
     ):
-        masked = rehearse(tmp_path / "on", COASTAL, numobs_artifact, land_geometry)[1]
+        # Against the masked run of the same tile, which the module already
+        # holds. The coast is 4.4% land, so the difference is most of the tile.
+        _, masked, _ = masked_coastal
         plain = rehearse(
             tmp_path / "off",
             COASTAL,
@@ -462,8 +443,8 @@ class TestTheEscapeHatchAndTheGuards:
                 "--dry-run",
                 "--pixels-per-degree",
                 str(PPD),
-                "--shard",
-                "512",
+                "--chunk",
+                str(CHUNK),
                 "--numobs-uri",
                 str(tmp_path / "absent.tif"),
                 "--out-dir",
@@ -471,4 +452,4 @@ class TestTheEscapeHatchAndTheGuards:
             ]
         )
         assert code == 0
-        assert "shards.json" in capsys.readouterr().out
+        assert "blocks.json" in capsys.readouterr().out
