@@ -891,11 +891,15 @@ def item_for_files(scene_id: str, bands: dict, *, datetime: str, path: str, row:
     from tile_inventory import ASSET_TEMPLATES
 
     bands = {band: str(Path(href).resolve()) for band, href in bands.items()}
+    from rasterio.warp import transform_bounds
+
     with rasterio.open(bands["lwir11"]) as ds:
         epsg = ds.crs.to_epsg()
         height, width = ds.height, ds.width
         transform = list(ds.transform)[:6]
-        west, south, east, north = ds.bounds
+        # A STAC bbox and geometry are geographic whatever the raster's CRS.
+        # Copying UTM metres here made every scene miss every window.
+        west, south, east, north = transform_bounds(ds.crs, "EPSG:4326", *ds.bounds)
     ring = [(west, south), (east, south), (east, north), (west, north), (west, south)]
     return {
         "type": "Feature",
