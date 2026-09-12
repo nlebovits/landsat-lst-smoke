@@ -59,11 +59,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
+import composite
 import destripe
 import observe
 import staging
@@ -520,7 +522,14 @@ def parse_args(argv=None):
     p.add_argument("--cloud-cover-lt", type=int, default=DEFAULT_CLOUD_COVER_LT)
     p.add_argument("--platforms", default=DEFAULT_PLATFORMS)
     p.add_argument("--source", choices=sorted(READ_SOURCES), default="earth-search")
-    p.add_argument("--workers", type=int, default=8)
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=os.cpu_count() or 8,
+        help="worker processes; defaults to every core, one single-threaded "
+        "slot each. The last real prep ran 16 slots on a 64-vCPU machine "
+        "because this defaulted to 8",
+    )
     p.add_argument("--threads-per-worker", type=int, default=1)
     p.add_argument("--read-threads", type=int, default=4)
     p.add_argument("--max-blocks", type=int, default=None, help="cap, for smoke runs")
@@ -565,16 +574,32 @@ def load_items(args):
     return items, boxes, dropped, provenance(manifest)
 
 
-def run_blocks(args, work, item_dicts, resolution, ratio, on_result) -> list:
-    """Submit every block to a frisky cluster and fold results as they land."""
+def run_blocks(
+    args, work, item_dicts, resolution, ratio, on_result, report=None
+) -> list:
+    """Submit every block to a frisky cluster and fold results as they land.
+
+    `report`, when given, receives the frisky trace report and the warmed
+    process count, collected before the cluster closes. The spans, events,
+    and observe summaries land beside the artifact in `args.out_dir`.
+    """
     import frisky
 
     cluster = frisky.LocalCluster(
         n_workers=args.workers,
         threads_per_worker=args.threads_per_worker,
         processes=True,
+        dashboard_address="127.0.0.1:0",
+        silence_summary=True,
     )
     client = cluster.get_client()
+    # Import the read stack on every worker before the first block. See
+    # `composite.warm_worker` for the import race this closes.
+    n_warm = composite.warm_workers(client, cluster)
+    print(
+        f"cluster       {args.workers} workers x {args.threads_per_worker} "
+        f"threads, {n_warm} processes warmed, {observe.dashboard_url(cluster)}"
+    )
     stats = []
     try:
         futures = [
@@ -603,6 +628,10 @@ def run_blocks(args, work, item_dicts, resolution, ratio, on_result) -> list:
                 }
             )
             del result
+        if report is not None:
+            with span("collect_trace"):
+                report.update(observe.collect(cluster, args.out_dir))
+                report["processes_warmed"] = n_warm
     finally:
         client.close()
         cluster.close()
@@ -703,6 +732,7 @@ def main(argv=None) -> int:  # noqa: C901
     n_valid = np.zeros(len(items), dtype="int64")
     quad_count: dict[tuple[str, str], np.ndarray] = {}
 
+    frisky_report: dict = {}
     with span("blocks", n=len(work)):
         stats = run_blocks(
             args,
@@ -711,6 +741,7 @@ def main(argv=None) -> int:  # noqa: C901
             resolution,
             ratio,
             lambda r: accumulate(r, hist, n_valid, quad_count, swath_shape),
+            report=frisky_report,
         )
 
     with span("offsets", scenes=len(items)):
@@ -783,6 +814,16 @@ def main(argv=None) -> int:  # noqa: C901
                 "partial": partial,
             },
             "block_stats": stats[:200],
+            # The cluster this pass ran on, so a slow prep can be read against
+            # its slot count rather than guessed at. MEASURED, not planned.
+            "cluster": {
+                "workers": args.workers,
+                "threads_per_worker": args.threads_per_worker,
+                "slots": slots,
+                "read_threads": args.read_threads,
+                "cpu_count": os.cpu_count(),
+            },
+            "frisky": frisky_report,
             "inventory": run_provenance,
             "window": window,
         },

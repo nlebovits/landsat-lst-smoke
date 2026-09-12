@@ -377,3 +377,22 @@ class TestTheArtifact:
         assert len(scene_ids) == N_SCENES
         assert quad_scenes == {(WEST, "030"): 6, (EAST, "031"): 6}
         assert quads[0] == destripe.quad_of(items[0])
+
+
+class TestTheDefaultsFillTheMachine:
+    """The last real prep ran 16 slots on 64 vCPUs because `--workers` was 8."""
+
+    def test_one_single_threaded_worker_per_core(self):
+        import os
+
+        args = tile_prep.parse_args(["--tile", "S30W065"])
+        assert args.workers == (os.cpu_count() or 8)
+        assert args.threads_per_worker == 1
+        assert args.workers * args.threads_per_worker == (os.cpu_count() or 8)
+
+    def test_the_flags_still_override(self):
+        args = tile_prep.parse_args(
+            ["--tile", "S30W065", "--workers", "3", "--threads-per-worker", "2"]
+        )
+        assert args.workers == 3
+        assert args.threads_per_worker == 2
