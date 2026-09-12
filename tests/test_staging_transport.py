@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import local_s3  # noqa: E402
+import stage_bench  # noqa: E402
 import staging  # noqa: E402
 
 #: Small enough that a whole test module of objects costs a few megabytes, and
@@ -318,3 +319,85 @@ class TestRefusedSettings:
                 threads=4,
                 settings=staging.FetchSettings.build(threads=8),
             )
+
+
+class TestStageBench:
+    """The sweep tool, driven against the loopback server instead of a bucket.
+
+    It runs on an instance and this laptop has no bucket, so what is checked
+    here is everything but the network: the refusal, the matrix, the counting
+    and the arithmetic on the line it prints. The bytes it reports are the
+    bytes the loopback server sent.
+    """
+
+    def test_it_refuses_to_run_out_of_region(self):
+        # A cross-region sweep bills egress per gigabyte and measures a link
+        # no fleet instance has. The flag is the only way past it.
+        with pytest.raises(SystemExit, match="i-am-in-region"):
+            stage_bench.check_region(
+                stage_bench.parse_args(["--tile", "X", "--root", "/tmp"])
+            )
+
+    def test_the_default_matrix_sweeps_threads_against_part_concurrency(self):
+        built = [stage_bench.settings_for(c) for c in stage_bench.default_matrix()]
+
+        assert [
+            (s.threads, s.part_concurrency, s.part_bytes // 1024**2) for s in built
+        ] == [
+            (64, 1, 8),
+            (128, 1, 8),
+            (64, 4, 8),
+            (64, 4, 16),
+            (128, 4, 8),
+            (128, 4, 16),
+        ]
+        # Every socket a split fetch can want, rather than the thread count.
+        assert [s.connections for s in built] == [64, 128, 256, 256, 512, 512]
+
+    def test_an_unknown_config_key_stops_the_sweep(self):
+        # A typo that fell through would run the default configuration under
+        # another one's name and publish the number as that configuration's.
+        with pytest.raises(SystemExit, match="unknown --config key"):
+            stage_bench.parse_config("thread=64")
+
+    def test_a_run_reports_the_bytes_the_server_sent(self, server, tmp_path):
+        manifest = manifest_for(server, [4 * PART, 4 * PART, PART])
+        settings = staging.FetchSettings.build(
+            threads=2, part_bytes=PART, part_concurrency=2
+        )
+
+        result = stage_bench.run_once(
+            manifest,
+            tmp_path / "sample",
+            settings,
+            build=lambda n: local_s3.client_for(server, n),
+        )
+
+        assert result["bytes"] == 9 * PART
+        assert result["mb_s"] == pytest.approx(
+            result["bytes"] / 1e6 / result["seconds"]
+        )
+        assert result["objects_s"] == pytest.approx(3 / result["seconds"])
+        # Four parts each for the two large objects, one for the small one.
+        assert result["get_requests"] == 9
+        assert result["wire_gets"] == 9
+        assert server.requests == 9
+
+    def test_the_sample_is_removed_between_configurations(self, server, tmp_path):
+        # A leftover is skipped rather than fetched, and the configuration
+        # after it would post a throughput figure for objects it never pulled.
+        manifest = manifest_for(server, [PART, PART])
+        settings = staging.FetchSettings.build(threads=2)
+        sample = tmp_path / "sample"
+
+        for _ in range(2):
+            result = stage_bench.run_once(
+                manifest,
+                sample,
+                settings,
+                build=lambda n: local_s3.client_for(server, n),
+            )
+            assert result["reused"] == 0
+
+        assert not sample.exists()
+        assert server.requests == 4
