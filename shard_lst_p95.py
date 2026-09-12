@@ -937,9 +937,9 @@ def run_fused(
         # `fused_block` cross-fades when it is handed a prep artifact and
         # composites pooled when it is not. The offsets and the rejection are
         # already in `vectors`, which was built from the real prep, so
-        # withholding it here turns off exactly what the flag names, and the
-        # swath weights are not scattered to a worker that will not use them.
-        prep=None if args.no_feather else prep,
+        # withholding it here turns off exactly what the flag names. The tasks
+        # get the artifact's path, not the object: see `composite.resolve_prep`.
+        prep=None if (args.no_feather or prep is None) else str(args.tile_prep),
         out=outputs,
         emit_pooled=args.emit_pooled,
         marks=marks,

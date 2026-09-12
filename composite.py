@@ -58,6 +58,7 @@ other.
 from __future__ import annotations
 
 import fcntl
+import functools
 import time
 import warnings
 from dataclasses import dataclass, replace
@@ -1231,24 +1232,27 @@ class BlockOutputs:
         )
 
 
-def _per_worker(client, addresses, value):
-    """Send one value to each worker once, and return it keyed by address.
+@functools.lru_cache(maxsize=2)
+def _prep_from_disk(path: str):
+    """The prep artifact, read once per worker process and kept.
 
-    Every block's task takes the same prep artifact, and frisky's `submit`
-    serialises its arguments on each call, so passing `prep` straight in would
-    pickle the swath weights once per block. Scattering it puts one copy on
-    each worker and hands the tasks a reference. `broadcast=True` is not
-    implemented in frisky 0.7.2, so this scatters per address.
-
-    Falls back to the value itself if the cluster exposes no addresses or the
-    scatter fails: correctness never depends on this.
+    Every block's task takes the same artifact, about 290 MB of swath weights
+    on a 5 degree tile, and frisky's `submit` serialises its arguments on each
+    call. Scattering one copy per worker was tried first: on 64 workers that
+    is 18.6 GB through the scheduler, and one of the 64 scatters was lost
+    before it reached its worker, which failed the run. MEASURED on the 8x8
+    window at 64 slots, 2026-09-12. The workers share the driver's disk, so
+    the task carries the path and each process reads the file once from page
+    cache instead.
     """
-    if value is None or not addresses:
-        return dict.fromkeys(addresses or [None], value)
-    try:
-        return {addr: client.scatter(value, workers=[addr]) for addr in addresses}
-    except Exception:  # noqa: BLE001  an optimisation, never a failure
-        return dict.fromkeys(addresses, value)
+    return destripe.load_prep(Path(path))
+
+
+def resolve_prep(prep):
+    """A prep object, from the object itself or from the path a task carries."""
+    if isinstance(prep, (str, Path)):
+        return _prep_from_disk(str(prep))
+    return prep
 
 
 def submit_blocks(
@@ -1276,6 +1280,11 @@ def submit_blocks(
     `cluster._worker_addresses`. Frisky's scheduler would otherwise be free to
     pile the head of the queue, which is every deep block, onto one worker.
 
+    `prep` goes to the tasks as given. Pass the artifact's directory rather
+    than the loaded object: a path is a few bytes per submit and each worker
+    reads the file once through `resolve_prep`, where the object itself would
+    be pickled once per block.
+
     `observe.phase` marks stay the graph path's two: `graph_build` around the
     planning and the submission, `compute` around the wait, so the summary
     prints the same two figures against the same two names.
@@ -1289,7 +1298,6 @@ def submit_blocks(
 
     futures = []
     with observe.phase("graph_build", count=len(plan), marks=marks):
-        shared_prep = _per_worker(client, addresses, prep)
         for n, block in enumerate(deepest_first):
             addr = addresses[n % len(addresses)] if addresses else None
             kwargs = {"emit_pooled": emit_pooled}
@@ -1301,7 +1309,7 @@ def submit_blocks(
                     block,
                     [items[i] for i in block.item_indices],
                     block_vectors(vectors, block),
-                    shared_prep.get(addr, prep),
+                    prep,
                     out.for_block(block) if hasattr(out, "for_block") else out,
                     **kwargs,
                 )
@@ -1476,6 +1484,7 @@ def fused_block(
     t0 = time.perf_counter()
     if hasattr(out, "for_block"):
         out = out.for_block(block)
+    prep = resolve_prep(prep)
     lwir = read_block(items, block.geobox, "lwir11")
     qa = read_block(items, block.geobox, "qa_pixel")
     t_read = time.perf_counter()

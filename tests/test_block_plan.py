@@ -457,10 +457,15 @@ class TestSubmitBlocks:
                 destripe.scene_id_of(items[j]) for j in block.item_indices
             ]
 
-    def test_the_prep_is_scattered_once_per_worker_not_once_per_block(self):
+    def test_the_prep_goes_to_the_tasks_as_a_path_and_is_never_scattered(self):
+        """One scatter per worker was lost on 64 workers and failed the run.
+
+        MEASURED on the 8x8 window at 64 slots: `Scattered data scatter-0-76
+        was lost before reaching a worker`. The tasks carry the artifact's
+        path and each process reads it once, so nothing is scattered.
+        """
         items, vectors, plan = plan_and_vectors()
         client, cluster = FakeClient(), FakeCluster(n=4)
-        prep = prep_for(items)
         composite.submit_blocks(
             client,
             cluster,
@@ -468,30 +473,31 @@ class TestSubmitBlocks:
             counting_stub,
             items=items,
             vectors=vectors,
-            prep=prep,
+            prep="/prep/dir",
         )
-        assert client.scattered == cluster._worker_addresses
-        assert len(client.scattered) == 4 < len(plan)
-        assert all(call["args"][3] != prep for call in client.calls)
+        assert client.scattered == []
+        assert all(call["args"][3] == "/prep/dir" for call in client.calls)
 
-    def test_a_scatter_that_fails_falls_back_to_the_value(self):
-        class NoScatter(FakeClient):
-            def scatter(self, data, workers=None, **_kw):
-                raise RuntimeError("no scatter here")
+    def test_a_task_reads_the_prep_from_disk_once_per_process(self, monkeypatch):
+        loads: list[str] = []
 
-        items, vectors, plan = plan_and_vectors()
-        client, cluster = NoScatter(), FakeCluster()
+        def fake_load(path):
+            loads.append(str(path))
+            return object()
+
+        monkeypatch.setattr(composite.destripe, "load_prep", fake_load)
+        composite._prep_from_disk.cache_clear()
+        first = composite.resolve_prep("/prep/one")
+        second = composite.resolve_prep("/prep/one")
+        assert first is second
+        assert loads == ["/prep/one"]
+        composite._prep_from_disk.cache_clear()
+
+    def test_a_prep_object_passes_through_resolve_unchanged(self):
+        items, _, _ = plan_and_vectors()
         prep = prep_for(items)
-        composite.submit_blocks(
-            client,
-            cluster,
-            plan,
-            counting_stub,
-            items=items,
-            vectors=vectors,
-            prep=prep,
-        )
-        assert all(call["args"][3] is prep for call in client.calls)
+        assert composite.resolve_prep(prep) is prep
+        assert composite.resolve_prep(None) is None
 
     def test_the_phase_marks_are_the_ones_the_summary_prints(self):
         items, vectors, plan = plan_and_vectors()
