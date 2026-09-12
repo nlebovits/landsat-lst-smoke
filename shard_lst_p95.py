@@ -230,6 +230,27 @@ def items_for_shard(shard: Shard, item_bboxes) -> list[int]:
     ]
 
 
+#: Shard edge in pixels. 500 divides an 18,000 px tile exactly, so a tile cuts
+#: into 1,296 shards with no ragged edge, where 512 leaves 71 of them.
+#:
+#: It is chosen for memory, not for the divisor. `worker_memory_guard` refuses
+#: a slice whose deepest `workers` shards will not fit, and MEASURED against
+#: the full inventory at 64 workers, a 512 px edge refuses four tiles on a
+#: 256 GiB machine: N50E100 at 259.0 GiB, N50E090 at 257.8, N50E095 at 257.2
+#: and N50E115 at 256.1. At 500 px the worst of them is 247.3 GiB. 508 also
+#: fits and leaves 1.0 GiB on the worst tile, which is luck rather than margin.
+#:
+#: The work barely moves. MEASURED on the same two tiles: N50E100 reads 3%
+#: more at 500 px and S30W065 reads 2% fewer, because a smaller shard sees
+#: fewer scenes and there are the same number of them.
+#:
+#: One edge for the whole fleet rather than one per tile. Per-tile edges would
+#: save about 4% of the compute on the tiles that do not need the smaller one,
+#: and cost a per-shard depth pass over 895 tiles in `fleet_plan.py` plus a
+#: field a launcher has to honour. A dropped field is worse than a default
+#: chosen for the worst tile.
+DEFAULT_SHARD_PX = 500
+
 #: Bytes per pixel-scene that one shard holds at its peak. `process_shard` has
 #: five arrays live at once, not the one an earlier version of this function
 #: counted:
@@ -1099,7 +1120,12 @@ def parse_args(argv=None):
     )
     p.add_argument("--pixels-per-degree", type=int, default=3600)
     p.add_argument("--crs", default="EPSG:4326")
-    p.add_argument("--shard", type=int, default=512, help="shard edge in pixels")
+    p.add_argument(
+        "--shard",
+        type=int,
+        default=DEFAULT_SHARD_PX,
+        help=f"shard edge in pixels (default {DEFAULT_SHARD_PX})",
+    )
     p.add_argument("--start", default=DEFAULT_START)
     p.add_argument("--end", default=DEFAULT_END)
     p.add_argument("--cloud-cover-lt", type=int, default=DEFAULT_CLOUD_COVER_LT)

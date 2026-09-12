@@ -27,6 +27,7 @@ SWEEPS_BY_NAME = {
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shard_lst_p95 import (  # noqa: E402
+    DEFAULT_SHARD_PX,
     SHARD_BYTES_PER_PIXEL_SCENE,
     SHARD_FIXED_GIB,
     Shard,
@@ -447,6 +448,31 @@ class TestWorkerMemoryGuard:
             360, [820] * 64, 8, self.TILE_PX, self.TILE_PX, total_bytes=247 * self.GIB
         )
         assert eight == pytest.approx(8 * shard_bytes(360, 820) + 4.8, abs=0.05)
+
+    def test_the_default_edge_fits_the_deepest_tile_in_the_fleet(self):
+        """512 px refused four tiles on the machine the fleet runs.
+
+        MEASURED against the full inventory at 64 workers and 256 GiB:
+        N50E100 wanted 259.0 GiB at 512 px and 247.3 at 500. The other three
+        were N50E090, N50E095 and N50E115, all within 2 GiB of the limit.
+
+        1,028 scenes is the deepest shard the fleet holds, at 512 px. This
+        prices that shard on the default edge and checks it leaves room, so a
+        deeper inventory has somewhere to grow before tiles start failing at
+        launch.
+        """
+        depths = [1028] * 64
+        demand = slice_demand(DEFAULT_SHARD_PX, depths, 64, self.TILE_PX, self.TILE_PX)
+        assert demand < 256.0
+        assert slice_demand(512, depths, 64, self.TILE_PX, self.TILE_PX) > 256.0
+
+    def test_the_default_edge_divides_a_tile_exactly(self):
+        # 71 ragged shards at 512 px, none at 500. An edge shard is a smaller
+        # unit of work in a plan whose memory budget is set by the full one.
+        shards, height, width = plan_shards(FULL_TILE, PPD, DEFAULT_SHARD_PX)
+        assert height == width == self.TILE_PX
+        assert not [s for s in shards if s.ny != DEFAULT_SHARD_PX]
+        assert not [s for s in shards if s.nx != DEFAULT_SHARD_PX]
 
     def test_the_reported_demand_is_the_one_the_guard_refuses_on(self):
         """The dry run used to print a verdict the guard disagreed with.

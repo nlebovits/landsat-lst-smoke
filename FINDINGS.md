@@ -1500,6 +1500,35 @@ department runs, one 200-scene quarter-tile smoke run, and two quarter-tile
 attempts that never finished, cost about **$4.45**. The full-tile fleet cost
 **$4.27** on top of it. The staged and memory-sweep instances are unpriced.
 
+### The shard edge is 500, and it is a memory decision
+
+MEASURED against the full 895-tile inventory at 64 workers, on the 256 GiB
+machine the fleet runs: a 512 px edge refuses four tiles.
+
+| tile | 512 px | 500 px |
+|---|---|---|
+| N50E100 | 259.0 GiB | 247.3 GiB |
+| N50E090 | 257.8 | 246.9 |
+| N50E095 | 257.2 | 246.6 |
+| N50E115 | 256.1 | 245.1 |
+
+500 also divides an 18,000 px tile exactly, so a tile cuts into the same 1,296
+shards with no ragged edge where 512 leaves 71. The work barely moves: N50E100
+reads 3% more at 500 px and S30W065 reads 2% fewer, because a smaller shard
+sees fewer scenes and there are the same number of shards. 508 fits too and
+leaves 1.0 GiB on the worst tile, which is luck rather than margin.
+
+One edge for the fleet rather than one per tile. Per-tile edges would save
+about 4% of the compute on the tiles that do not need the smaller one, against
+a per-shard depth pass over 895 tiles in `fleet_plan.py` and a field a launcher
+has to honour. A dropped field is worse than a default chosen for the worst
+tile.
+
+The guard runs before staging, so a refused tile costs boot, install and search
+and buys no object. That is about 370 s, or $0.39. The cost of the old default
+was four machines exiting non-zero in a fleet of 769, which someone has to
+notice.
+
 ### A tile staged itself twice
 
 The seam correction adds a traversal. `tile_prep.py` reads the tile, then
