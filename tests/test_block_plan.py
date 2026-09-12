@@ -130,6 +130,21 @@ class TestTheBlockGrid:
         assert last.geobox.shape == (280, 280)
         assert plan[0].shape == (CHUNK, CHUNK)
 
+    def test_a_wider_than_tall_raster_is_not_transposed(self):
+        """`GeoBox.shape` prints x first and unpacks y first. Pin the order."""
+        bbox = (-65.0, -35.0, -63.0, -34.0)  # 2 degrees wide, 1 degree tall
+        ppd = 900  # 900 x 1,800 px, so 360 makes 3 block rows and 5 columns
+        items, boxes = walk_items(10, bbox, edge=0.4)
+        plan = composite.build_block_plan(items, boxes, geobox_for(bbox, ppd), CHUNK)
+        assert composite.raster_shape(bbox, ppd) == (900, 1_800)
+        assert len(plan) == 3 * 5
+        assert plan[-1].yslice == slice(720, 900)
+        assert plan[-1].xslice == slice(1_440, 1_800)
+        assert plan[-1].shape == (180, 360)
+        depths = composite.block_depths(bbox, ppd, CHUNK, boxes)
+        assert depths.shape == (3, 5)
+        assert np.array_equal(composite.plan_depths(plan, depths.shape), depths)
+
     def test_a_block_geobox_is_that_block_of_the_tile_geobox(self):
         items, boxes = walk_items(12, TILE_BBOX)
         full = geobox_for(TILE_BBOX)
