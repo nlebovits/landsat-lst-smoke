@@ -467,6 +467,14 @@ def parse_args(argv=None):
     p.add_argument("--cloud-cover-lt", type=int, default=DEFAULT_CLOUD_COVER_LT)
     p.add_argument("--platforms", default=DEFAULT_PLATFORMS)
     p.add_argument("--source", choices=sorted(READ_SOURCES), default="earth-search")
+    p.add_argument(
+        "--engine",
+        choices=("graph", "fused"),
+        default="graph",
+        help="graph: one lazy dask-xarray graph for the tile, whose build "
+        "cost scales with the time axis. fused: one submitted task per "
+        "block, each reading only the scenes whose footprint reaches it",
+    )
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--threads-per-worker", type=int, default=4)
     p.add_argument("--memory-limit-gib", type=float, default=13.0)
@@ -779,6 +787,93 @@ def _dry_run(args, bbox, height, width, say) -> int:
     return 0
 
 
+def run_fused(
+    args,
+    *,
+    client,
+    cluster,
+    bbox,
+    item_dicts,
+    item_bboxes,
+    prep,
+    keep_mask,
+    gap_mask,
+    marks,
+    say,
+):
+    """The fused engine: one block plan, then one submitted task per block.
+
+    The graph engine's cost is the tile's time axis: `odc.stac` puts two open
+    tasks per item into the graph and hands every band-load task all of them,
+    which MEASURED 15.5 s at 1,000 items and 60.5 s at 4,776 on the 64-worker
+    run. Here the driver computes each block's own scene list once, as one
+    boolean matmul, and every task carries only what its block reads.
+
+    `submit_blocks` keeps the `graph_build` and `compute` phase marks, so the
+    summary prints against the same two names; the plan itself is its own
+    `plan` phase, because what it replaces is worth reading separately.
+
+    Returns:
+        `(scalars, staged_paths, n_rejected, n_tasks)`, the four the graph
+        engine leaves behind for the summary.
+    """
+    from odc.geo.geobox import GeoBox
+
+    from masks import gap_hot_dn, transform_for
+
+    fused_block = getattr(composite, "fused_block", None)
+    if fused_block is None:
+        raise SystemExit(
+            "--engine fused needs composite.fused_block, the per-block kernel. "
+            "This build carries the plan and the submission path but not the "
+            "kernel; run with --engine graph."
+        )
+
+    height, width = composite.raster_shape(bbox, args.pixels_per_degree)
+    transform = transform_for(bbox, args.pixels_per_degree)
+    with observe.phase("plan", count=len(item_dicts), marks=marks):
+        geobox = GeoBox((height, width), transform, args.crs)
+        plan = composite.build_block_plan(item_dicts, item_bboxes, geobox, args.chunk)
+        vectors = composite.scene_vectors(
+            item_dicts,
+            prep,
+            max_offset_c=args.max_offset_c,
+            debias=not args.no_destripe,
+        )
+        targets, staged_paths = composite.staging_targets(
+            args.out_dir,
+            shape=(height, width),
+            transform=transform,
+            crs=args.crs,
+            emit_pooled=args.emit_pooled,
+        )
+    depth = [block.depth for block in plan]
+    say(
+        f"plan          {len(plan)} blocks, {sum(depth) / max(len(plan), 1):.0f} "
+        f"scenes per block on average against {len(item_dicts)} on the tile's "
+        f"time axis, planned in {marks['plan_s']:.2f}s"
+    )
+    outputs = composite.BlockOutputs(
+        targets=targets,
+        keep=keep_mask,
+        gap=gap_mask,
+        hot_dn=None if keep_mask is None else gap_hot_dn(),
+    )
+    scalars = composite.submit_blocks(
+        client,
+        cluster,
+        plan,
+        fused_block,
+        items=item_dicts,
+        vectors=vectors,
+        prep=prep,
+        out=outputs,
+        emit_pooled=args.emit_pooled,
+        marks=marks,
+    )
+    return scalars, staged_paths, vectors.n_rejected, len(plan)
+
+
 def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
     args = parse_args(argv)
     bbox, tile_id = resolve_area(args)
@@ -967,43 +1062,67 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
     scalars: dict = {}
     staged_paths: dict = {}
     trace_report: dict = {}
+    n_rejected = 0
+    n_tasks = 0
     proc = psutil.Process()
     try:
-        with observe.phase("graph_build", count=depths.size, marks=marks):
-            out = composite.build_graph(
-                item_dicts,
-                bbox,
-                crs=args.crs,
-                resolution=res,
-                chunk=args.chunk,
+        if args.engine == "fused":
+            scalars, staged_paths, n_rejected, n_tasks = run_fused(
+                args,
+                client=client,
+                cluster=cluster,
+                bbox=bbox,
+                item_dicts=item_dicts,
+                item_bboxes=item_bboxes,
                 prep=prep,
-                max_offset_c=args.max_offset_c,
-                debias=not args.no_destripe,
-                feather=not args.no_feather,
-                emit_pooled=args.emit_pooled,
-            )
-            ydim, xdim = composite.spatial_dims(args.crs)
-            counts, staged_paths = composite.staging_writes(
-                out,
-                args.out_dir,
-                crs=args.crs,
-                dims=(ydim, xdim),
                 keep_mask=keep,
                 gap_mask=gap,
+                marks=marks,
+                say=say,
             )
-            n_tasks = len(dict(counts.__dask_graph__()))
-        say(
-            f"graph         {n_tasks:,} tasks for {depths.size} blocks over "
-            f"{out.attrs['n_scenes']} scenes, built in {marks['graph_build_s']:.1f}s"
-        )
-        if out.attrs["n_rejected"]:
             say(
-                f"              {out.attrs['n_rejected']} scenes rejected by the offset rule"
+                f"submit        {n_tasks:,} block tasks, one per block, "
+                f"submitted in {marks['graph_build_s']:.1f}s"
             )
+            if n_rejected:
+                say(f"              {n_rejected} scenes rejected by the offset rule")
+            say(f"compute       {marks['compute_s']:.1f}s for {depths.size} blocks")
+        else:
+            with observe.phase("graph_build", count=depths.size, marks=marks):
+                out = composite.build_graph(
+                    item_dicts,
+                    bbox,
+                    crs=args.crs,
+                    resolution=res,
+                    chunk=args.chunk,
+                    prep=prep,
+                    max_offset_c=args.max_offset_c,
+                    debias=not args.no_destripe,
+                    feather=not args.no_feather,
+                    emit_pooled=args.emit_pooled,
+                )
+                ydim, xdim = composite.spatial_dims(args.crs)
+                counts, staged_paths = composite.staging_writes(
+                    out,
+                    args.out_dir,
+                    crs=args.crs,
+                    dims=(ydim, xdim),
+                    keep_mask=keep,
+                    gap_mask=gap,
+                )
+                n_tasks = len(dict(counts.__dask_graph__()))
+            n_rejected = out.attrs["n_rejected"]
+            say(
+                f"graph         {n_tasks:,} tasks for {depths.size} blocks over "
+                f"{out.attrs['n_scenes']} scenes, built in "
+                f"{marks['graph_build_s']:.1f}s"
+            )
+            if n_rejected:
+                say(f"              {n_rejected} scenes rejected by the offset rule")
 
-        with observe.phase("compute", count=depths.size, marks=marks):
-            scalars = composite.compute_all(counts)
-        say(f"compute       {marks['compute_s']:.1f}s for {depths.size} blocks")
+            with observe.phase("compute", count=depths.size, marks=marks):
+                scalars = composite.compute_all(counts)
+            say(f"compute       {marks['compute_s']:.1f}s for {depths.size} blocks")
 
         with observe.phase("collect_trace", marks=marks):
             trace_report = observe.collect(cluster, args.out_dir)
@@ -1138,7 +1257,7 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
         },
         "n_scenes": len(item_dicts),
         "n_scenes_inventory": len(items),
-        "n_scenes_rejected": out.attrs["n_rejected"],
+        "n_scenes_rejected": n_rejected,
         "scenes_dropped_no_thermal": dropped_no_thermal,
         "n_tasks": n_tasks,
         # Every phase in seconds from one origin, MEASURED. The same figures
