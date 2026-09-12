@@ -236,14 +236,38 @@ def stage_scenes_for(args, item_dicts, say=print):
         item_dicts,
         range(len(item_dicts)),
         args.stage_dir,
-        threads=args.stage_threads,
+        settings=stage_settings(args),
     )
     report_staging(report, say)
     return report
 
 
+def stage_settings(args) -> staging.FetchSettings:
+    """The five staging flags as one object, defaults included.
+
+    Each of them is `None` unless the operator said otherwise, and
+    `FetchSettings.build` turns a row of `None` into the behaviour staging had
+    before the flags existed. That is what keeps an untuned run comparable to
+    every run already measured.
+    """
+    return staging.FetchSettings.build(
+        threads=args.stage_threads,
+        connections=args.stage_connections,
+        part_bytes=(
+            None if args.stage_part_mb is None else int(args.stage_part_mb * 1024**2)
+        ),
+        part_concurrency=args.stage_part_concurrency,
+        fsync=args.stage_fsync,
+    )
+
+
 def report_staging(report, say=print) -> None:
-    """The two console lines a staged run prints about what it fetched."""
+    """The three console lines a staged run prints about what it fetched.
+
+    The third names the settings. A throughput figure without them cannot be
+    compared against another run, and staging is the phase most likely to be
+    swept.
+    """
     say(
         f"stage         {report['objects']:,} objects, "
         f"{report['bytes'] / GIB:.1f} GiB in {report['seconds']:.1f}s "
@@ -255,6 +279,15 @@ def report_staging(report, say=print) -> None:
         f"              {report['get_requests']:,} billable GETs, "
         f"{report['retries']} retries{already}"
     )
+    settings = report.get("settings")
+    if settings:
+        say(
+            f"              {settings['threads']} threads, "
+            f"{settings['connections']} connections, "
+            f"{settings['part_concurrency']} x "
+            f"{settings['part_bytes'] / 1024**2:.0f} MiB parts, "
+            f"fsync {settings['fsync']}"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -498,7 +531,41 @@ def parse_args(argv=None):
         "--stage-threads",
         type=int,
         default=None,
-        help="threads in the fetch pool. Defaults to min(64, 4 x cores)",
+        help="objects in flight during staging. Defaults to min(64, 4 x cores)",
+    )
+    p.add_argument(
+        "--stage-connections",
+        type=int,
+        default=None,
+        help="botocore max_pool_connections. Defaults to the fetch threads "
+        "times the part concurrency, which is every socket the fetch can "
+        "want at once. Set it below that to find out whether the pool binds",
+    )
+    p.add_argument(
+        "--stage-part-mb",
+        type=float,
+        default=None,
+        help="MiB per ranged GET, and the size below which an object is "
+        "fetched whole. Defaults to 8. Has no effect at the default part "
+        "concurrency",
+    )
+    p.add_argument(
+        "--stage-part-concurrency",
+        type=int,
+        default=None,
+        help="ranged GETs in flight for one object, so that an 84 MB ST_B10 "
+        "can use more than one connection. Defaults to 1, which is one GET "
+        "per object and the request count staging.json has always reported. "
+        "Above 1 it costs one billable GET per part",
+    )
+    p.add_argument(
+        "--stage-fsync",
+        choices=staging.FSYNC_MODES,
+        default=None,
+        help="whether a staged file is flushed on the fetch thread. Defaults "
+        "to file, which fsyncs and then releases the page cache. none skips "
+        "both and leaves 278 GB for the kernel to reclaim on its own "
+        "schedule; dir also flushes the directory entry",
     )
     p.add_argument(
         "--keep-staged",
