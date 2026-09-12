@@ -43,6 +43,16 @@ plan, the vectors, and every block's subset together take 9 ms at 1,000 items
 and 27 ms at 4,776, against 9.6 s and 62.9 s for `build_graph` on this
 laptop. `--engine fused` selects that path; `--engine graph` is the default
 and stays the tested one.
+
+The task those blocks run is `fused_block`: one task that reads its own two
+bands through `read_block`, resamples its own weights through
+`block_weights`, and then calls the same `reduce_block` and the same
+`finalize_block` the graph calls. It exists because the graph is three tasks
+deep per block and frisky queues the two roots before the reduce, which idles
+most of a wide cluster. Both engines write the same bytes;
+`tests/test_composite_fused.py` asserts it block for block on the rehearsal
+tile, `read_block` against `open_stack` and the staging files against each
+other.
 """
 
 from __future__ import annotations
@@ -1300,9 +1310,240 @@ def submit_blocks(
     totals = dict.fromkeys(FLAGS, 0)
     with observe.phase("compute", count=len(plan), marks=marks):
         for future in futures:
-            for flag, value in (future.result() or {}).items():
-                totals[flag] = totals.get(flag, 0) + int(value)
+            # Only the flags. `fused_block` returns its stage timings in the
+            # same dict, and those are seconds, not pixels.
+            result = future.result() or {}
+            for flag in FLAGS:
+                totals[flag] += int(result.get(flag, 0))
     return totals
+
+
+# --------------------------------------------------------------------------
+# The per-block kernel. One task reads its own two bands, resamples its own
+# weights, reduces, and writes.
+#
+# The graph engine's shape is three tasks deep per block: two band loads and a
+# reduce behind them. MEASURED on 64 single-threaded frisky workers with 64
+# blocks at chunk 360, the 128 loads (4.2 s lwir11, 3.4 s qa_pixel, one core
+# each, decode-bound) were pre-queued onto 54 workers up to 8 deep while 10
+# workers got nothing, and the 64 reduces waited behind them. 665 of 3,521
+# slot-seconds executed a task, 19%, and the 51 blocks whose two bands landed
+# on different workers moved 259 MB each. Seven frisky placement environment
+# knobs changed none of it.
+#
+# `fused_block` removes the queue rather than reordering it. One task per
+# block, pinned by `submit_blocks`, so 64 blocks on 64 workers are 64
+# concurrent tasks, no band array crosses the wire, and every worker holds one
+# block at a time.
+#
+# Every numeric rule still runs exactly once, in the kernels this module
+# already had. Nothing below reimplements a percentile, a mask, or a weight:
+# `block_weights` calls `lazy_weights` on the block's own geobox, and
+# `read_block` drives the same `odc.loader` reader `odc.stac.load` drives.
+# --------------------------------------------------------------------------
+
+
+def _band_config(asset: dict, band: str):
+    """The band metadata and load parameters `odc.stac.load` resolves.
+
+    `odc.stac` reads `raster:bands` off the asset and hands the result to
+    `odc.loader.resolve_load_cfg`. Doing the same here is what makes the fused
+    reader bit-identical to the graph's loader, including the part that looks
+    wrong: `qa_pixel` declares `nodata: 1` in the item while the file on disk
+    declares 0, so the loaded qa plane is filled with 1 outside a scene and
+    every source 0 is remapped to 1. `lwir11` declares 0 and is filled with 0.
+    `tests/test_composite_fused.py` pins both against `open_stack`.
+    """
+    from odc.loader import RasterBandMetadata, resolve_load_cfg
+
+    raster = (asset.get("raster:bands") or [{}])[0]
+    meta = RasterBandMetadata(
+        data_type=raster.get("data_type"),
+        nodata=raster.get("nodata"),
+        units=str(raster.get("unit", "1")),
+    )
+    return meta, resolve_load_cfg({band: meta})[band]
+
+
+def read_block(items: list[dict], geobox, band: str) -> np.ndarray:
+    """`(y, x, n_items)` uint16 on the block geobox, one time step per item.
+
+    Nearest resampling, reprojected into `geobox` by the same `odc.loader`
+    reader `odc.stac.load` drives, so a block read here is bit-identical to
+    the same block of `open_stack`. Where an item does not reach the block the
+    plane keeps the band's declared fill: 0 for `lwir11`, 1 for `qa_pixel`
+    (see `_band_config`). Item order is the time order given, and each item is
+    one time step: `build_block_plan` hands one index per scene in acquisition
+    order and a scene id belongs to one item.
+
+    Nothing here reads more than the block. The warper opens the file and
+    pulls only the source window that lands inside `geobox`. An item whose
+    STAC bbox misses the block is skipped without an open, which is what
+    `odc.stac`'s spatial binning does for the same item; its plane would be
+    fill either way, so the skip is output-neutral. The footprint test is the
+    bounding box rather than the geometry, so the skip is never wider than
+    odc's, and `build_block_plan` has usually made it already.
+
+    The loop runs inside one GDAL environment, entered through the same
+    `RioDriver.restore_env` the loader's chunk task enters, so these reads see
+    the GDAL configuration the graph's reads see. Opening a file with no
+    ambient environment pushes and pops a GDAL config per open, MEASURED at
+    19% of a 640-read block loop on the rehearsal scenes.
+    """
+    from odc.loader import (
+        RasterSource,
+        RioDriver,
+        resolve_dst_nodata,
+        resolve_src_nodata,
+    )
+
+    ny, nx = geobox.shape
+    if not len(items):
+        return np.zeros((ny, nx, 0), dtype="uint16")
+    meta, cfg = _band_config(items[0]["assets"][band], band)
+    dtype = np.dtype(cfg.dtype)
+    fill = resolve_dst_nodata(dtype, cfg, resolve_src_nodata(cfg.fill_value, cfg))
+    if fill is None:
+        fill = dtype.type(0)
+    stack = np.full((len(items), ny, nx), fill, dtype=dtype)
+    west, south, east, north = geobox.geographic_extent.boundingbox
+    driver = RioDriver()
+    load_state = driver.new_load(geobox)
+    try:
+        with driver.restore_env(driver.capture_env(), load_state) as ctx:
+            for i, item in enumerate(items):
+                box = item.get("bbox")
+                if box and not (
+                    box[0] < east
+                    and box[2] > west
+                    and box[1] < north
+                    and box[3] > south
+                ):
+                    continue
+                href = str(item["assets"][band]["href"])
+                source = RasterSource(href, band=1, meta=meta)
+                roi, pix = driver.open(source, ctx).read(cfg, geobox)
+                if pix.size:
+                    # The destination starts at the fill value everywhere, and
+                    # one item is one time step, so the nodata fuser odc would
+                    # apply here is a plain copy.
+                    stack[i][roi] = pix
+    finally:
+        driver.finalise_load(load_state)
+    return np.moveaxis(stack, 0, -1)
+
+
+def block_weights(prep, geobox) -> np.ndarray:
+    """`(y, x, n_paths)` float32: `lazy_weights` on one block, computed here.
+
+    The graph engine warps the swath grid into each block's own geobox, one
+    dask task per block. This calls the same function on the same geobox with
+    the block as its only chunk, so the resample, the renormalisation, and the
+    degenerate case are the one implementation rather than a copy of it. The
+    compute is synchronous: a worker thread must not start a scheduler.
+    """
+    ny, nx = geobox.shape
+    share = lazy_weights(prep, geobox, chunk=max(ny, nx, 1), dims=geobox.dims)
+    values = np.asarray(share.data.compute(scheduler="synchronous"), dtype="float32")
+    return np.ascontiguousarray(np.moveaxis(values, 0, -1))
+
+
+def fused_block(
+    block: BlockSpec,
+    items: list[dict],
+    vectors: SceneVectors,
+    prep,
+    out: BlockOutputs,
+    *,
+    emit_pooled: bool = False,
+    feather: bool = True,
+) -> dict:
+    """Read, weight, reduce, mask, and write one block. The whole task.
+
+    `items` and `vectors` are already this block's own, cut by
+    `submit_blocks` from `block.item_indices` and in acquisition order, so
+    nothing here re-indexes them. `out` is already this block's window of the
+    mask planes.
+
+    Everything numeric is a call into the kernels the graph engine calls:
+    `reduce_block` and `finalize_block`, unchanged.
+
+    Returns:
+        The per-flag counts `compute_all` sums, and the seconds each stage
+        took. `submit_blocks` adds up the flags and leaves the timings.
+    """
+    t0_ns = time.perf_counter_ns()
+    t0 = time.perf_counter()
+    if hasattr(out, "for_block"):
+        out = out.for_block(block)
+    lwir = read_block(items, block.geobox, "lwir11")
+    qa = read_block(items, block.geobox, "qa_pixel")
+    t_read = time.perf_counter()
+
+    use_feather = bool(feather and prep is not None and len(vectors.paths))
+    if use_feather:
+        weight = block_weights(prep, block.geobox)
+    else:
+        weight = np.zeros((*block.shape, 1), dtype="float32")
+    t_weight = time.perf_counter()
+
+    outputs = reduce_block(
+        lwir,
+        qa,
+        vectors.offset,
+        vectors.keep,
+        vectors.path_code,
+        vectors.month,
+        weight,
+        n_paths=len(vectors.paths) if use_feather else 0,
+        feather=use_feather,
+        emit_pooled=emit_pooled,
+    )
+    del lwir, qa, weight
+    t_reduce = time.perf_counter()
+
+    flags = finalize_block(
+        outputs[0],
+        outputs[1],
+        outputs[2],
+        True if out.keep is None else out.keep,
+        False if out.gap is None else out.gap,
+        np.array([block.yslice.start]),
+        np.array([block.xslice.start]),
+        *outputs[3:],
+        masked=out.masked,
+        hot_dn=out.hot_dn,
+        targets=out.targets,
+    )
+    t_end = time.perf_counter()
+    _record_fused_span(t0_ns, len(items))
+    counts = {flag: int(flags[..., i].sum()) for i, flag in enumerate(FLAGS)}
+    return counts | {
+        "row": block.row,
+        "col": block.col,
+        "depth": len(items),
+        "read_s": t_read - t0,
+        "weights_s": t_weight - t_read,
+        "reduce_s": t_reduce - t_weight,
+        "write_s": t_end - t_reduce,
+        "block_s": t_end - t0,
+    }
+
+
+def _record_fused_span(t0_ns: int, n_items: int) -> None:
+    """One span per fused task on the worker, beside `reduce_block`'s own."""
+    try:
+        import frisky
+
+        t1 = frisky.now_ns()
+        frisky.record_span(
+            "worker.exec.fused_block",
+            t1 - (time.perf_counter_ns() - t0_ns),
+            t1,
+            count=n_items,
+        )
+    except Exception:  # noqa: BLE001  instrumentation never fails the run
+        return
 
 
 def finish_staging(path: Path, *, scale, offset, descriptions, nodata) -> list[dict]:
@@ -1497,11 +1738,13 @@ __all__ = [
     "block_depths",
     "block_edges",
     "block_vectors",
+    "block_weights",
     "build_block_plan",
     "build_graph",
     "cleanup_staging",
     "compute_all",
     "finish_staging",
+    "fused_block",
     "item_for_files",
     "item_times",
     "lazy_weights",
@@ -1512,6 +1755,7 @@ __all__ = [
     "per_scene_vectors",
     "plan_depths",
     "raster_shape",
+    "read_block",
     "reduce_block",
     "rehearsal_items",
     "scene_vectors",
