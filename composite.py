@@ -55,7 +55,7 @@ DEFAULT_CHUNK_PX = 360
 LOADED_BYTES_PER_PIXEL_SCENE = 4
 
 #: Bytes per pixel-scene of the decoded work on the scenes present in a block:
-#: celsius float32, valid bool, the nanpercentile partition copy, and the two
+#: celsius float32, valid bool, the sort copy the percentile makes, and the two
 #: uint16 subsets `reduce_block` cuts before decoding. MEASURED at 15 for the
 #: shard path, whose loaded bands were already the subset; the 4 loaded bytes
 #: above are counted at full depth instead.

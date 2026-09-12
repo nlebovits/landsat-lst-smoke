@@ -722,3 +722,61 @@ class TestJoiningOnTime:
     def test_the_quad_carries_both_halves_and_keeps_its_padding(self):
         assert destripe.quad_of(self.ITEMS[0]) == ("228", "030")
         assert destripe.path_of(item("X", "2021-01-01T00:00:00Z", "007")) == "007"
+
+
+class TestTheVectorisedPercentile:
+    """`destripe.nan_percentile` is numpy's rule without numpy's per-pixel loop."""
+
+    @staticmethod
+    def stack(depth: int, shape, share: float, seed: int):
+        rng = np.random.default_rng(seed)
+        a = rng.normal(45.0, 6.0, (depth, *shape)).astype("float32")
+        a[rng.random(a.shape) > share] = np.nan
+        return a
+
+    @pytest.mark.parametrize(
+        ("depth", "shape", "share"),
+        [(1, (5, 7), 1.0), (2, (5, 7), 0.5), (40, (24, 24), 0.6), (300, (8, 8), 0.3)],
+    )
+    def test_it_matches_numpy_on_a_block(self, depth, shape, share):
+        a = self.stack(depth, shape, share, seed=depth)
+        a[:, 0, 0] = np.nan  # a pixel nothing observed
+        with np.errstate(all="ignore"):
+            want = np.nanpercentile(a, 95, axis=0).astype("float32")
+        got = destripe.nan_percentile(a, 95)
+        assert got.dtype == np.float32
+        np.testing.assert_array_equal(np.isfinite(want), np.isfinite(got))
+        finite = np.isfinite(want)
+        assert np.abs(want[finite] - got[finite]).max() < 1e-4
+
+    def test_it_matches_numpy_on_a_pixel_list(self):
+        """The fallback reduces `celsius[:, mask]`, a `(n, k)` slice."""
+        a = self.stack(50, (9, 9), 0.7, seed=3)
+        mask = np.zeros((9, 9), dtype=bool)
+        mask[2:5, 1:8] = True
+        with np.errstate(all="ignore"):
+            want = np.nanpercentile(a[:, mask], 95, axis=0).astype("float32")
+        got = destripe.nan_percentile(a[:, mask], 95)
+        assert got.shape == want.shape
+        np.testing.assert_allclose(got, want, atol=1e-4, equal_nan=True)
+
+    def test_other_quantiles_follow_the_same_rule(self):
+        a = self.stack(30, (6, 6), 0.8, seed=11)
+        for q in (0.0, 50.0, 95.0, 100.0):
+            with np.errstate(all="ignore"):
+                want = np.nanpercentile(a, q, axis=0).astype("float32")
+            got = destripe.nan_percentile(a, q)
+            np.testing.assert_allclose(got, want, atol=1e-4, equal_nan=True)
+
+    def test_it_does_not_touch_its_input(self):
+        a = self.stack(20, (4, 4), 0.9, seed=5)
+        before = a.copy()
+        destripe.nan_percentile(a, 95)
+        np.testing.assert_array_equal(np.nan_to_num(a), np.nan_to_num(before))
+
+    def test_a_stack_with_no_scenes_is_all_nodata(self):
+        """A block no scene reaches. numpy answers NaN and so must this."""
+        empty = np.empty((0, 3, 4), dtype="float32")
+        got = destripe.nan_percentile(empty, 95)
+        assert got.shape == (3, 4)
+        assert np.isnan(got).all()
