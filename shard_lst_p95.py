@@ -165,7 +165,18 @@ def resolve_area(args):
         The bbox as `(west, south, east, north)`, and the tile id or None.
     """
     if args.tile and args.bbox:
-        raise SystemExit("pass --tile or --bbox, not both")
+        # A window of one tile: the tile names the inventory rows and the
+        # prep artifact, the bbox names the raster. For measurements.
+        tile = tile_bounds(args.tile)
+        window = tuple(float(v) for v in args.bbox.split(","))
+        if len(window) != 4:
+            raise SystemExit("--bbox needs west,south,east,north")
+        w, s, e, n = window
+        if not (tile[0] <= w < e <= tile[2] and tile[1] <= s < n <= tile[3]):
+            raise SystemExit(
+                f"--bbox {window} does not lie inside tile {args.tile} {tile}"
+            )
+        return window, args.tile
     if args.tile:
         return tile_bounds(args.tile), args.tile
     if not args.bbox:
@@ -397,9 +408,17 @@ def parse_args(argv=None):
     p.add_argument(
         "--bbox",
         default=None,
-        help="west,south,east,north EPSG:4326 (use --bbox=...). Only for "
-        "--rehearse and --dry-run; a real run needs --tile, because the "
-        "inventory is addressed by tile",
+        help="west,south,east,north EPSG:4326 (use --bbox=...). Alone, for "
+        "--rehearse and --dry-run. With --tile, a window of that tile: the "
+        "inventory rows and the prep artifact come from the tile, the raster "
+        "covers the bbox, and only the scenes that reach it are staged",
+    )
+    p.add_argument(
+        "--all-scenes",
+        action="store_true",
+        help="with --tile and --bbox, keep every scene of the tile on the time "
+        "axis rather than the ones that reach the window. Measures the memory "
+        "a full-tile block carries",
     )
     p.add_argument(
         "--inventory-uri",
@@ -853,11 +872,29 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
                 args, tile_id, bbox, len(items), dropped_no_thermal, run_provenance
             )
 
+    # The prep artifact is hashed over the tile's whole scene list, so it is
+    # checked before any window cut.
     prep = (
         None
         if args.rehearse
         else load_tile_prep(args, tile_id, item_dicts, run_provenance)
     )
+    if args.bbox and tile_id is not None and not args.rehearse and not args.all_scenes:
+        # A window run stages and loads only the scenes that reach it.
+        # `--all-scenes` keeps the tile's whole time axis, which is what a
+        # full-tile block carries, for measuring that memory on a window.
+        w, s, e, n = bbox
+        reach = [
+            i
+            for i, (iw, isouth, ie, inorth) in enumerate(item_bboxes)
+            if iw < e and ie > w and isouth < n and inorth > s
+        ]
+        item_dicts = [item_dicts[i] for i in reach]
+        item_bboxes = [item_bboxes[i] for i in reach]
+        say(f"window        {len(item_dicts)} scenes reach {bbox}")
+        if not item_dicts:
+            say("no scene reaches the window")
+            return 1
     if prep is not None:
         kept = destripe.keep_mask(
             np.array([prep.offset.get(s, np.nan) for s in prep.offset]),
