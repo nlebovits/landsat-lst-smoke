@@ -258,14 +258,37 @@ over-predicts a cloudy tropical tile by a third.
 | `N00E110` | 177.0 GiB | 58.84 GiB | 3.01x | 1.226 GiB |
 
 The measured peaks fall in a 58 to 65 GiB band across four climates and 3,424
-to 4,856 scenes. The model swings from 152 to 185 GiB over the same tiles. So
-`SHARD_BYTES_PER_PIXEL_SCENE = 15` is not merely too large. It makes demand a
-function of the tile, and the measurement makes it a function of the slot
-count: **1.35 GiB per slot, worst of five.**
+to 4,856 scenes. The model swung from 152 to 185 GiB over the same tiles, so it
+was not merely too large. It made demand a function of the tile where the
+measurement makes it a function of the slot count: **1.35 GiB per slot, worst
+of five.**
 
-`worker_memory_guard` refuses on the model, so it currently refuses
-configurations that fit with room to spare. Refitting it against these five
-points is what unlocks the smaller instances priced below.
+The cause was one argument. `block_bytes` priced the loaded uint16 bands at the
+tile's whole time axis, `chunk^2 x n_scenes x 4 B`, and `memory_demand` passed
+the tile's scene count for every block. That is right for the graph engine,
+where `open_stack` opens the time axis and every block of the dask array
+carries it. `fused_block` calls `read_block` with `block.item_indices` and
+loads the block's own depth.
+
+Charging the depth instead puts the same five tiles at 90.7 to 92.6 GiB, which
+is flat the way the measurement is flat, at 1.42x to 1.56x above it:
+
+| tile | MEASURED | time axis | ratio | block depth | ratio |
+|---|---|---|---|---|---|
+| `S30W065` | 60.21 | 184.0 | 3.06x | 92.2 | 1.53x |
+| `N40W080` | 58.01 | 184.7 | 3.18x | 90.7 | 1.56x |
+| `S25E030` | 64.70 | 152.6 | 2.36x | 92.1 | 1.42x |
+| `N30E075` | 64.28 | 180.8 | 2.81x | 92.6 | 1.44x |
+| `N00E110` | 58.84 | 177.0 | 3.01x | 90.7 | 1.54x |
+
+The ratio spread falls from 0.82 to 0.14. The 1.5x margin that remains is
+headroom a guard should have. The tile's scene count in a term the engine never
+pays is not. `memory_demand` and `memory_guard` now take `fused`, and the constants
+are untouched.
+
+That alone admits every instance in `Cost`. On `N40W080` at 42 slots,
+`c6id.12xlarge` demands 79.4 GiB of its 96 and passes, where the time-axis
+model demanded 161.6 and refused.
 
 Client RSS held between 6.50 and 6.76 GiB on every tile.
 
@@ -286,10 +309,12 @@ so ramp dominates it, and the whole-tile runs above measured 330 to 358 MB/s at
 the same 64 threads. The sweep establishes only the shape: throughput peaks at
 128 and regresses past it.
 
-`tile_prep.py` cannot use this. It calls `staging.stage_scenes(items, indices,
-stage_dir)` with no thread argument, so it always takes the
-`min(64, 4 x cores)` default. Staging is 45% of a tile, so the flag is worth
-about 17% of the fleet's wall clock.
+`tile_prep.py` could not use this: it called `staging.stage_scenes(items,
+indices, stage_dir)` with no thread argument, so every prep took the
+`min(64, 4 x cores)` default. `--stage-threads` now passes through, defaulting
+to None so a run without it stays comparable to every run measured above.
+Staging is 45% of a tile, so the flag is worth about 17% of the fleet's wall
+clock. No tile has yet run at 128.
 
 ## Study area, grid, and data
 
@@ -2540,13 +2565,14 @@ records the same count for one that would rather read a file.
 - **A worker aborting is survivable, and the panic is not the risk.** This
   entry used to say frisky aborts workers at teardown and leaves the exit code
   unknown. Both halves were wrong, and the section below has the measurements.
-- **The block memory model is wrong in shape, and the refit is not written.**
-  Measurements across five whole tiles range from 58.01 to 64.70 GiB at 48
-  slots, while the model demanded 152.6 to 184.6 GiB. The measurement is flat in the tile and linear
-  in the slot count, 1.35 GiB per slot worst case; the model is neither.
-  `SHARD_BYTES_PER_PIXEL_SCENE = 15` still drives `worker_memory_guard`, so the
-  guard refuses configurations that fit with room to spare, and the smaller
-  instances in `Cost` cannot be used until it is refitted.
+- **The block memory model carries a 1.5x margin that nothing has trimmed.**
+  Charging each block its own depth rather than the tile's time axis put five
+  measured tiles at 90.7 to 92.6 GiB against 58.01 to 64.70 GiB measured, a
+  1.42x to 1.56x band. The shape is now right and the guard admits the
+  instances in `Cost`. Whether `PRESENT_BYTES_PER_PIXEL_SCENE = 13` should come
+  down is a separate question, and a guard is the wrong place to be tight, so
+  nothing has been trimmed on five points.
+
 - **The staged disk requirement is estimated per object, not checked.** The
   guard reserves 95 MB for a thermal band and 10 MB for a QA band, from HEADs
   over 30 scenes per platform. HEAD is billable, so nothing checks the real
@@ -2670,13 +2696,12 @@ records the same count for one that would rather read a file.
   produced it. A P95 needs very few valid observations in a pixel for one cold
   outlier to survive, so this probably shares a cause with the sparse floor
   above. Probably is not measured.
-- **`tile_prep.py` cannot use the staging thread count the sweep found.** It
-  calls `staging.stage_scenes(items, indices, stage_dir)` with no thread
-  argument and always takes the `min(64, 4 x cores)` default.
-  `stage_bench.py` MEASURED 128 threads at 1.38x the throughput of 64, with 192
-  and 256 both worse. Staging is 45% of a tile, so the missing flag is about
-  17% of the fleet's wall clock. The sweep is one 200-object sample on one
-  instance, so the elbow at 128 is a shape rather than a constant.
+- **No tile has staged at 128 threads.** `tile_prep.py` takes
+  `--stage-threads` now, and `stage_bench.py` MEASURED 128 at 1.38x the
+  throughput of 64 with 192 and 256 both worse. That is one 200-object sample
+  on one instance, where ramp dominates a 25-second run, so the elbow at 128 is
+  a shape rather than a constant. Every tile measured above ran at 64.
+
 - **The cross-fade's reach varies by two orders of magnitude and nothing sets a
   floor.** `n_pooled_fallback` ran 0.10% of the raster on Delhi and 67.3% on
   Kalimantan. Under persistent cloud the half-the-scenes swath threshold
