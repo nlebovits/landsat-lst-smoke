@@ -11,17 +11,27 @@ document got wrong.
 This is the measurement record, not the design record. Every figure was true of
 the run that produced it, and the configuration around it has moved since. The
 merged pull requests are the current record: #6 precomputed the inventory, #7
-made staging the default, and #8 replaced the emissivity rule. Where a PR and
-this document disagree, read the PR.
+made staging the default, #8 replaced the emissivity rule, #9 added the seam
+correction, and #16 replaced the shard loop with one lazy graph per tile. Where
+a PR and this document disagree, read the PR.
 
-- **No section here is a recommended configuration.** The `Headline` run is four
-  unstaged `c6i.16xlarge` at a 512 px shard under the old QA mask. Steady state
-  is one staged `m6id.16xlarge` a tile at `--shard 360`. See `What to run`.
-- **No figure here is a per-tile price.** The $4.27 below bought one tile on
-  four machines that read every shard from S3. A staged tile is $1.68 to $1.87
-  and 26 to 29 minutes on one instance. See `Cost`.
+- **Start at `Five tiles, end to end`.** That section is the current pipeline,
+  measured on 2026-09-13 over five whole tiles at four latitudes, with the seam
+  corrections on and the output mask on. Everything above it that describes a
+  `.npy` shard, a `--shard` flag, or a merge step describes code that no longer
+  exists.
+- **No section here is a recommended configuration.** The `Headline` run below
+  is four unstaged `c6i.16xlarge` at a 512 px shard under the old QA mask. It
+  is kept because its defects are instructive, not because it is a target.
+- **No figure here is a per-tile price except in `Cost`.** The $4.27 below
+  bought one tile on four machines that read every shard from S3. A staged tile
+  on the recommended instance is **$1.43 and about 35 minutes**.
 
 ## Headline
+
+**Superseded. See `Five tiles, end to end` for the pipeline that runs now.**
+Kept because the two ends of its temperature range are a worked example of a
+defect that measurement caught.
 
 Four `c6i.16xlarge` instances built the full tile `S30W065`, 18,000 x 18,000 px
 over 3,910 scenes, in **4.8 minutes of wall clock** for **$4.27**.
@@ -123,95 +133,163 @@ uv run measure_scene_centre.py --all-years \
     --out artifacts/scene_centre_offset.json
 ```
 
-Then stage both Parquet files where the fleet can read them. Steady state runs
-one `m6id.16xlarge` per tile:
+Then put the artifacts where the fleet can read them. The commands below are
+the ones the five measured tiles ran.
+
+One tile is two passes on one instance. `tile_prep.py` fits the seam
+correction over a coarse grid and stages every object the tile needs.
+`shard_lst_p95.py` composites against that artifact and reuses the staged
+files, so it issues no billable GET of its own.
 
 ```bash
-uv run shard_lst_p95.py --tile S30W065 \
-    --inventory-uri artifacts/tile_scene_inventory.parquet \
-    --pixels-per-degree 3600 \
-    --shard 360 \
+uv run tile_prep.py --tile S30W065 \
     --stage-dir /mnt/nvme/stage \
-    --out-dir ./tile
+    --out-dir ./run/prep \
+    --block 512 --workers 64 --threads-per-worker 1 \
+    --target-memory-gib 256
+
+uv run shard_lst_p95.py --tile S30W065 \
+    --tile-prep ./run/prep \
+    --engine fused --chunk 360 \
+    --workers 48 --threads-per-worker 1 --memory-limit-gib 5 \
+    --stage-dir /mnt/nvme/stage --keep-staged \
+    --out-dir ./run/tile
+
+frisky observe overview ./run/tile/spans.json
 ```
 
-`--shard` and `--stage-dir` are requirements here, not preferences. `--shard`
-defaults to 512, and at 512 px the memory guard refuses a tile's deepest slice
-on anything under 256 GiB. `--stage-dir` defaults to the system temp directory, which on an
-instance is the root EBS volume, and gp3 tops out at 1,000 MB/s against a
-measured staging rate of 922 MB/s.
+`--stage-dir` and `--keep-staged` carry the design. `--stage-dir` defaults to
+the system temp directory, which on an instance is the root volume, and a tile
+needs 400 to 640 GiB. Point it at the instance store. `--keep-staged` on the
+composite is what lets the two passes share one fetch: without it the composite
+deletes the staged tile at the end, and a rerun pays for the objects twice.
 
-Splitting a tile across machines buys wall clock and pays for it in staging,
-because each slice stages nearly the whole tile. A quarter of the tile's area
-touches about 2,004 of its 4,776 scenes, so four machines stage 157 GB each,
-628 GB against the 375 GB one instance writes. Split when wall clock is worth
-that:
+`--engine fused` submits one task per block instead of a graph three deep.
+MEASURED on 64 workers over an 8x8 window: wall 90.7 s to 31.2 s, idle
+slot-seconds 2,269 to 0, cross-worker transfer 13 GB to 0. Both engines write
+the same bytes, and `tests/test_composite_fused.py` asserts it block for block.
 
-```bash
-# one machine per slice, four slices of the 2,500-shard plan at 360 px
-uv run shard_lst_p95.py --tile S30W065 ... --shard 360 \
-    --shard-slice 0:625 --out-dir ./part0
-uv run shard_lst_p95.py ... --shard-slice 625:1250  --out-dir ./part1
-uv run shard_lst_p95.py ... --shard-slice 1250:1875 --out-dir ./part2
-uv run shard_lst_p95.py ... --shard-slice 1875:2500 --out-dir ./part3
+`--chunk 360` is a memory decision. 512 px cost +30% compute
+and 250 px +112% in the department sweeps, and at 512 px the block model
+refuses a tile's deepest blocks on anything under 256 GiB.
 
-# then anywhere
-uv run shard_lst_p95.py --merge part0 part1 part2 part3 --out-dir ./tile
-```
+`--shard`, `--shard-slice`, and `--merge` appear in older sections of this
+document and no longer exist. PR #16 deleted the numpy shard path, its `.npy`
+part files, and the merge step. Output is the two COGs.
 
-Every run stages. There is no flag that skips it, and
-`tests/test_staging.py` asserts the parsers reject one. Reading each shard from
-S3 instead costs about 739 requests per object against one, because roughly 155
-shards open each scene and every open is 4.77 requests. Across the fleet that
-is 4.2 billion GETs against 5.8 million, or $1,681 against $2.32, and it also
-runs about twice as slow. `measure_s3_requests.py` still prices the unstaged
-path, because knowing what staging saves needs the number it saves against.
+### Running a tile on EC2
 
-The merge writes `lst_p95_dn.npy` and `qa_count.npy` for the analysis scripts,
-and `tile/catalog/` for everyone else: two COGs on a STAC item, inside a
-Portolan collection with its thumbnail, its item mirror, and its two Markdown
-documents. Pass `--no-catalog` to skip the rasters and keep only the arrays.
-Check the result with the Portolan validator:
+Nothing about the pipeline needs a control channel once it starts, and the one
+run that lost its SSH key proved how much that matters. Three rules, each
+bought the expensive way:
 
-```bash
-uv tool install rashid
-rashid check ./tile/catalog --all
-```
+- The private key goes somewhere a reboot does not clear. A key written to a
+  session scratchpad under `/tmp` was cleared by a workstation restart while
+  its instance kept running. This account's SSO role cannot call
+  `ec2-instance-connect`, `ssm`, or the serial console, so there is no way back
+  in and the run is unrecoverable.
+- The instance pushes its own results, continuously, to object storage. Both
+  the instance and the bucket are in `us-west-2`. A run that stops halfway then
+  still leaves its prep artifact, its logs, and its markers behind.
+- Each instance downloads the artifacts from object storage in region, rather
+  than over a laptop's uplink. Otherwise four instances pulling 229 MB each
+  from a workstation share one connection for no reason.
 
-Every tile becomes one item of one catalog. Point each tile's merge at the
-same `--catalog-dir`, and each run adds its item, then rebuilds the
-collection, the thumbnail, and the item mirror from every item on disk:
+`--instance-initiated-shutdown-behavior terminate` with a `shutdown -h +120` in
+user-data bounds what a hung run can cost.
 
-```bash
-uv run shard_lst_p95.py --merge part0 --out-dir ./tile-a \
-  --catalog-dir ./catalog
-uv run shard_lst_p95.py --merge part1 --out-dir ./tile-b \
-  --catalog-dir ./catalog
-```
+## Five tiles, end to end
 
-A tile is named for its north and west edges, fraction included, so the
-5-degree grid reads `S30W065` and a half-degree tile reads `S32.5W062.5`. Two
-tiles can then never take one directory.
+MEASURED on 2026-09-13, one `m6id.16xlarge` per tile in us-west-2, commit
+`4d4f231`, `--engine fused --chunk 360`, 48 composite slots, 64 prep slots,
+seam corrections on, output mask on. `S30W065` ran alone. The other four ran at
+the same time, on four instances.
 
-Whatever the catalog needs from `part-meta.json` is checked before the merge
-starts. A run that cannot produce a catalog says so in a second instead of
-after the arrays are assembled, and `merge.json` reaches disk before the
-catalog writer runs, so an hour of merging is recorded either way.
+This is the first time any tile in this repository has been composited with a
+correction on, with the mask on, or over the full 2021-2025 window. Every
+figure above this section that describes the numpy shard path describes
+something that no longer runs.
 
-The shard plan is deterministic and anchors to whole degrees, so a shard covers
-the same pixels whichever request produced it. Machines need no coordination
-beyond the slice index. Rehearse the same fleet on a laptop first, where
-`--rehearse N` substitutes N synthetic scenes and touches no object store:
+### The composites
 
-```bash
-for i in 0 1 2 3; do
-  uv run shard_lst_p95.py --bbox=-65,-35,-60,-30 \
-    --pixels-per-degree 3600 \
-    --shard-slice $((i*324)):$(((i+1)*324)) \
-    --rehearse 900 --out-dir part$i
-done
-uv run shard_lst_p95.py --merge part0 part1 part2 part3 --out-dir tile
-```
+| tile | place | valid | min | mean | max | sea masked | scenes rejected |
+|---|---|---|---|---|---|---|---|
+| `S30W065` | interior Argentina | 100.00% | 8.8 C | 42.0 C | 77.3 C | 0 | 11.87% |
+| `N40W080` | Philadelphia, Pennsylvania | 94.76% | -8.7 C | 33.1 C | 73.7 C | 16,675,800 | 12.84% |
+| `S25E030` | Durban, South Africa | 44.20% | -0.2 C | 35.2 C | 70.0 C | 68,387,134 | 8.73% |
+| `N30E075` | Delhi, north India | 99.99% | 15.9 C | 49.2 C | **83.0 C** | 0 | 8.27% |
+| `N00E110` | Borneo, Kalimantan | 39.45% | **-39.8 C** | 34.6 C | 75.5 C | 90,560,062 | **21.08%** |
+
+The water rule works. It removed 175.6 million pixels of sea across the three
+coastal tiles and nothing on the two landlocked ones. Before this it had never
+met a coastline.
+
+Two of those numbers are not temperatures, and `Defects` below has both.
+
+### Timing
+
+| tile | scenes | staged | stage | prep blocks | submit | compute | cog | total |
+|---|---|---|---|---|---|---|---|---|
+| `S30W065` | 4,776 | 381.6 GiB | 1,145.6 s | 241.3 s | 46.2 s | 699.8 s | 52.2 s | 43.1 min |
+| `N40W080` | 4,856 | 380.6 GiB | 1,169.8 s | 249.2 s | 49.6 s | 765.1 s | 54.3 s | 41.7 min |
+| `S25E030` | 3,424 | 227.7 GiB | 708.0 s | 150.3 s | 31.2 s | 513.5 s | 46.9 s | 26.2 min |
+| `N30E075` | 4,620 | 369.9 GiB | 1,201.8 s | 230.5 s | 44.9 s | 708.3 s | 55.2 s | 40.5 min |
+| `N00E110` | 4,521 | 222.7 GiB | 689.2 s | 176.3 s | 36.8 s | 573.1 s | 48.3 s | 28.2 min |
+
+**Staging holds at 330 to 358 MB/s, and four concurrent instances did not
+contend.** Each pulled about 345 MB/s from `s3://usgs-landsat` at the same
+time, 1.38 GB/s in aggregate, with no measured interference. The earlier
+figure of 922 MB/s came from a 78.9 GiB slice where the ramp is the
+measurement; 344 MB/s over a whole tile was right, and now has five points.
+
+**Staging time tracks bytes, not scenes.** Borneo staged 4,521 scenes in
+222.7 GiB, at 52.9 MB per scene, against 86.0 MB for Delhi's 4,620. Heavy
+cloud compresses. A fleet model that scales staging on scene count
+over-predicts a cloudy tropical tile by a third.
+
+### The block memory model over-predicts, and its shape is wrong
+
+| tile | model, DERIVED | MEASURED peak | ratio | per slot |
+|---|---|---|---|---|
+| `S30W065` | 184.0 GiB | 60.21 GiB | 3.06x | 1.254 GiB |
+| `N40W080` | 184.6 GiB | 58.01 GiB | 3.18x | 1.209 GiB |
+| `S25E030` | 152.6 GiB | 64.70 GiB | 2.36x | 1.348 GiB |
+| `N30E075` | 180.7 GiB | 64.28 GiB | 2.81x | 1.339 GiB |
+| `N00E110` | 177.0 GiB | 58.84 GiB | 3.01x | 1.226 GiB |
+
+The measured peaks fall in a 58 to 65 GiB band across four climates and 3,424
+to 4,856 scenes. The model swings from 152 to 185 GiB over the same tiles. So
+`SHARD_BYTES_PER_PIXEL_SCENE = 15` is not merely too large. It makes demand a
+function of the tile, and the measurement makes it a function of the slot
+count: **1.35 GiB per slot, worst of five.**
+
+`worker_memory_guard` refuses on the model, so it currently refuses
+configurations that fit with room to spare. Refitting it against these five
+points is what unlocks the smaller instances priced below.
+
+Client RSS held between 6.50 and 6.76 GiB on every tile.
+
+### Staging threads: 128, and more is worse
+
+MEASURED on the `S25E030` instance, `stage_bench.py`, 200 objects of the
+tile's own manifest, one GET per object:
+
+| threads | MB/s | against 64 |
+|---|---|---|
+| 64 | 233.4 | |
+| **128** | **321.2** | **1.38x** |
+| 192 | 293.1 | 1.26x |
+| 256 | 276.7 | 1.19x |
+
+Read the ratio rather than the absolute. A 200-object sample runs 25 seconds,
+so ramp dominates it, and the whole-tile runs above measured 330 to 358 MB/s at
+the same 64 threads. The sweep establishes only the shape: throughput peaks at
+128 and regresses past it.
+
+`tile_prep.py` cannot use this. It calls `staging.stage_scenes(items, indices,
+stage_dir)` with no thread argument, so it always takes the
+`min(64, 4 x cores)` default. Staging is 45% of a tile, so the flag is worth
+about 17% of the fleet's wall clock.
 
 ## Study area, grid, and data
 
@@ -762,6 +840,53 @@ percent uncertainty.
 
 ## Cost
 
+### The fleet, priced against five measured tiles
+
+Every earlier number in this section prices the unstaged path, where S3
+requests were 54% of the bill. Staging took the per-tile S3 line from $2.31 to
+about $0.008, and the whole 895-tile S3 line to **$2**. Compute is now
+essentially the entire cost.
+
+DERIVED by scaling the five tiles' measured phases across the inventory's real
+distribution: 895 land tiles, 3,083,129 tile-scene pairs, median 4,291 scenes,
+range 163 to 5,663. Rates VERIFIED against the AWS public price list for
+US West (Oregon), Linux, on demand.
+
+Slot counts come from the measured 1.35 GiB per slot plus 6.8 GiB of driver and
+about 4 GiB of operating system. Disk is the other constraint: the largest tile
+is 5,663 scenes and `disk_guard` reserves **637 GiB**, so every candidate needs
+950 GB or more of instance store.
+
+| machine | cores | slots | RAM needed | RAM | $/hr | fleet | hours | per tile |
+|---|---|---|---|---|---|---|---|---|
+| **`c6id.12xlarge`** | 24 | 42 | 67 GiB | 96 | 2.4192 | **$1,277** | 521 | **$1.43** |
+| `c6id.16xlarge` | 32 | 56 | 86 GiB | 128 | 3.2256 | $1,334 | 409 | $1.49 |
+| `c6id.8xlarge` | 16 | 28 | 49 GiB | 64 | 1.6128 | $1,375 | 843 | $1.54 |
+| `m6id.16xlarge` | 32 | 56 | 86 GiB | 256 | 3.7968 | $1,568 | 409 | $1.75 |
+| `m6id.8xlarge` | 16 | 28 | 49 GiB | 128 | 1.8984 | $1,616 | 843 | $1.81 |
+| `c6id.4xlarge` | 8 | 14 | 30 GiB | 32 | 0.8064 | $2,095 | 2,578 | $2.34 |
+
+The `m` family is the wrong shape. It sells 4 GiB per vCPU and this workload
+uses 1.35 GiB per slot, so half the memory on an `m6id.16xlarge` is paid for
+and idle. Moving to `c6id` at the same core count saves 15% for identical work.
+
+Going smaller stops paying. `c6id.4xlarge` costs 64% **more** than
+`c6id.12xlarge`, because 26 minutes of every tile is staging and fixed setup
+that no machine size touches, and 14 slots stretch the rest far enough that the
+fixed share dominates.
+
+Between the three `c6id` sizes the bill is flat within 8%, so choose on wall
+clock. At 20 instances in parallel, `c6id.12xlarge` finishes 895 tiles in about
+26 hours.
+
+These figures assume 128 staging threads, which needs a flag `tile_prep.py`
+does not have. At the current 64 they rise by about 8%.
+
+**No `c6id` has run this pipeline.** Every measurement behind this table is an
+`m6id.16xlarge`. One tile on a `c6id.12xlarge` would settle whether the compute
+term really divides by physical cores on a different cache and memory
+bandwidth.
+
 ### Full-tile figures
 
 MEASURED:
@@ -812,8 +937,8 @@ that has them. At the 512 px shard the full tile ran on, 605,617 reads x 2 bands
 x 4.77 gives **5,777,586 GETs** and **$2.31**.
 
 ```bash
-uv run measure_s3_requests.py --shards 3 --max-scenes 60 --shard 512
-uv run measure_s3_requests.py --shards 3 --max-scenes 60 --shard 1024
+uv run measure_s3_requests.py --blocks 3
+uv run measure_s3_requests.py --blocks 3 --pixels-per-degree 1800
 ```
 
 It ran on the laptop against `us-west-2`, not in region. The count follows from
@@ -985,7 +1110,7 @@ depths are measured, from the inventory. The slices are `shards[987:1051]` at
 360 px, 203 to 820 scenes deep, and `shards[690:754]` at 512 px, 198 to 802. The
 failed run was a `c6id.16xlarge` at 512 px.
 
-**Use `--shard 360`.** A 512 px shard needs 140.0 GiB, so a 128 GiB box refuses
+**Use `--chunk 360`.** A 512 px block needs 140.0 GiB, so a 128 GiB box refuses
 it and only the `m6id.16xlarge` runs it. At 360 px both boxes hold the slice, so
 memory no longer rules out the `c6id.16xlarge` and the $190 it saves. That row
 became affordable when the guard began summing a slice's shard depths instead
@@ -1172,9 +1297,8 @@ headed for. It exits 2 when the configuration would be refused, which prices a
 fleet before an instance exists:
 
 ```bash
-uv run shard_lst_p95.py --tile S30W065 --shard 512 --workers 64 \
-    --shard-slice 690:754 --target-memory-gib 128 \
-    --dry-run --search-in-dry-run
+uv run shard_lst_p95.py --tile S30W065 --chunk 512 --workers 64 \
+    --target-memory-gib 128 --dry-run
 ```
 
 ```
@@ -1661,6 +1785,91 @@ aws ce get-cost-and-usage --time-period Start=<day> End=<day+1> \
 ```
 
 ## Defects, and how measurement exposed them
+
+### The hot-pixel rule cannot reach a hot tile
+
+`N30E075`, north India, returned a P95 **maximum of 83.0 C**. The highest land
+skin temperature in the published record is about 80.8 C, in the Lut Desert.
+This tile masked **0 px** as hot.
+
+That is the rule working as written. `masks.apply_output_mask` removes a pixel
+only where two things hold together: it reads 70 C or hotter, and its ASTER
+GED cell reports zero observations or sits one cell from such a cell. `N30E075`
+has no gap cells, so the second half never fires and the first half never acts
+alone. This document already said so: "a pixel above it outside a gap is kept."
+`S30W065` could not show what that costs, because its own maximum was 77.3 C.
+
+The pairing exists for a good reason, measured on `S30W065`: the gap geometry
+alone removes 701,839 valid pixels to remove 4,588 bad ones. So the fix is not
+to drop the pairing. It is that nothing bounds the top of the scale on ground
+with no gap cells, and 83.0 C is the first evidence that something must.
+
+### A rainforest composite reports -39.8 C
+
+`N00E110`, equatorial Kalimantan, returned a P95 **minimum of -39.8 C** at sea
+level on the equator. No surface there approaches it.
+
+That is cloud the QA mask did not catch reaching the percentile. The same tile
+rejected **21.08%** of its scenes at the 15 C offset cap, against 8.27% for
+Delhi and 8.73% for Durban, so cloud is demonstrably the discriminator. The
+21.08% matches `nlebovits/landsat-lst`'s 21.8%, measured on a different grid.
+That is the first independent agreement between the two repositories.
+
+A P95 is a high percentile, so a cold outlier has to survive in a pixel with
+very few valid observations to set the minimum. That points at the same thin-
+sample floor as the entry below rather than at the percentile itself.
+
+### The offset tail is one-sided on all five tiles
+
+MEASURED across all five tiles, the per-scene offset distribution:
+
+| tile | p50 | min | max | std | rejected |
+|---|---|---|---|---|---|
+| `S30W065` | -0.90 | -83.06 | 15.77 | 13.16 | 11.87% |
+| `N40W080` | -0.75 | -78.09 | 14.43 | 13.18 | 12.84% |
+| `S25E030` | -0.31 | -84.78 | 13.56 | 11.58 | 8.73% |
+| `N30E075` | -0.48 | -95.53 | 15.62 | 11.97 | 8.27% |
+| `N00E110` | -1.19 | -80.25 | 9.28 | 16.10 | 21.08% |
+
+All five medians fall within 1.2 C of zero, which is what a bulk calibration
+offset should look like. All five minima run past -78 C, and no maximum
+exceeds 15.8 C.
+A scene whose median anomaly is -95 C against its own calendar-month reference
+is not carrying a calibration offset. It is carrying almost no valid pixels, or
+carrying cloud.
+
+The 15 C cap discards these, so they never reach a composite, and the rejected
+share is the count of them. But the cap is a backstop. The screen meant to
+catch a thin scene before the fit is `DESTRIPE_MIN_PREP_SAMPLES = 200`, and
+this document already records that the 200 came from `nlebovits/landsat-lst`,
+where it screened a factor-2 grid over a 5 degree tile. `tile_prep` fits on a
+factor-4 grid, which holds roughly a fifth as many pixels per scene, so 200
+screens about a fifth as hard. Five tiles at four latitudes now show the same
+one-sided tail, so this is a property of the floor and not of a region.
+
+### The cross-fade does not reach two thirds of a rainforest tile
+
+`n_pooled_fallback` counts pixels outside every WRS swath, which take the
+pooled percentile because there is only one estimate to blend.
+
+| tile | pooled fallback | of the raster | paths |
+|---|---|---|---|
+| `N30E075` | 334,087 | 0.10% | 6 |
+| `S25E030` | 25,458,796 | 7.9% | 5 |
+| `N40W080` | 59,143,671 | 18.3% | 6 |
+| `N00E110` | **218,078,458** | **67.3%** | 5 |
+
+A quad's swath is the ground where at least half its scenes produced a valid
+observation. Under persistent cloud, half the scenes rarely see the same
+ground, so the swaths collapse and most of the tile falls outside all of them.
+On `N00E110` the cross-fade is inoperative over two thirds of the raster, and
+the tile is composited almost entirely pooled.
+
+Those pixels keep the meaning the design gives them, and `n_pooled_fallback`
+reports the count, so the run is behaving as specified. The number shows that
+the seam correction's second half describes a shrinking part of a tile as cloud
+rises, and on the wettest tiles it describes almost none of it. The 0.10% on Delhi is
+the other end of the same scale.
 
 ### Defects in the original workflow
 
@@ -2189,6 +2398,42 @@ Mpx instead of 81, on the wrong projection. Pass the grid CRS explicitly.
 printed until the run ended, so three EC2 runs went diagnosed by watching
 processor percentage and RSS, and by guessing.
 
+### A benchmark that could not see the bug it was validating
+
+`--engine fused` aborted on any masked run, and the benchmark that established
+the two engines write identical bytes could not detect it.
+
+The mask planes were cut to a block at two call sites, and both ran.
+`composite.submit_blocks` cut on the driver, so the wire carried a 360 px
+window rather than the tile's 18,000 px plane. `composite.fused_block` cut
+again on the worker, so a direct call holding the tile's planes still worked.
+The first cut returns a `BlockOutputs` through `replace`, so the second found a
+`for_block` and took it. A block's slices are absolute, so block (3, 3) read
+`keep[1080:1440, 1080:1440]` of a 360 px array and got `(0, 0)`.
+`finalize_block` raised on the broadcast, and frisky took a non-unwinding panic
+that aborted the process rather than raising.
+
+The 8x8 instance benchmark ran `--no-output-mask`. With no mask `keep` is None,
+`for_block` returns `self`, and neither call site cuts at all. So the
+comparison that established the two engines agree was made on the one
+configuration where the defect cannot appear, while every published tile
+carries the mask.
+
+The suite missed it for a second reason. `tests/test_composite_fused.py` calls
+`fused_block` directly, which cuts once and passes. The only test that drove
+`submit_blocks` handed it a stub that never read `out`. That is the same shape
+as the gap recorded for the scatter fix: the submission path exercised with a
+kernel that ignores the argument under test.
+
+`BlockOutputs` now records whether its planes are a window or the tile, and
+`for_block` returns an already-cut window unchanged. The 12-scene rehearsal at
+1/120 degree reproduces the original failure in six seconds, and both engines
+now write byte-identical COGs with the mask on.
+
+The general lesson is the one this document keeps relearning. A benchmark that
+turns a feature off to isolate a measurement stops describing the configuration
+that gets published.
+
 ### Defects that would have produced a wrong number
 
 Both sat in `measure_s3_requests.py`, and neither would have announced itself.
@@ -2281,49 +2526,27 @@ records the same count for one that would rather read a file.
 
 ## What is not settled
 
-- **No fleet has run against the precomputed inventory.** Every parity check
-  passes, including a fixed shard loaded from both paths to an identical P95
-  raster. The largest run through the new path is one `m6id.16xlarge`, which
-  staged 999 scenes and computed 64 shards of one tile.
-- **The 895 tiles have never been priced against a real run.** The per-tile
-  compute is measured and the tile count is measured. Their product is not.
-- **One staged run has completed, over 64 shards of one tile.** It measured
-  the staging rate and wrote a composite. It sampled no worker RSS, so it
-  confirmed nothing about the memory model: the 56.6 GiB it printed is
-  `shard_bytes` output. A later instance run sampled 35.99 GiB across 64
-  workers. Neither ran a whole tile, and no fleet has run at all. Three
-  `c6id.16xlarge` attempts came before it and produced no composite: the first
-  wrote its results to a serial console that AWS discards on termination, the
-  second stopped on a missing `pyarrow`, and the third lost its workers to the
-  memory model below.
+- **No fleet has run.** The precomputed inventory has carried five whole tiles
+  to completion, one alone and four at once on four instances, with no measured
+  S3 contention between the concurrent four. Nothing has run at the scale of
+  895, and nothing has run the queueing, retry, and failure handling a
+  fleet needs, because none of that exists yet.
+- **The 895-tile price rests on five measured tiles and one instance family.**
+  The per-tile phases are measured, the scene distribution is measured, and
+  their product is arithmetic. Every measurement behind it is an
+  `m6id.16xlarge`, while the table recommends `c6id.12xlarge`, so the compute
+  term assumes work divides by physical cores across a different cache and
+  memory bandwidth. One `c6id` tile would settle it.
 - **A worker aborting is survivable, and the panic is not the risk.** This
   entry used to say frisky aborts workers at teardown and leaves the exit code
   unknown. Both halves were wrong, and the section below has the measurements.
-- **The memory model's slope on real COGs is not tightly determined.** Thirty-six
-  points across four shard edges and two sources, and the model at 15 bytes
-  bounds every one. The synthetic sweeps at 360 and 512 px fit 12.97 and 12.68
-  bytes per pixel-scene. The shallow staged sweeps on 100 real scenes fit 14.48,
-  13.59, 13.25 and 10.47 at 256, 360, 512 and 1024 px, against 14.47 and 14.44
-  from the deep staged sweeps. Real scenes make shard edge and data coverage move
-  together, so the scatter is partly the fixture. Only the two deep sweeps reach
-  the 195 to 820 scenes a fleet shard runs, and they cover two edges of the four.
-  Every sweep is EPSG:4326, so nothing reprojects. A UTM source warping into the
-  output grid could hold arrays this does not count.
-- **No fleet run has measured worker RSS yet.** `memory_sampler.py` is wired
-  into `shard_lst_p95.py` and writes `memory.csv` and `workers_rss_peak_gib` on
-  every run. One 64-shard instance run has reported it, 35.99 GiB across 64
-  workers, which frisky's spans put at 35.87. No whole tile and no fleet has been
-  measured, and the other check on the model at 64 workers is frisky's 1.50 GiB a
-  worker on the quarter-tile run.
-- **The staging rate rests on one slice of one instance.** An `m6id.16xlarge`
-  staged 1,998 objects, 78.9 GiB in 91.9 s, or 922 MB/s. A mean tile writes about
-  278 GB, or 302 s, at that rate. No other instance type and no whole tile has
-  staged, and the fleet's staging term is that one measurement scaled.
-- **The per-tile scene count in `Cost` is not the inventory's.** The 1,094.8 s
-  of compute was measured against the 3,910 scenes Earth Search returned.
-  The artifact assigns 4,776 to `S30W065` and 3,445 to a mean tile, so the
-  compute term rests on a scene list that no longer matches the one a fleet
-  would read.
+- **The block memory model is wrong in shape, and the refit is not written.**
+  Measurements across five whole tiles range from 58.01 to 64.70 GiB at 48
+  slots, while the model demanded 152.6 to 184.6 GiB. The measurement is flat in the tile and linear
+  in the slot count, 1.35 GiB per slot worst case; the model is neither.
+  `SHARD_BYTES_PER_PIXEL_SCENE = 15` still drives `worker_memory_guard`, so the
+  guard refuses configurations that fit with room to spare, and the smaller
+  instances in `Cost` cannot be used until it is refitted.
 - **The staged disk requirement is estimated per object, not checked.** The
   guard reserves 95 MB for a thermal band and 10 MB for a QA band, from HEADs
   over 30 scenes per platform. HEAD is billable, so nothing checks the real
@@ -2361,17 +2584,6 @@ records the same count for one that would rather read a file.
 - **The department tuning covers one department at 711 scenes.** A different
   area or scene count moves the optimum, because the memory term scales with
   both.
-- **The seam corrections are built and have never run on real pixels.**
-  `destripe.py` defines both rules, `tile_prep.py` estimates what they need once
-  per tile, and `shard_lst_p95.py` applies them. 87 unit tests cover the
-  numerics and the wiring, including the claim the whole design rests on:
-  splitting the tile into blocks does not move a scene offset, so the estimate
-  costs one source traversal rather than the two `nlebovits/landsat-lst` pays.
-  Every one of those tests runs against a synthetic stack. No tile has been
-  prepped, no shard has been composited with a correction on, and
-  `measure_seam.py` has produced no numbers. Until it does, the seam removal
-  and the variance retained quoted in the docstrings are the sibling
-  repository's measurements on its own grid, not this one's.
 - **One assumption in `destripe.py` no synthetic loader can check.** Every
   per-scene value reaches a loaded stack by matching
   `destripe.timestamp_of(item)` against the `time` coordinate `odc.stac`
@@ -2404,33 +2616,22 @@ records the same count for one that would rather read a file.
   0.002 C and rejected factor 4 at a maximum of 0.546 C against a
   pre-registered 0.5 C gate, on a different grid and a different loader. This
   repository owes its own sweep.
-- **The sparse floor is a placeholder with a citation that does not fit it.**
-  `DESTRIPE_MIN_PREP_SAMPLES = 200` comes from `nlebovits/landsat-lst`, where
-  it screened a factor-2 grid over a 5 degree tile. `tile_prep` estimates on a
-  factor-4 grid over the tile plus a margin, which holds roughly a fifth as
-  many pixels per scene, so 200 screens a different thing here. It needs what the
-  15 C cap got there, which is a sweep of the rejected share against the floor
-  on a real tile.
-- **The 15 C offset cap was calibrated somewhere else.** One mid-latitude
-  agricultural AOI, at a 21.8% rejected share. A humid tropical tile may not
-  behave that way, and the rejected share is the number to watch per tile.
-- **The shard memory model has not been re-measured with the corrections on.**
-  `SHARD_BYTES_PER_PIXEL_SCENE = 15` should hold or fall on a fully covered
-  shard: the per-path percentile partitions each path's subset in place, where
-  the pooled one partitions a copy of the whole stack. The pooled fallback adds
-  to it. It reduces the uncovered pixels alone, so it costs 4 bytes per
-  pixel-scene times the uncovered share: zero inside one swath, a second
-  whole-stack copy on a shard the swaths miss entirely. All of this is
-  arithmetic, and `worker_memory_guard` refuses runs on the constant.
-- **How much ground the swaths miss is unmeasured.** A quad's swath is the
-  ground where at least half its scenes produced a valid observation. A pixel
-  one path sees on a third of its passes falls outside every swath and still
-  carries temperatures. `feathered_percentile` composites those pixels
-  pooled, and `process_shard` counts them as `n_pooled_fallback`. Whether that
-  share is a rounding error or a third of a tile depends on cloud, and no tile
-  has been prepped. Watch it beside the rejected share. A high one says the
-  swath definition described less ground than the scenes cover, so the
-  cross-fade describes less of the tile than the composite implies.
+- **The sparse floor is a placeholder, and five tiles now show what it costs.**
+  `DESTRIPE_MIN_PREP_SAMPLES = 200` comes from `nlebovits/landsat-lst`, where it
+  screened a factor-2 grid over a 5 degree tile. `tile_prep` fits on a factor-4
+  grid holding roughly a fifth as many pixels per scene. Every one of the five
+  tiles returned the same one-sided offset tail: medians within 1.2 C of zero,
+  minima past -78 C, maxima never above 15.8 C. The 15 C cap catches them, so
+  nothing reaches a composite, but the cap is a backstop and the floor is the
+  screen. It needs a sweep of the rejected share against the floor on a real
+  tile.
+- **The 15 C offset cap was calibrated somewhere else, and the rejected share
+  now has five points.** One mid-latitude agricultural AOI at 21.8%. This
+  repository measures 8.27% on Delhi, 8.73% on Durban, 11.87% on interior
+  Argentina, 12.84% on Philadelphia, and 21.08% on Kalimantan. The tropical
+  figure matches the original, the first independent agreement between the two
+  repositories, and the spread tracks cloud. Whether 15 C is
+  the right cap at either end is still unmeasured.
 - **A capped prep run counted its swaths against the wrong denominator.**
   `--max-blocks` truncates the work list before any coverage accumulates, and
   `swath_masks` still divides each quad's per-cell count by every scene the
@@ -2449,29 +2650,67 @@ records the same count for one that would rather read a file.
   one counts array shapes and has never been checked against an RSS series. The
   term worth watching is the histogram a block returns whole to the driver, at
   104 KB a scene, so a block seeing 2,000 scenes hands back 208 MB.
-- **The mask has been measured on one tile.** S30W065 is interior South
-  America, entirely land, with no coastline for the water rule to cut and a
-  0.24% gap share. A coastal or tropical tile would exercise both rules
-  harder, and none has been checked.
 - **The rule leaves 503 hot pixels on S30W065.** Each is in a cell with
   observations, so the gap test excludes it. Extending the geometry to
   `numobs <= 2` would take the tail to 98.30% and remove 11.4% of the tile, at
   which point the rule stops being a screen. The 503 stay.
-- **The 70 C threshold rests on one tile.** It marks where this tile's artifact
-  population separates, and nothing published bounds it. It never acts alone,
-  so it makes no claim about the hottest land surface: a pixel above it outside
-  a gap cell is kept. Check the tail against 70 C on the next tile with a
-  substantial gap population.
-- **No composite has been built with the mask on.** Every masked run so far is
-  a rehearsal, which fills its shards with synthetic pixels. The mask covers
-  real ground in those runs, and the temperatures under it are not real.
 - **The QA comparison covers one 512 px shard at 120 scenes.** That shard sits
   inside a WRS footprint, so it measures the interior case and not the boundary
   case.
-- **No 2021-2025 composite has been built.** Only its scene count is measured.
+- **The hot rule leaves the top of the scale unbounded outside a gap cell.**
+  `N30E075`
+  returned 83.0 C, above the published land-skin record, and masked 0 px
+  because the tile has no ASTER gap cells and the hot rule matches only on the
+  pair. The pairing is right: the gap geometry alone removes 701,839 valid
+  pixels to remove 4,588 bad ones on `S30W065`. What is missing is any ceiling
+  that acts on gapless ground.
+- **`N00E110` returns -39.8 C and the mechanism is inferred, not measured.**
+  Cloud is the obvious candidate, and the 21.08% rejected share supports it,
+  but nothing has traced one -39.8 C pixel back to the scenes that
+  produced it. A P95 needs very few valid observations in a pixel for one cold
+  outlier to survive, so this probably shares a cause with the sparse floor
+  above. Probably is not measured.
+- **`tile_prep.py` cannot use the staging thread count the sweep found.** It
+  calls `staging.stage_scenes(items, indices, stage_dir)` with no thread
+  argument and always takes the `min(64, 4 x cores)` default.
+  `stage_bench.py` MEASURED 128 threads at 1.38x the throughput of 64, with 192
+  and 256 both worse. Staging is 45% of a tile, so the missing flag is about
+  17% of the fleet's wall clock. The sweep is one 200-object sample on one
+  instance, so the elbow at 128 is a shape rather than a constant.
+- **The cross-fade's reach varies by two orders of magnitude and nothing sets a
+  floor.** `n_pooled_fallback` ran 0.10% of the raster on Delhi and 67.3% on
+  Kalimantan. Under persistent cloud the half-the-scenes swath threshold
+  collapses and the tile composites almost entirely pooled. The pixels keep the
+  meaning the design gives them, and the run reports the count, so nothing here
+  is wrong. What is unsettled is whether a tile that pooled two thirds of
+  itself should be published under the same `processing:lineage` as one that
+  pooled a tenth of a percent.
+- **No `c6id` instance has run this pipeline.** The `Cost` table recommends one
+  on memory and price arithmetic alone.
 
 ## Corrections to earlier versions of this document
 
+
+**A benchmark run with the mask off validated an engine that fails with it on.**
+The 8x8 window comparison that established `--engine fused` and `--engine graph`
+write identical bytes ran `--no-output-mask`. With no mask neither of the two
+call sites that cut a block's mask window runs at all, so the double cut that
+aborts every masked block could not appear. The comparison has since been redone with the mask on, over five tiles, and
+the two engines do agree byte for byte. The
+claim was true; the evidence for it was not.
+
+**The 922 MB/s staging rate measured a ramp.** It came from a 78.9 GiB slice
+fetched in 91.9 s, where start-up dominates. Measurements across five whole
+tiles range from 330 to 358 MB/s, and the 1,189.6 s full-tile figure this
+document also recorded was the accurate one.
+A 200-object sweep sample shows the same distortion in the other direction: it
+reports 233 MB/s at the 64 threads that whole tiles run at 345.
+
+**The per-tile S3 line stopped being the story and this document kept telling
+it.** Sections above price the unstaged path at $2.31 a tile and $1,290 to
+$2,494 across the fleet. Staged, the whole 895-tile S3 line is **$2**. Compute
+is the entire cost now, so the instance family matters and the request count no
+longer does.
 Every entry is a claim an earlier version stated as fact. Each shares one
 mistake: it presented an estimate as a measurement.
 
