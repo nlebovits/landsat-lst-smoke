@@ -519,3 +519,38 @@ class TestTheDefaultsFillTheMachine:
         )
         assert args.workers == 3
         assert args.threads_per_worker == 2
+
+
+class TestTheStagingThreadCount:
+    """`tile_prep` stages the whole tile, and until now could not be told how.
+
+    It called `staging.stage_scenes` with no thread argument, so every prep
+    took `min(64, 4 x cores)`. MEASURED by `stage_bench.py` on an
+    `m6id.16xlarge` over 200 objects: 64 threads 233 MB/s, 128 threads
+    321 MB/s, 192 threads 293, 256 threads 277. Staging is about 45% of a
+    tile's wall clock.
+    """
+
+    def test_it_defaults_to_none_so_a_run_without_it_is_comparable(self):
+        args = tile_prep.parse_args(["--tile", "S30W065"])
+        assert args.stage_threads is None
+
+    def test_the_flag_carries(self):
+        args = tile_prep.parse_args(["--tile", "S30W065", "--stage-threads", "128"])
+        assert args.stage_threads == 128
+
+    def test_none_reproduces_the_measured_default(self):
+        """`FetchSettings.build` has to read None as unset, not as zero."""
+        import staging
+
+        assert (
+            staging.FetchSettings.build(threads=None).threads
+            == staging.FetchSettings.build().threads
+        )
+        assert staging.FetchSettings.build(threads=128).threads == 128
+
+    def test_a_zero_thread_count_is_refused_rather_than_treated_as_unset(self):
+        import staging
+
+        with pytest.raises(staging.StagingError, match="threads"):
+            staging.FetchSettings.build(threads=0)
