@@ -24,6 +24,7 @@ import json
 from pathlib import Path
 
 import aster_ged
+import lst_qa
 import masks
 from land_tiles import read_land_tiles, tile_bounds
 from stac_window import (
@@ -253,7 +254,7 @@ def build_plan(
         "aster_ged": (
             None if ged_manifest is None else aster_ged.provenance(ged_manifest)
         ),
-        # The pixel rule every launched machine will apply, recorded so a
+        # The pixel rules every launched machine will apply, recorded so a
         # finished tile can be checked against what was planned. None when the
         # caller passed no mosaic, which says the plan never saw one rather
         # than that no tile needs the rule.
@@ -262,7 +263,9 @@ def build_plan(
             if ged_manifest is None
             else {
                 "gap_buffer_cells": masks.GAP_BUFFER_CELLS,
-                "gap_hot_threshold_c": masks.GAP_HOT_THRESHOLD_C,
+                "min_total_observations": lst_qa.MIN_TOTAL_OBSERVATIONS,
+                "lst_output_min_c": lst_qa.LST_OUTPUT_MIN_C,
+                "lst_output_max_c": lst_qa.LST_OUTPUT_MAX_C,
             }
         ),
         "land_tiles_uri": str(land_tiles_uri),
@@ -385,8 +388,13 @@ def main(argv=None) -> int:
         print(f"              sha256 {(ged['raster_sha256'] or '')[:16]}")
         rule = plan["emissivity_rule"]
         print(
-            f"              rule: gap grown {rule['gap_buffer_cells']} cell, "
-            f"removed only at or above {rule['gap_hot_threshold_c']:.0f} C"
+            f"              gap region grown {rule['gap_buffer_cells']} cell, "
+            f"reported and not removed"
+        )
+        print(
+            f"              output: at least {rule['min_total_observations']} "
+            f"observations, {rule['lst_output_min_c']:.0f} C to "
+            f"{rule['lst_output_max_c']:.0f} C inclusive"
         )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -81,6 +81,7 @@ from lst_qa import (
     LST_NODATA_DN,
     encode_celsius,
     masked_celsius,
+    supported_output,
 )
 
 #: Block edge in pixels. 360 divides an 18,000 px tile into 50 x 50 blocks
@@ -694,6 +695,12 @@ def reduce_block(
     before the decode, so the float32 work runs at the block's own depth
     rather than the tile's.
 
+    The last step is `lst_qa.supported_output`, which is here rather than in
+    `masks.apply_output_mask` for two reasons. The percentile and its monthly
+    counts already sit together at this point, so the rule costs no second pass
+    over the raster. And it is a statement about the estimate rather than about
+    where the pixel is, so it holds under `--no-output-mask` too.
+
     Returns:
         `lst_p95` uint16 `(y, x)`, `qa_count` uint8 `(y, x, 12)`, `fallback`
         bool `(y, x)`, and with `emit_pooled` a fourth uint16 `(y, x)`.
@@ -740,13 +747,23 @@ def reduce_block(
         if sel.any():
             counts[m - 1] = np.minimum(valid[sel].sum(axis=0), 255).astype("uint8")
 
+    # The same total a consumer computes from the published `qa_count`, so the
+    # evidence band and the validity rule cannot disagree. uint16 holds the
+    # ceiling of twelve months clipped at 255.
+    total_obs = counts.sum(axis=0, dtype="uint16")
+    unsupported = ~supported_output(p95, total_obs)
+
     dn = encode_celsius(p95)
-    _record_block_span(t0, int(present.sum()))
+    dn[unsupported] = LST_NODATA_DN
+    # `counts` is left alone. A nodata temperature beside a count of 4 says the
+    # pixel was screened rather than never seen, and that count is the only
+    # evidence a consumer has for which of the two rules reached it.
+    _record_block_span(t0, int(present.sum()), int(unsupported.sum()))
     outputs = (dn, np.moveaxis(counts, 0, -1), fallback)
     return (*outputs, pooled) if emit_pooled else outputs
 
 
-def _record_block_span(t0_ns: int, n_present: int) -> None:
+def _record_block_span(t0_ns: int, n_present: int, n_unsupported: int) -> None:
     """One span per block on the worker, where tracing is already on."""
     try:
         import frisky
@@ -757,6 +774,7 @@ def _record_block_span(t0_ns: int, n_present: int) -> None:
             t1 - (time.perf_counter_ns() - t0_ns),
             t1,
             count=n_present,
+            unsupported=n_unsupported,
         )
     except Exception:  # noqa: BLE001  instrumentation never fails the run
         return
@@ -876,7 +894,13 @@ def build_graph(
 # --------------------------------------------------------------------------
 
 #: What `finalize_block` counts per pixel, in the order of its `flag` axis.
-FLAGS = ("fallback", "removed_water", "removed_hot", "qa_zeroed", "valid")
+#:
+#: There is no flag for what `lst_qa.supported_output` removes. That rule runs
+#: in `reduce_block`, so by the time a block reaches `finalize_block` those
+#: pixels are already nodata and no flag can tell them from a pixel the
+#: percentile never had. Their evidence is the published `qa_count`, which the
+#: rule leaves standing.
+FLAGS = ("fallback", "removed_water", "qa_zeroed", "valid")
 
 
 class FileLock:
@@ -1064,25 +1088,22 @@ def finalize_block(
     qa,
     fallback,
     keep,
-    gap,
     rows,
     cols,
     *pooled,
     masked: bool,
-    hot_dn,
     targets: dict,
 ):
     """Mask one block, write its windows, and return its per-pixel flags.
 
     `qa` arrives `(y, x, month)` because `month` is a core dimension; `keep`
-    and `gap` arrive as the block's own planes, or as 0-d placeholders when
-    the run is unmasked. `rows` and `cols` are the block's pixel indices,
-    broadcast to its shape, so the window is read off their corners.
+    arrives as the block's own plane, or as a 0-d placeholder when the run is
+    unmasked. `rows` and `cols` are the block's pixel indices, broadcast to its
+    shape, so the window is read off their corners.
 
-    The mask is `masks.apply_output_mask`, the one implementation of both
-    rules, applied to the block in place. The per-pixel flags are read off
-    its effect: what was valid before and is nodata after, split by which
-    rule reached it.
+    The mask is `masks.apply_output_mask`, the one implementation of the water
+    rule, applied to the block in place. The per-pixel flags are read off its
+    effect: what was valid before and is nodata after.
 
     Returns `(y, x, flag)` uint8 in the order of `FLAGS`.
     """
@@ -1098,11 +1119,9 @@ def finalize_block(
     qa_before = qa.any(axis=0)
     if masked:
         keep = np.broadcast_to(np.asarray(keep, dtype=bool), lst.shape)
-        gap = np.broadcast_to(np.asarray(gap, dtype=bool), lst.shape)
-        apply_output_mask(lst, qa, keep, gap, hot_dn=hot_dn)
+        apply_output_mask(lst, qa, keep)
     else:
         keep = np.ones(lst.shape, dtype=bool)
-    valid_after = lst != LST_NODATA_DN
     water = ~keep
 
     path, lock = targets["lst_p95"]
@@ -1118,9 +1137,8 @@ def finalize_block(
     flags = np.zeros((height, width, len(FLAGS)), dtype="uint8")
     flags[..., 0] = fallback
     flags[..., 1] = valid_before & water
-    flags[..., 2] = valid_before & ~valid_after & keep
-    flags[..., 3] = qa_before & water
-    flags[..., 4] = valid_after
+    flags[..., 2] = qa_before & water
+    flags[..., 3] = lst != LST_NODATA_DN
     return flags
 
 
@@ -1131,8 +1149,6 @@ def staging_writes(
     crs: str,
     dims,
     keep_mask=None,
-    gap_mask=None,
-    hot_dn=None,
 ):
     """The lazy finish of the graph: masks, window writes, and the flag counts.
 
@@ -1143,7 +1159,7 @@ def staging_writes(
     import dask.array as da
     import xarray as xr
 
-    from masks import gap_hot_dn, transform_for
+    from masks import transform_for
 
     ydim, xdim = dims
     out_dir = Path(out_dir)
@@ -1172,18 +1188,8 @@ def staging_writes(
             dims=dims,
             coords=coords,
         )
-        gap_plane = (
-            np.zeros((ny, nx), dtype=bool)
-            if gap_mask is None
-            else np.asarray(gap_mask, dtype=bool)
-        )
-        gap = xr.DataArray(
-            da.from_array(gap_plane, chunks=(chunk, chunk)), dims=dims, coords=coords
-        )
-        hot_dn = gap_hot_dn() if hot_dn is None else hot_dn
     else:
         keep = xr.DataArray(np.array(True))
-        gap = xr.DataArray(np.array(False))
 
     targets, paths = staging_targets(
         out_dir,
@@ -1201,16 +1207,15 @@ def staging_writes(
         out["qa_count"],
         out["fallback"],
         keep,
-        gap,
         rows,
         cols,
         *extra,
-        input_core_dims=[[], ["month"], [], [], [], [], []] + [[] for _ in extra],
+        input_core_dims=[[], ["month"], [], [], [], []] + [[] for _ in extra],
         output_core_dims=[["flag"]],
         dask="parallelized",
         output_dtypes=[np.uint8],
         dask_gufunc_kwargs={"output_sizes": {"flag": len(FLAGS)}},
-        kwargs={"masked": masked, "hot_dn": hot_dn, "targets": targets},
+        kwargs={"masked": masked, "targets": targets},
     )
     counts = flags.sum([ydim, xdim]).assign_coords(flag=list(FLAGS))
     return counts, paths
@@ -1232,11 +1237,10 @@ def compute_all(counts) -> dict:
 class BlockOutputs:
     """Where a block writes and what it masks, cut to one block.
 
-    `keep` and `gap` are the run's full-tile planes on the driver and one
-    block's window of them on a worker. Cutting them here is a slice of a
-    numpy array, not a computation: the alternative is shipping a whole
-    18,000 px plane, 324 MB per band, to every worker to have it read one
-    block of it.
+    `keep` is the run's full-tile plane on the driver and one block's window of
+    it on a worker. Cutting it here is a slice of a numpy array, not a
+    computation: the alternative is shipping a whole 18,000 px plane, 324 MB,
+    to every worker to have it read one block of it.
 
     Two call sites cut, and `cut` is what keeps them from cutting twice.
     `submit_blocks` cuts on the driver so the wire carries one block's window
@@ -1252,9 +1256,7 @@ class BlockOutputs:
 
     targets: dict
     keep: Any = None
-    gap: Any = None
-    hot_dn: Any = None
-    #: True once the planes are one block's window rather than the tile's.
+    #: True once the plane is one block's window rather than the tile's.
     cut: bool = False
 
     @property
@@ -1262,7 +1264,7 @@ class BlockOutputs:
         return self.keep is not None
 
     def for_block(self, block: BlockSpec) -> BlockOutputs:
-        """This block's window of the mask planes, and the same write targets.
+        """This block's window of the mask plane, and the same write targets.
 
         Idempotent: cutting an already-cut window returns it unchanged, so the
         driver and the worker can both ask without agreeing which one did it.
@@ -1273,11 +1275,6 @@ class BlockOutputs:
         return replace(
             self,
             keep=np.ascontiguousarray(np.asarray(self.keep, dtype=bool)[ys, xs]),
-            gap=(
-                None
-                if self.gap is None
-                else np.ascontiguousarray(np.asarray(self.gap, dtype=bool)[ys, xs])
-            ),
             cut=True,
         )
 
@@ -1566,12 +1563,10 @@ def fused_block(
         outputs[1],
         outputs[2],
         True if out.keep is None else out.keep,
-        False if out.gap is None else out.gap,
         np.array([block.yslice.start]),
         np.array([block.xslice.start]),
         *outputs[3:],
         masked=out.masked,
-        hot_dn=out.hot_dn,
         targets=out.targets,
     )
     t_end = time.perf_counter()

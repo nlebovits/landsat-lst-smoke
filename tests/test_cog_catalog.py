@@ -55,9 +55,12 @@ from lst_qa import (  # noqa: E402
     LST_MIN_DN,
     LST_NODATA_DN,
     LST_OFFSET,
+    LST_OUTPUT_MAX_C,
+    LST_OUTPUT_MIN_C,
     LST_SCALE,
     LST_VALID_MAX_C,
     LST_VALID_MIN_C,
+    MIN_TOTAL_OBSERVATIONS,
     encode_celsius,
 )
 
@@ -437,27 +440,46 @@ ASTER_GED: dict[str, Any] = {
 }
 MASK_RULE: dict[str, Any] = {
     "gap_buffer_cells": 1,
-    "gap_hot_threshold_c": 70.0,
+    "min_total_observations": MIN_TOTAL_OBSERVATIONS,
+    "lst_output_min_c": LST_OUTPUT_MIN_C,
+    "lst_output_max_c": LST_OUTPUT_MAX_C,
     "land_geometry_sha256": "35170d2371beacac",
     "aster_ged": ASTER_GED,
 }
 
 
 class TestTheMaskExplainsItself:
-    """A nodata pixel means one of three things, and the raster says which.
+    """A nodata pixel means one of four things, and the raster says which.
 
-    Water, a failed emissivity retrieval inside an ASTER GED gap, and no usable
+    Water, too little evidence, an impossible temperature, and no usable
     observation all read as DN 0. The item states the rules instead, and names
     the artifacts they read by checksum rather than by a path on the machine
     that ran the mask.
     """
 
-    def test_the_lineage_names_both_output_rules(self):
+    def test_the_lineage_names_every_output_rule(self):
         lineage = mask_lineage(MASK_RULE)["processing:lineage"]
         assert "Water:" in lineage
-        assert "Emissivity:" in lineage
-        assert "70.0 C or hotter" in lineage
+        assert "Evidence and plausibility:" in lineage
+        assert f"fewer than {MIN_TOTAL_OBSERVATIONS} clear observations" in lineage
+        assert f"below {LST_OUTPUT_MIN_C:.0f} C" in lineage
+        assert f"above {LST_OUTPUT_MAX_C:.0f} C" in lineage
+
+    def test_the_lineage_states_the_gap_region_removes_nothing(self):
+        # The withdrawn pair rule. MEASURED across five tiles, the region and
+        # the hot tail do not coincide, so the region is reported alone now.
+        lineage = mask_lineage(MASK_RULE)["processing:lineage"]
+        assert "reported rather than masked" in lineage
         assert "lies 1 cell from such a cell" in lineage
+        assert "70.0 C or hotter" not in lineage
+
+    def test_an_unmasked_run_still_states_the_validity_rules(self):
+        # `--no-output-mask` turns off the water rule. The rules that describe
+        # the estimate run in `reduce_block` and are unaffected, so the lineage
+        # of an unmasked tile has to say so.
+        lineage = mask_lineage(None)["processing:lineage"]
+        assert "No output mask ran" in lineage
+        assert f"fewer than {MIN_TOTAL_OBSERVATIONS} clear observations" in lineage
 
     def test_the_lineage_names_the_artifacts_by_checksum(self):
         lineage = mask_lineage(MASK_RULE)["processing:lineage"]

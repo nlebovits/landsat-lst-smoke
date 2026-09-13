@@ -39,6 +39,7 @@ from pathlib import Path
 import aster_ged
 import composite
 import destripe
+import lst_qa
 import masks
 import observe
 import staging
@@ -689,7 +690,9 @@ def mask_rule(args, counts, ged_provenance=None) -> dict | None:
         return None
     rule: dict = {
         "gap_buffer_cells": counts.get("gap_buffer_cells"),
-        "gap_hot_threshold_c": counts.get("gap_hot_threshold_c"),
+        "min_total_observations": lst_qa.MIN_TOTAL_OBSERVATIONS,
+        "lst_output_min_c": lst_qa.LST_OUTPUT_MIN_C,
+        "lst_output_max_c": lst_qa.LST_OUTPUT_MAX_C,
         "land_geometry_sha256": masks.geometry_checksum(args.land_geometry_uri),
     }
     if ged_provenance:
@@ -875,7 +878,6 @@ def run_fused(
     item_bboxes,
     prep,
     keep_mask,
-    gap_mask,
     marks,
     say,
 ):
@@ -897,7 +899,7 @@ def run_fused(
     """
     from odc.geo.geobox import GeoBox
 
-    from masks import gap_hot_dn, transform_for
+    from masks import transform_for
 
     fused_block = getattr(composite, "fused_block", None)
     if fused_block is None:
@@ -931,12 +933,7 @@ def run_fused(
         f"scenes per block on average against {len(item_dicts)} on the tile's "
         f"time axis, planned in {marks['plan_s']:.2f}s"
     )
-    outputs = composite.BlockOutputs(
-        targets=targets,
-        keep=keep_mask,
-        gap=gap_mask,
-        hot_dn=None if keep_mask is None else gap_hot_dn(),
-    )
+    outputs = composite.BlockOutputs(targets=targets, keep=keep_mask)
     scalars = composite.submit_blocks(
         client,
         cluster,
@@ -995,10 +992,11 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
     # the tile's bbox and on two artifacts, and on nothing this run computes,
     # so a tile it empties can be recorded without staging a single object.
     ged_provenance = check_mask_inputs(args, say)
-    keep = gap = mask_counts = None
+    keep = mask_counts = None
     if ged_provenance is not None:
         with observe.phase("masks", marks=marks):
-            keep, gap, mask_counts = masks.output_mask(
+            # The gap region is reported in `mask_counts` and removes nothing.
+            keep, _gap, mask_counts = masks.output_mask(
                 bbox,
                 args.pixels_per_degree,
                 numobs_uri=args.numobs_uri,
@@ -1164,7 +1162,6 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
                 item_bboxes=item_bboxes,
                 prep=prep,
                 keep_mask=keep,
-                gap_mask=gap,
                 marks=marks,
                 say=say,
             )
@@ -1196,7 +1193,6 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
                     crs=args.crs,
                     dims=(ydim, xdim),
                     keep_mask=keep,
-                    gap_mask=gap,
                 )
                 n_tasks = len(dict(counts.__dask_graph__()))
             n_rejected = out.attrs["n_rejected"]
@@ -1233,15 +1229,13 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
         mask_counts |= {
             "scope": "tile",
             "valid_removed_by_water": int(scalars.get("removed_water", 0)),
-            "valid_removed_by_emissivity": int(scalars.get("removed_hot", 0)),
-            "valid_removed_by_mask": int(scalars.get("removed_water", 0))
-            + int(scalars.get("removed_hot", 0)),
+            "valid_removed_by_mask": int(scalars.get("removed_water", 0)),
             "qa_count_pixels_zeroed": int(scalars.get("qa_zeroed", 0)),
         }
         say(
             f"masked        {mask_counts['valid_removed_by_water']:,} px sea, "
-            f"{mask_counts['valid_removed_by_emissivity']:,} px hot inside the "
-            f"ASTER gap region"
+            f"{mask_counts['pixels_emissivity_gap']:,} px inside the ASTER gap "
+            f"region, which the mask reports and does not remove"
         )
 
     # The header fields the workers could not write: scale, offset, band

@@ -53,7 +53,7 @@ from pathlib import Path
 import aster_ged
 import masks
 from land_tiles import tile_bounds
-from lst_qa import LST_NODATA_DN
+from lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE
 
 #: Where a `--no-catalog` run leaves the two COGs. A catalog run puts them
 #: under `<out-dir>/catalog/<collection>/<tile>/`, so point `--raster` and
@@ -223,16 +223,27 @@ def tile_level_claim(inventory_uri, land_tiles_uri, numobs_uri, land_geometry_ur
 
 #: Hot-tail threshold, in Celsius. A screen, not a physical ceiling.
 #:
-#: It marks where this tile's artifact population separates, and one tile is
-#: all that calibrated it. It carries no claim about the hottest land surface,
-#: because it never acts alone: a pixel above it outside the gap region
-#: survives, and 503 such pixels do survive on S30W065. `masks.py` owns the
-#: value the fleet applies, and `nlebovits/landsat-lst` calibrated the same
-#: number the same way in `config.py:193-210`.
+#: It marks where S30W065's artifact population separates, and one tile is all
+#: that calibrated it. This script owns the number because nothing in the
+#: pipeline applies it any more. The fleet screened a pixel only where this
+#: threshold and the GED gap region held together, and that pair was withdrawn
+#: after five tiles showed the two halves do not coincide. `lst_qa.py` owns the
+#: unconditional ceiling that replaced it.
 #:
-#: Check the tail against 70 C on the next tile that carries a substantial gap
-#: population.
-HOT_C = masks.GAP_HOT_THRESHOLD_C
+#: The value stays here so the six-rule pricing below stays reproducible.
+#: `nlebovits/landsat-lst` calibrated the same number the same way in
+#: `config.py:193-210`.
+HOT_C = 70.0
+
+
+def hot_dn(celsius: float = HOT_C) -> int:
+    """`celsius` as an output DN, so the test runs against the stored uint16.
+
+    Converting an 18,000 px tile to float64 to compare it would build a 2.6 GiB
+    array beside two that are already live, and the comparison is monotone
+    either way.
+    """
+    return int(round((celsius - LST_OFFSET) / LST_SCALE))
 
 
 def temperature_census(counts, covered, lst, land) -> dict:
@@ -248,8 +259,6 @@ def temperature_census(counts, covered, lst, land) -> dict:
         tile-wide figures the enrichment is computed against.
     """
     import numpy as np
-
-    from lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE
 
     usable = (lst != LST_NODATA_DN) & land & (covered > 0)
     celsius = lst.astype("float64") * LST_SCALE + LST_OFFSET
@@ -332,7 +341,7 @@ def gap_cell_census(numobs_uri, bbox, lst, land, pixels_per_degree: int) -> dict
     counts, covered = _cell_region(numobs_uri, bbox, pixels_per_degree, 0)
     gap = (covered > 0) & (counts == 0)
 
-    hot_px = (lst >= masks.gap_hot_dn()) & (lst != LST_NODATA_DN) & land
+    hot_px = (lst >= hot_dn()) & (lst != LST_NODATA_DN) & land
     valid_px = (lst != LST_NODATA_DN) & land
     rows, cols = gap.shape
 
@@ -387,9 +396,9 @@ def rule_table(numobs_uri, bbox, shape, lst, land, pixels_per_degree: int) -> li
     cell_counts, cell_covered = _cell_region(numobs_uri, bbox, pixels_per_degree, pad)
     read = cell_covered > 0
 
-    hot_dn = masks.gap_hot_dn()
+    threshold_dn = hot_dn()
     valid = (lst != LST_NODATA_DN) & land
-    hot = valid & (lst >= hot_dn)
+    hot = valid & (lst >= threshold_dn)
     n_valid = int(np.count_nonzero(valid))
     n_hot = int(np.count_nonzero(hot))
 
@@ -409,7 +418,7 @@ def rule_table(numobs_uri, bbox, shape, lst, land, pixels_per_degree: int) -> li
         cells = read & (cell_counts <= tier)
         drop = to_pixels(aster_ged.dilate_cells(cells, buffer_cells))
         if conjoin:
-            drop &= lst >= hot_dn
+            drop &= lst >= threshold_dn
         removed = int(np.count_nonzero(valid & drop))
         hot_removed = int(np.count_nonzero(hot & drop))
         del drop

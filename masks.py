@@ -13,7 +13,7 @@ every pass is a thin time axis, and a wider window fixes it. A pixel over the
 sea, or one where ASTER GED holds no emissivity, is not thin. It is a pixel the
 product has nothing to say about, in this window or any other.
 
-Two rules, and each one is permanent for the pixel.
+One rule, and it is permanent for the pixel.
 
 Water. `land_tiles.py` selects the tiles the fleet runs by intersecting the
 grid with Natural Earth 10m land buffered by 25 km. That module's docstring
@@ -27,29 +27,27 @@ The geometry arrives as an artifact rather than as a download.
 inside a run is what `tests/test_no_stac_at_runtime.py` exists to forbid.
 `land_tiles.py --write-geometry` ships it; this module reads it.
 
-Emissivity. Landsat Collection 2 Level-2 Surface Temperature needs a land
-surface emissivity value per pixel, taken from ASTER GED, which was built from
-clear-sky ASTER scenes acquired between 2000 and 2008. Where ASTER never caught
-clear sky, GED holds no emissivity. USGS does not leave that pixel alone. It
-interpolates emissivity from the neighbouring cells and retrieves a temperature
-anyway, and some of those retrievals fail upward.
+Emissivity, as a region rather than as a rule. Landsat Collection 2 Level-2
+Surface Temperature needs a land surface emissivity value per pixel, taken from
+ASTER GED, which was built from clear-sky ASTER scenes acquired between 2000 and
+2008. Where ASTER never caught clear sky, GED holds no emissivity. USGS does not
+leave that pixel alone. It interpolates emissivity from the neighbouring cells
+and retrieves a temperature anyway, and some of those retrievals fail upward.
 
-So the gap region and the damage are different sets, and the rule is the pair
-rather than the geometry. MEASURED on S30W065: the tile holds 605 gap cells,
-524 of them carry no pixel at or above 70 C, and in the 81 that do the hot
-pixels are 4.77% of the cell. Removing the geometry alone costs 701,839 valid
-pixels to remove 4,588 bad ones. Removing a pixel only where the gap region and
-70 C coincide costs 5,432 and reaches more of the tail.
+`output_mask` still reports where that region reaches, because a tile with much
+of it rests on interpolated emissivity and a reader should know. It no longer
+removes anything. An earlier build paired the region with a 70 C threshold and
+dropped the pixels where both held. MEASURED across five tiles, the two halves
+do not coincide: on N30E075 all 207 pixels at or above 80 C fall outside the
+region and its one-cell buffer, so the pair reached none of them. The bound that
+replaced it is `lst_qa.LST_OUTPUT_MAX_C`, applied to every pixel wherever it
+sits, in `composite.reduce_block`.
 
-`nlebovits/landsat-lst` shipped the geometry alone, measured 2,799,286 pixels
-removed for 2,582 artifacts, and replaced it with the pair. This module
-reproduces that rule rather than the version it replaced.
-
-Masking is not a second opinion about the temperature, and both rules do remove
-values the composite held. Over water Landsat retrieves a real temperature and
-the water rule drops it. Over a gap the pair drops a retrieval that reads 70 C
-or hotter. `qa_count` follows the water rule alone: zero observations is data,
-and the count layer stays the evidence behind every surviving p95.
+Masking is not a second opinion about the temperature, and the water rule does
+remove values the composite held: over water Landsat retrieves a real
+temperature and the rule drops it. `qa_count` follows that rule alone. Zero
+observations is data, and the count layer stays the evidence behind every
+surviving p95, including the pixels `lst_qa.supported_output` screens out.
 """
 
 from __future__ import annotations
@@ -64,7 +62,7 @@ from aster_ged import (
     cells_to_pixels,
     dilate_cells,
 )
-from lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE
+from lst_qa import LST_NODATA_DN
 
 DEFAULT_LAND_GEOMETRY_URI = Path("artifacts/land_buffered.gpkg")
 
@@ -74,28 +72,15 @@ DEFAULT_LAND_GEOMETRY_URI = Path("artifacts/land_buffered.gpkg")
 #: of a measured tile rather than 0.22%.
 GAP_NUMOBS = 0
 
-#: How far the gap region grows, in GED cells of about 1 km, 8-connected.
+#: How far the reported gap region grows, in GED cells of about 1 km,
+#: 8-connected.
 #:
-#: The failures sit on the fringe of a gap rather than in its middle. The
-#: middle comes back as `ST_B10` fill and never reaches the composite. One cell
-#: of growth takes the tail this rule removes from 77.30% to 91.52% on
-#: S30W065. Under the temperature test it costs 844 further pixels, because a
-#: grown cell can only remove a pixel that already reads 70 C.
+#: The failed retrievals sit on the fringe of a gap rather than in its middle.
+#: The middle comes back as `ST_B10` fill and never reaches the composite. One
+#: cell of growth took the tail the withdrawn pair rule removed from 77.30% to
+#: 91.52% on S30W065, and the buffer is kept at that width so the region the
+#: counts report is the region the measurements describe.
 GAP_BUFFER_CELLS = 1
-
-#: Celsius at which a pixel inside the gap region reads as a failed retrieval.
-#:
-#: Empirical, from one tile, with no published source. It is half of a pair and
-#: never acts alone, so it makes no claim about the hottest land surface. A
-#: pixel above it outside the gap region survives, and 503 such pixels do
-#: survive on S30W065. `nlebovits/landsat-lst` calibrated the same number the
-#: same way, in `config.py:193-210`.
-GAP_HOT_THRESHOLD_C = 70.0
-
-#: The lowest threshold this module accepts. Below it the pair stops being a
-#: screen for failed retrievals and starts deleting ordinary hot ground, which
-#: is what the conjunction exists to prevent.
-MIN_GAP_HOT_THRESHOLD_C = 50.0
 
 
 class MaskError(RuntimeError):
@@ -190,27 +175,6 @@ def land_mask(bbox, pixels_per_degree: int, land_geometry_uri=None):
     return burned.astype(bool)
 
 
-def gap_hot_dn(celsius: float = GAP_HOT_THRESHOLD_C) -> int:
-    """The encoded value a gap pixel has to reach before the mask drops it.
-
-    The test runs against the stored uint16 rather than Celsius. Converting an
-    18,000 px tile to float64 to compare it would build a 2.6 GiB array beside
-    two that are already live, and the comparison is monotone either way.
-
-    Raises:
-        MaskError: if the threshold is below `MIN_GAP_HOT_THRESHOLD_C`.
-    """
-    if celsius < MIN_GAP_HOT_THRESHOLD_C:
-        msg = (
-            f"gap hot threshold {celsius} C is below "
-            f"{MIN_GAP_HOT_THRESHOLD_C} C. The threshold is half of a pair, "
-            f"and this low it stops screening failed retrievals and starts "
-            f"deleting ordinary hot ground inside every gap cell."
-        )
-        raise MaskError(msg)
-    return int(round((celsius - LST_OFFSET) / LST_SCALE))
-
-
 def _gap_and_seen(bbox, pixels_per_degree: int, numobs_uri, buffer_cells: int):
     """The grown gap region and the read region, both on the tile's pixels.
 
@@ -252,10 +216,10 @@ def emissivity_gap(
     not a gap, and treating one as such removed 34 whole tiles from the first
     real fleet plan, every one of them for want of a downloaded granule.
 
-    This is the region, not the mask. On its own it removes 701,839 valid
-    pixels of S30W065 and 87% of the cells it removes carry nothing wrong.
-    `apply_output_mask` intersects it with `GAP_HOT_THRESHOLD_C`, and that
-    pair is what a published tile carries.
+    This is a region, not a mask, and nothing removes a pixel for being inside
+    it. On its own it would remove 701,839 valid pixels of S30W065, and 87% of
+    the cells it covers carry nothing wrong. `output_mask` reports its size so a
+    reader can see how much of a tile rests on interpolated emissivity.
 
     Raises:
         GedError: if the NumObs artifact is absent or does not cover the bbox.
@@ -294,9 +258,8 @@ def output_mask(
     counts = {
         "pixels_total": int(land.size),
         "pixels_water": int((~land).sum()),
-        # The region, which is not what the mask removes. The pair removes the
-        # part of it that also reads `GAP_HOT_THRESHOLD_C` or hotter, and
-        # `apply_output_mask` reports that number.
+        # The region, which the mask no longer removes. It is reported because
+        # a tile with much of it rests on interpolated emissivity.
         "pixels_emissivity_gap": int(gap.sum()),
         # Gap over land, which is the share this region adds on its own. The
         # two rules overlap over sea, where GED has no observation either, so
@@ -308,38 +271,31 @@ def output_mask(
         "pixels_land_unread": int((land & ~seen).sum()),
         "pixels_kept": int(land.sum()),
         "gap_buffer_cells": int(buffer_cells),
-        "gap_hot_threshold_c": GAP_HOT_THRESHOLD_C,
     }
     return land, gap, counts
 
 
-def apply_output_mask(lst, qa, keep, gap=None, *, hot_dn=None, scope="tile") -> dict:
-    """Write both rules into an assembled tile, in place.
+def apply_output_mask(lst, qa, keep, *, scope="tile") -> dict:
+    """Write the water rule into an assembled tile, in place.
 
-    Water. `lst` becomes `LST_NODATA_DN` and `qa` becomes 0 outside `keep`.
-    Both, not one: a `qa_count` above zero beside a nodata temperature says the
-    pixel had observations and lost them to the reduction, which is not what
-    happened here.
+    `lst` becomes `LST_NODATA_DN` and `qa` becomes 0 outside `keep`. Both, not
+    one: a `qa_count` above zero beside a nodata temperature says the pixel had
+    observations and lost them to the reduction, which is not what happened
+    here.
 
-    Emissivity. A pixel inside `gap` that reads `hot_dn` or hotter becomes
-    `LST_NODATA_DN`, and its `qa_count` is left alone. The count records how
-    many clear observations the pixel had, which stays true whatever the
-    retrieval did with them, and it is the evidence a consumer needs to see
-    that this pixel was screened rather than never seen.
+    This is the only rule left that depends on where the pixel is. The rules
+    that depend on what the composite says are `lst_qa.supported_output`, and
+    `composite.reduce_block` has already applied them by the time a tile
+    reaches this function.
 
-    Passing no `gap` applies the water rule alone, which is what
-    `--no-output-mask` wants.
-
-    The graph applies the same two rules lazily, block by block, in
-    `composite._apply_masks`. This is the eager statement of them, for an
-    array already in memory.
+    The graph applies this rule lazily, block by block, in
+    `composite.finalize_block`. This is the eager statement of it, for an array
+    already in memory.
 
     Args:
         lst: `(height, width)` uint16 of encoded temperature.
         qa: `(12, height, width)` uint8 of monthly observation counts.
         keep: `(height, width)` boolean from `output_mask`.
-        gap: `(height, width)` boolean from `output_mask`, or None.
-        hot_dn: encoded threshold, default `gap_hot_dn()`.
         scope: what the returned counts describe. `"tile"` for a whole tile,
             which is what a run composites; anything narrower has to say so.
 
@@ -354,28 +310,19 @@ def apply_output_mask(lst, qa, keep, gap=None, *, hot_dn=None, scope="tile") -> 
 
     keep = np.asarray(keep)
     water = ~keep
-    if gap is None:
-        hot = np.zeros_like(water)
-    else:
-        if hot_dn is None:
-            hot_dn = gap_hot_dn()
-        hot = np.asarray(gap) & (lst >= hot_dn)
 
-    # Both masks are read before either is written, so a pixel that is water
-    # and hot is counted once, against the water rule.
+    # The mask is read before it is written, so the count describes the tile
+    # that arrived rather than the one that leaves.
     valid = lst != LST_NODATA_DN
     removed_water = int((valid & water).sum())
-    removed_hot = int((valid & hot & keep).sum())
     qa_removed = int(np.any(qa, axis=0)[water].sum())
 
     lst[water] = LST_NODATA_DN
-    lst[hot] = LST_NODATA_DN
     qa[:, water] = 0
     return {
         "scope": scope,
         "valid_removed_by_water": removed_water,
-        "valid_removed_by_emissivity": removed_hot,
-        "valid_removed_by_mask": removed_water + removed_hot,
+        "valid_removed_by_mask": removed_water,
         "qa_count_pixels_zeroed": qa_removed,
     }
 
@@ -383,14 +330,11 @@ def apply_output_mask(lst, qa, keep, gap=None, *, hot_dn=None, scope="tile") -> 
 __all__ = [
     "DEFAULT_LAND_GEOMETRY_URI",
     "GAP_BUFFER_CELLS",
-    "GAP_HOT_THRESHOLD_C",
     "GAP_NUMOBS",
-    "MIN_GAP_HOT_THRESHOLD_C",
     "GedError",
     "MaskError",
     "apply_output_mask",
     "emissivity_gap",
-    "gap_hot_dn",
     "geometry_checksum",
     "land_mask",
     "output_mask",

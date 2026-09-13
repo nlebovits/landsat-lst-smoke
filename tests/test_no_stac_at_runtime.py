@@ -410,10 +410,13 @@ class TestTheComputePathIsOffline:
 
         assert out.attrs["n_scenes"] == 3
         assert out["lst_p95"].shape == (SCENE_PX, SCENE_PX)
-        # Every pixel is clear in every scene, so nothing is nodata and the
-        # monthly counts hold all three observations.
-        assert not np.any(out["lst_p95"].values == shard_lst_p95.LST_NODATA_DN)
+        # Every pixel is clear in every scene, so the monthly counts hold all
+        # three observations. Three is below `lst_qa.MIN_TOTAL_OBSERVATIONS`,
+        # so no pixel carries a temperature: a percentile over three scenes is
+        # not a five-year 95th percentile. What this test is about is that both
+        # bands were produced without a socket, and they were.
         assert int(out["qa_count"].values.sum(axis=0).max()) == 3
+        assert np.all(out["lst_p95"].values == shard_lst_p95.LST_NODATA_DN)
 
     def test_the_staged_run_reads_no_object_twice(
         self, no_network, scenes_in_a_bucket, tmp_path
