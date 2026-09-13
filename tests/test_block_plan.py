@@ -590,6 +590,64 @@ class TestTheBlockOutputs:
             call["args"][4].keep.shape == (6_000, 6_000) for call in client.calls
         )
 
+    def test_cutting_a_cut_window_again_returns_it_unchanged(self):
+        """The driver cuts and the worker cuts, and one window has to survive.
+
+        `submit_blocks` cuts before it submits and `fused_block` cuts again on
+        the worker. A block's slices are absolute, so the second cut would
+        index the tile's offset into a 6,000 px window and hand
+        `finalize_block` an empty array.
+        """
+        items, boxes = walk_items(6, TILE_BBOX)
+        plan = composite.build_block_plan(items, boxes, geobox_for(TILE_BBOX), 6_000)
+        block = plan[1 * 3 + 2]
+        keep = np.zeros((18_000, 18_000), dtype=bool)
+        keep[6_100, 12_050] = True
+        outputs = composite.BlockOutputs(
+            targets={}, keep=keep, gap=np.ones((18_000, 18_000), dtype=bool), hot_dn=7
+        )
+
+        once = outputs.for_block(block)
+        twice = once.for_block(block)
+
+        assert twice is once
+        assert twice.keep.shape == twice.gap.shape == (6_000, 6_000)
+        assert twice.keep.sum() == 1
+        assert twice.hot_dn == 7
+
+    def test_the_window_a_submitted_task_cuts_is_the_block_not_an_empty_array(self):
+        """The production pair, driver cut then worker cut, on a masked run.
+
+        `counting_stub` never touches `out`, so the suite proved nothing about
+        this pair until the 12-scene rehearsal raised on it.
+        """
+        items, vectors, plan = plan_and_vectors(chunk=6_000)
+        keep = np.zeros((18_000, 18_000), dtype=bool)
+        keep[:6_000] = True
+        outputs = composite.BlockOutputs(targets={}, keep=keep)
+        shapes = []
+
+        def cuts_the_way_fused_block_does(
+            block, _items, _vectors, _prep, out, *, emit_pooled=False
+        ):
+            if hasattr(out, "for_block"):
+                out = out.for_block(block)
+            shapes.append(out.keep.shape)
+            return {"valid": int(out.keep.sum())}
+
+        totals = composite.submit_blocks(
+            FakeClient(),
+            FakeCluster(),
+            plan,
+            cuts_the_way_fused_block_does,
+            items=items,
+            vectors=vectors,
+            out=outputs,
+        )
+
+        assert shapes and all(shape == (6_000, 6_000) for shape in shapes)
+        assert totals["valid"] == int(keep.sum())
+
 
 # --------------------------------------------------------------------------
 # The staging files both engines write into

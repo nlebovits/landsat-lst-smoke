@@ -1205,20 +1205,37 @@ class BlockOutputs:
     numpy array, not a computation: the alternative is shipping a whole
     18,000 px plane, 324 MB per band, to every worker to have it read one
     block of it.
+
+    Two call sites cut, and `cut` is what keeps them from cutting twice.
+    `submit_blocks` cuts on the driver so the wire carries one block's window
+    rather than the tile's plane, and `fused_block` cuts on the worker so a
+    direct call with the tile's planes still works. A block's slices are
+    absolute, so a second cut indexes a 360 px window at the block's tile
+    offset and yields an empty array: block (3, 3) reads `keep[1080:1440,
+    1080:1440]` of a 360 px plane and gets `(0, 0)`. `finalize_block` then
+    raises on the broadcast. MEASURED on the 12-scene rehearsal, 2026-09-13.
+    The 8x8 instance benchmark missed it because it ran `--no-output-mask`,
+    where `keep` is None and neither call site cuts at all.
     """
 
     targets: dict
     keep: Any = None
     gap: Any = None
     hot_dn: Any = None
+    #: True once the planes are one block's window rather than the tile's.
+    cut: bool = False
 
     @property
     def masked(self) -> bool:
         return self.keep is not None
 
     def for_block(self, block: BlockSpec) -> BlockOutputs:
-        """This block's window of the mask planes, and the same write targets."""
-        if self.keep is None:
+        """This block's window of the mask planes, and the same write targets.
+
+        Idempotent: cutting an already-cut window returns it unchanged, so the
+        driver and the worker can both ask without agreeing which one did it.
+        """
+        if self.keep is None or self.cut:
             return self
         ys, xs = block.yslice, block.xslice
         return replace(
@@ -1229,6 +1246,7 @@ class BlockOutputs:
                 if self.gap is None
                 else np.ascontiguousarray(np.asarray(self.gap, dtype=bool)[ys, xs])
             ),
+            cut=True,
         )
 
 
