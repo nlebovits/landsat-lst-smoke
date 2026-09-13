@@ -61,7 +61,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from lst_qa import LST_MAX_DN, LST_MIN_DN, LST_NODATA_DN, LST_OFFSET, LST_SCALE
+from lst_qa import (
+    LST_MAX_DN,
+    LST_MIN_DN,
+    LST_NODATA_DN,
+    LST_OFFSET,
+    LST_OUTPUT_MAX_C,
+    LST_OUTPUT_MIN_C,
+    LST_SCALE,
+    MIN_TOTAL_OBSERVATIONS,
+)
 from stac_window import DEFAULT_COLLECTION, DEFAULT_PLATFORMS
 
 #: Bumped when the catalog's shape or the encoding changes. Recorded in the
@@ -1086,15 +1095,18 @@ def _collection_readme(
         "the scene set the offsets were fitted over.\n\n"
         "Where ASTER GED caught no clear sky between 2000 and 2008, the USGS "
         "interpolates emissivity from neighbouring cells and retrieves a "
-        "temperature anyway, and some of those retrievals fail upward. A pixel "
-        "is removed only where its cell reports zero observations, or lies one "
-        "cell from such a cell, and the pixel also reads 70 C or hotter. "
-        "Masking the gap geometry alone was measured on S30W065 to remove "
-        "701,839 valid pixels to remove 4,588 bad ones; the pair removes "
-        "5,432 and reaches more of the tail. 503 hot pixels survive on that "
-        "tile, in cells that did have observations. The 70 C threshold is a "
-        "screen calibrated on one tile with no published source, so it makes "
-        "no claim about the hottest land surface.\n\n"
+        "temperature anyway, and some of those retrievals fail upward. That "
+        "region is reported per tile and removes nothing. An earlier build "
+        "paired it with a 70 C threshold, and the pair was withdrawn after "
+        "five tiles showed the two halves do not coincide: on N30E075 all 207 "
+        f"pixels at or above 80 C fell outside the region. The "
+        f"{LST_OUTPUT_MAX_C:.0f} C ceiling that replaced it applies to every "
+        "pixel wherever it sits.\n\n"
+        f"A five-year 95th percentile also needs evidence behind it. A pixel "
+        f"with fewer than {MIN_TOTAL_OBSERVATIONS} clear observations across "
+        f"the whole window is removed, which MEASURED across five tiles costs "
+        f"between 0.0003% and 0.804% of valid land. Sum the 12 `qa_count` "
+        f"bands to see what each surviving pixel rests on.\n\n"
         "## Decoding\n\n"
         f"{_decode_snippet(f'{item_id}/{LST_FILENAME}')}\n"
         "If you already know the constants:\n\n"
@@ -1129,21 +1141,23 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
         f"{_decode_snippet(f'{item_id}/{LST_FILENAME}')}\n"
         f"DN {LST_NODATA_DN} is nodata. Treat it as absent rather than cold.\n\n"
         "## What a nodata pixel means\n\n"
-        "Three different facts, and the raster separates none of them:\n\n"
+        "Four different facts, and the raster separates none of them:\n\n"
         "| Meaning | Rule | Would a wider window fix it |\n"
         "|---|---|---|\n"
         "| No usable observation | every scene was cloudy, or the pixel is "
         "off every footprint | yes |\n"
         "| Water | outside the buffered land geometry | no |\n"
-        "| Failed emissivity retrieval | hot inside an ASTER GED coverage "
-        "gap | no |\n\n"
+        f"| Too little evidence | fewer than {MIN_TOTAL_OBSERVATIONS} clear "
+        "observations over the whole window | yes |\n"
+        f"| Physically impossible | below {LST_OUTPUT_MIN_C:.0f} C or above "
+        f"{LST_OUTPUT_MAX_C:.0f} C | no |\n\n"
         "Do not read a nodata pixel as missing data over the ocean: the water "
         "rule zeroes `qa_count` with the temperature, so a count of 0 beside "
         "a nodata pixel is the signature of sea rather than of cloud. The "
-        "emissivity rule leaves `qa_count` alone, so a nodata pixel with a "
-        "count above 0 was screened rather than never seen. The item's "
-        "`processing:lineage` states both rules and names the artifacts they "
-        "read by checksum.\n\n"
+        "other two rules leave `qa_count` alone, so a nodata pixel with a "
+        "count above 0 was screened rather than never seen, and the count "
+        "itself says which rule reached it. The item's `processing:lineage` "
+        "states every rule and names the artifacts they read by checksum.\n\n"
         "## Reading the observation counts\n\n"
         f"`{QA_ASSET_KEY}` has 12 bands, January through December. Band `m` "
         "counts the clear observations that entered the percentile for that "
@@ -1249,35 +1263,42 @@ def correction_lineage(correction_rule: dict[str, Any] | None) -> str:
 def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
     """The properties that say which pixels the output mask removed, and why.
 
-    A nodata `lst_p95` pixel carries three meanings: no usable observation,
-    water, or an emissivity retrieval that failed inside an ASTER GED coverage
-    gap. Nothing in the raster separates them, so the item states the rules it
-    was masked under and names the artifacts by DOI and checksum.
+    A nodata `lst_p95` pixel carries four meanings: no usable observation,
+    water, too few observations to support a five-year percentile, or a value
+    outside the temperatures this product publishes. Nothing in the raster
+    separates them, so the item states the rules it was masked under and names
+    the artifacts by DOI and checksum.
 
     `processing:lineage` and `sci:publications` are the registered homes for
     this. No `lst:`-prefixed property restates any of it.
     """
+    validity = (
+        f"Evidence and plausibility: a pixel becomes nodata when fewer than "
+        f"{MIN_TOTAL_OBSERVATIONS} clear observations entered its percentile, "
+        f"or when the percentile falls below {LST_OUTPUT_MIN_C:.0f} C or above "
+        f"{LST_OUTPUT_MAX_C:.0f} C. Both bounds are inclusive, and both rules "
+        f"leave qa_count alone, so the count of clear observations stays "
+        f"readable beside the pixel they removed."
+    )
     if not mask_rule:
         return {
             "processing:lineage": (
-                f"{_QA_LINEAGE} No output mask ran, so sea pixels and ASTER "
-                "GED emissivity gaps are present in this tile."
+                f"{_QA_LINEAGE} No output mask ran, so sea pixels are present "
+                f"in this tile. {validity}"
             )
         }
     buffer_cells = mask_rule.get("gap_buffer_cells")
-    threshold = mask_rule.get("gap_hot_threshold_c")
     ged = mask_rule.get("aster_ged") or {}
     sentences = [
         _QA_LINEAGE,
-        "Two further rules then run over the assembled tile. Water: a pixel "
-        "outside the buffered land geometry becomes nodata, and its qa_count "
-        "becomes 0, so the two bands cannot disagree about a pixel that was "
-        "never this product's subject.",
-        f"Emissivity: a pixel whose ASTER GED cell reports no clear-sky "
-        f"observation, or lies {buffer_cells} cell from such a cell, becomes "
-        f"nodata when it reads {threshold} C or hotter. Its qa_count is left "
-        f"alone, because the count of clear observations stays true whatever "
-        f"the retrieval did with them.",
+        "Water: a pixel outside the buffered land geometry becomes nodata, and "
+        "its qa_count becomes 0, so the two bands cannot disagree about a pixel "
+        "that was never this product's subject.",
+        validity,
+        f"ASTER GED coverage is reported rather than masked. A pixel whose GED "
+        f"cell reports no clear-sky observation, or lies {buffer_cells} cell "
+        f"from such a cell, rests on emissivity interpolated by USGS, and the "
+        f"collection records how much of each tile that covers.",
     ]
     if ged.get("short_name"):
         read_from = (

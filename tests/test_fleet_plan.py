@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import fleet_plan  # noqa: E402
+import lst_qa  # noqa: E402
 import masks  # noqa: E402
 from tile_inventory import InventoryError, thermal_rows_for_tile  # noqa: E402
 
@@ -277,7 +278,12 @@ class TestEmissivityCostsNoTile:
         # checkable against its plan.
         rule = masked_plan["emissivity_rule"]
         assert rule["gap_buffer_cells"] == masks.GAP_BUFFER_CELLS
-        assert rule["gap_hot_threshold_c"] == masks.GAP_HOT_THRESHOLD_C
+        assert rule["min_total_observations"] == lst_qa.MIN_TOTAL_OBSERVATIONS
+        assert rule["lst_output_min_c"] == lst_qa.LST_OUTPUT_MIN_C
+        assert rule["lst_output_max_c"] == lst_qa.LST_OUTPUT_MAX_C
+        # The withdrawn pair rule's threshold is gone from the plan, because no
+        # launched machine applies it any more.
+        assert "gap_hot_threshold_c" not in rule
 
     def test_the_plan_names_the_artifact_behind_the_rule(self, masked_plan):
         # The rule is only reproducible if the mosaic it reads is named.

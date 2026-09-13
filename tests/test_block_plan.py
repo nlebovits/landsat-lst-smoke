@@ -548,16 +548,12 @@ class TestTheBlockOutputs:
         plan = composite.build_block_plan(items, boxes, geobox_for(TILE_BBOX), 6_000)
         keep = np.zeros((18_000, 18_000), dtype=bool)
         keep[6_100, 12_050] = True
-        outputs = composite.BlockOutputs(
-            targets={}, keep=keep, gap=np.ones((18_000, 18_000), dtype=bool), hot_dn=7
-        )
+        outputs = composite.BlockOutputs(targets={}, keep=keep)
         assert outputs.masked
         cut = outputs.for_block(plan[1 * 3 + 2])
-        assert cut.keep.shape == cut.gap.shape == (6_000, 6_000)
+        assert cut.keep.shape == (6_000, 6_000)
         assert cut.keep[100, 50]
         assert cut.keep.sum() == 1
-        assert cut.gap.all()
-        assert cut.hot_dn == 7
         assert cut.targets is outputs.targets
 
     def test_an_unmasked_run_carries_no_planes(self):
@@ -603,17 +599,14 @@ class TestTheBlockOutputs:
         block = plan[1 * 3 + 2]
         keep = np.zeros((18_000, 18_000), dtype=bool)
         keep[6_100, 12_050] = True
-        outputs = composite.BlockOutputs(
-            targets={}, keep=keep, gap=np.ones((18_000, 18_000), dtype=bool), hot_dn=7
-        )
+        outputs = composite.BlockOutputs(targets={}, keep=keep)
 
         once = outputs.for_block(block)
         twice = once.for_block(block)
 
         assert twice is once
-        assert twice.keep.shape == twice.gap.shape == (6_000, 6_000)
+        assert twice.keep.shape == (6_000, 6_000)
         assert twice.keep.sum() == 1
-        assert twice.hot_dn == 7
 
     def test_the_window_a_submitted_task_cuts_is_the_block_not_an_empty_array(self):
         """The production pair, driver cut then worker cut, on a masked run.
@@ -731,7 +724,6 @@ class TestTheDriverBranch:
             "item_bboxes": boxes,
             "prep": None,
             "keep_mask": None,
-            "gap_mask": None,
             "marks": {},
             "say": lambda _line="": None,
         } | overrides
@@ -779,7 +771,7 @@ class TestTheDriverBranch:
         )
         outs = [call["args"][4] for call in client.calls]
         assert all(out.keep.shape == (40, 40) for out in outs)
-        assert all(out.hot_dn is not None for out in outs)
+        assert all(out.cut for out in outs)
 
     def test_the_engine_flag_defaults_to_the_graph(self):
         import shard_lst_p95

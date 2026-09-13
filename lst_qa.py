@@ -24,6 +24,14 @@ does with the result afterwards.
 
 An unrepresentable composite becomes nodata, never a clipped DN. Clipping
 -124 C to -49.99 C replaces a visible gap with a believable cold pixel.
+
+The composite carries two rules of its own, and `supported_output` is both.
+An observation that passed every rule above can still produce a percentile no
+consumer should read. `destripe.subtract_offsets` runs after the range check
+and moves the decoded value, so the per-observation bound does not survive to
+the output; Delhi ships 207 pixels at or above 80 C. And a pixel observed four
+times over five years has an order statistic over four scenes rather than a
+five-year 95th percentile, however plausible the number looks.
 """
 
 from __future__ import annotations
@@ -86,6 +94,39 @@ LST_MAX_DN = 65535
 LST_MIN_TRUSTED_DN = 2
 #: The bottom of the DN 2 bucket. Anything colder is recorded as missing.
 LST_MIN_TRUSTED_C = LST_OFFSET + LST_MIN_TRUSTED_DN * LST_SCALE  # -49.98
+
+# --------------------------------------------------------------------------
+# Output plausibility. These bound the composite, not an observation, and
+# `composite.reduce_block` applies them where the percentile and the monthly
+# counts already sit together.
+# --------------------------------------------------------------------------
+
+#: Clear observations a pixel needs over the five years before its P95 is an
+#: estimate rather than an order statistic over a handful of scenes.
+#:
+#: Empirical, and deliberately at the conservative end. MEASURED over the five
+#: audited tiles, a floor of 5 removes 0.0003% of N30E075, 0.0005% of S30W065,
+#: 0.0069% of N40W080, 0.597% of N00E110, and 0.804% of S25E030 of valid land.
+#: Median total observations run from 56 on N00E110 to 160 on N40W080, so the
+#: floor cuts a thin tail. Higher floors stop doing that: 50 removes 39% of
+#: N00E110, whose median is 56.
+MIN_TOTAL_OBSERVATIONS = 5
+
+#: The coldest five-year hot-season P95 worth publishing over land.
+#:
+#: Sparse evidence, not cold ground, is what reaches below it. MEASURED: the
+#: published N00E110 minimum is -39.82 C and the published S25E030 minimum is
+#: -0.25 C, and the observation floor alone lifts them to 19.96 C and 9.84 C.
+#: The bound is the second line, for a sparse pixel the floor lets through.
+LST_OUTPUT_MIN_C = -20.0
+
+#: The hottest land surface temperature this product will publish.
+#:
+#: The same number as `LST_VALID_MAX_C`, applied a second time because the
+#: first application cannot hold. `destripe.subtract_offsets` shifts a decoded
+#: value after `in_trusted_range` has passed it, and MEASURED on N30E075, 207
+#: pixels reach the output at or above 80 C.
+LST_OUTPUT_MAX_C = 80.0
 
 
 # --------------------------------------------------------------------------
@@ -160,6 +201,30 @@ def encodable_dn(dn):
     import numpy as np
 
     return np.isfinite(dn) & (dn >= LST_MIN_TRUSTED_DN) & (dn <= LST_MAX_DN)
+
+
+def supported_output(celsius, total_observations):
+    """True where the composite rests on enough evidence and is possible.
+
+    Both bounds are inclusive: -20.00 C and 80.00 C are temperatures, and the
+    pixel a step beyond either is not. `MIN_TOTAL_OBSERVATIONS` is the same, so
+    a pixel observed exactly five times survives.
+
+    `total_observations` is the sum of the twelve published `qa_count` bands, so
+    a consumer reading the product can recompute this rule from the product.
+
+    Args:
+        celsius: the composite, float. NaN fails.
+        total_observations: clear observations behind each pixel, integer.
+    """
+    import numpy as np
+
+    return (
+        np.isfinite(celsius)
+        & (total_observations >= MIN_TOTAL_OBSERVATIONS)
+        & (celsius >= LST_OUTPUT_MIN_C)
+        & (celsius <= LST_OUTPUT_MAX_C)
+    )
 
 
 # --------------------------------------------------------------------------

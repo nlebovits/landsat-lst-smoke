@@ -2124,6 +2124,101 @@ which are 10.5% of a gap cell's pixels.
 count layer stays the evidence behind every surviving p95. Over water the pixel
 was never this product's subject, so both bands go.
 
+#### The pair rule is withdrawn, and two unconditional rules replace it
+
+MEASURED on five tiles by `lst-tiles/replay.py` and `lst-tiles/obsfloor.py`,
+which read the published COG pairs and regenerate nothing.
+
+The pair does not reach the damage. On N30E075, 207 published pixels sit at or
+above 80 C and every one of them falls outside the GED gap region and its
+one-cell buffer, so the rule that was supposed to catch failed retrievals
+caught none of these. The region is now reported and masks nothing, and two
+rules that read the composite replaced it. `lst_qa.supported_output` holds
+both, and `composite.reduce_block` applies them where the percentile and the
+monthly counts already sit together, so neither costs a pass over the raster.
+
+`MIN_TOTAL_OBSERVATIONS = 5` is the evidence rule. A five-year P95 over four
+scenes is an order statistic over four scenes.
+
+| tile | valid land px | removed by the floor | share | min before | min after |
+|---|---|---|---|---|---|
+| S30W065 | 323,914,511 | 1,538 | 0.0005% | 8.79 | 8.95 |
+| N40W080 | 307,034,620 | 21,295 | 0.0069% | -8.74 | -1.94 |
+| S25E030 | 143,220,334 | 1,150,754 | 0.8035% | -0.25 | 9.84 |
+| N30E075 | 323,972,085 | 923 | 0.0003% | 15.88 | 19.68 |
+| N00E110 | 127,831,046 | 762,564 | 0.5965% | -39.82 | 19.96 |
+
+A higher floor costs more and buys nothing. MEASURED on N00E110, whose median
+is 56 observations: a floor of 10 removes 0.81%, of 25 removes 2.57%, and of 50
+removes 39.03%. S30W065, N40W080 and N30E075 have medians of 140 to 160, so
+their sparse pixels are a thin tail and the floor removes well under a
+hundredth of a percent of each.
+
+`LST_OUTPUT_MIN_C = -20.0` and `LST_OUTPUT_MAX_C = 80.0` are the plausibility
+rule, inclusive at both ends. The ceiling repeats `LST_VALID_MAX_C`, which the
+per-observation rule already applies, because the first application does not
+survive: `destripe.subtract_offsets` shifts a decoded value after
+`lst_qa.in_trusted_range` has passed it. MEASURED on N30E075, the bound removes
+205 pixels and takes the tile maximum from 82.99 C to 80.00 C. A pixel reading
+exactly 80.00 C stays, which is what inclusive means, and N30E075 holds two.
+
+The cold bound removes nothing on any of the five tiles once the floor has run,
+and it is kept as a second line for a sparse pixel the floor lets through.
+
+`qa_count` is untouched by either rule. It is the only evidence a consumer has
+for which rule removed a pixel: a count of 1 to 4 beside nodata is the floor, a
+count above it is a bound, and a count of 0 is the water rule, which zeroes
+both bands together.
+
+Read the table under two limits. `replay.py` applies the rules to the rounded
+output DN and `reduce_block` applies them to float32 Celsius, so a pixel sitting
+exactly on a bound can differ by one DN step between the two. And the published
+COGs already had the pair rule applied, so the replay cannot show the in-gap
+pixels between 70 C and 80 C that withdrawing the pair restores.
+
+#### The pixels between 60 C and 80 C, and the ceiling that keeps them
+
+MEASURED by `lst-tiles/hotpx.py` and `lst-tiles/profile.py` on the five
+published tiles. The pixels above 60 C are a thin tail everywhere: 0.0169% of
+N30E075, 0.0025% of S30W065, 0.0013% of N40W080, 0.0009% of N00E110, and
+0.0001% of S25E030.
+
+None of the explanations the pipeline could offer for them holds. They are well
+observed, at a median of 190 observations on N30E075 and 116 on S30W065. Their
+feather weight sum is 1.000, so they are not the pooled-fallback pixels at a
+swath edge. Their distribution over swath coverage matches the tile's own on
+every tile, so no WRS path is enriched.
+
+Two populations, separated by the radial profile of the ground around them.
+Broad hot ground decays with distance, in median C by ring:
+
+| centre | 0-0.5 km | 1-2 km | 4-8 km | 8-28 km |
+|---|---|---|---|---|
+| 25.15 N 76.04 E, Rajasthan | 59.0 | 58.9 | 57.6 | 56.0 |
+| 39.16 N 76.73 W, Baltimore | 43.0 | 38.8 | 38.9 | 36.8 |
+| 3.66 S 114.62 E, S. Kalimantan | 43.4 | 40.0 | 38.0 | 37.5 |
+
+Isolated spikes do not decay at all. At 28.87 N 76.04 E the 1 km core has a
+median of 51.6 C against a 28 km median of 51.2 C, and a core p95 of 70.1 C. At
+31.35 S 63.00 W the core median is 45.9 C against 45.0 C, with a core p95 of
+69.6 C, and the radial medians read 45.8, 45.1, 44.8, 44.9, 44.8, 44.9.
+
+A P95 over N observations is near the 0.05N-th hottest value, so a P95 of 70 C
+behind 190 observations needs about ten separate observations at or above 70 C
+over five years. A one-off artifact cannot reach that, whatever its
+source. The pixel has to be hot repeatedly, and persistent sub-pixel thermal
+sources are what fits: 28.87 N 76.04 E is the Haryana brick-kiln belt and
+3.66 S 114.62 E is the South Kalimantan coal field.
+
+So the ceiling stays at 80 C. A 60 C ceiling would cost under 0.02% of every
+tile and would also delete rural Rajasthan, 56 C over 28 km of it.
+Setting a ceiling from these five tiles would repeat the mistake the pair rule
+made on one, and the hottest ground on Earth lies outside all five.
+
+UNKNOWN: the ground truth of the isolated spikes. A VIIRS active-fire or gas
+flare inventory read against their coordinates would confirm or refute the
+sub-pixel source, and nothing in this repository can.
+
 #### The mask goes on once, in the client
 
 The run builds it before staging and applies it after the gather. It depends on
@@ -2715,6 +2810,15 @@ records the same count for one that would rather read a file.
 
 ## Corrections to earlier versions of this document
 
+
+**The emissivity pair rule was priced on the one tile that flattered it.**
+Every number behind `>= 70 C AND GED gap` came from S30W065, where the gap
+region and the hot tail do overlap. Four more tiles say they usually do not. On
+N30E075 the region and its buffer contain none of the 207 pixels at or above
+80 C, so the rule removed none of them, and the tile published 82.99 C as its
+maximum.
+The pricing was right about S30W065 and wrong as a rule. The threshold is now
+unconditional and the region removes nothing.
 
 **A benchmark run with the mask off validated an engine that fails with it on.**
 The 8x8 window comparison that established `--engine fused` and `--engine graph`

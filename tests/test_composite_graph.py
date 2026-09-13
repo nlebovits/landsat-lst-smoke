@@ -35,6 +35,7 @@ from lst_qa import (  # noqa: E402
     LST_SCALE,
     LWIR_OFFSET_C,
     LWIR_SCALE,
+    MIN_TOTAL_OBSERVATIONS,
     encode_celsius,
     masked_celsius,
 )
@@ -568,30 +569,53 @@ class TestTheFinish:
         np.testing.assert_array_equal(lst, computed(out)["lst_p95"].values)
         np.testing.assert_array_equal(qa, computed(out)["qa_count"].values)
         assert flags["valid"] == int((lst != LST_NODATA_DN).sum())
-        assert flags["removed_water"] == flags["removed_hot"] == flags["qa_zeroed"] == 0
+        assert flags["removed_water"] == flags["qa_zeroed"] == 0
 
-    def test_water_removes_both_rasters_and_the_gap_removes_only_hot(
-        self, fake_load, tmp_path
-    ):
+    def test_water_removes_both_rasters(self, fake_load, tmp_path):
         keep = np.ones((NY, NX), dtype=bool)
         keep[3, :] = False  # the last row is sea
-        gap = np.zeros((NY, NX), dtype=bool)
-        gap[0, :] = True  # the first row is inside the ASTER gap region
-        _, flags, lst, qa = self._finish(
-            tmp_path,
-            keep_mask=keep,
-            gap_mask=gap,
-            hot_dn=to_dn(30.0),  # the fixture's clear pixels reach 44 C
-        )
+        _, flags, lst, qa = self._finish(tmp_path, keep_mask=keep)
         assert (lst[3, :] == LST_NODATA_DN).all()
         assert qa[:, 3, :].sum() == 0
-        assert (lst[0, :] == LST_NODATA_DN).all()
-        assert qa[:, 0, 0].sum() == N_TIME  # the gap rule leaves the counts alone
         # Row 3 is clear in every scene, so the water rule removes all of it.
         assert flags["removed_water"] == NX
-        assert flags["removed_hot"] == NX
         assert flags["qa_zeroed"] == NX
         assert flags["valid"] == int((lst != LST_NODATA_DN).sum())
+        # Everything else survives. The fixture's clear pixels carry 8 to 10
+        # observations at 18 C to 44 C, which is inside every output rule.
+        assert (lst[:3, 0] != LST_NODATA_DN).all()
+
+    def test_the_flags_no_longer_carry_the_withdrawn_gap_rule(self):
+        # `staging_writes` takes no gap plane and no threshold, because the
+        # pair rule the two fed is gone. `lst_qa.supported_output` replaced it,
+        # and `reduce_block` has already applied it by the time a block
+        # reaches the finish.
+        import inspect
+
+        names = inspect.signature(composite.staging_writes).parameters
+        assert "gap_mask" not in names
+        assert "hot_dn" not in names
+        assert "removed_hot" not in composite.FLAGS
+
+    def test_a_sparse_pixel_is_nodata_through_the_whole_graph(
+        self, fake_load, tmp_path
+    ):
+        """The observation floor, end to end rather than in the kernel alone.
+
+        `tests/test_output_validity.py` proves `reduce_block` applies the rule.
+        This proves nothing between the kernel and the written COG puts the
+        pixel back, and that `qa_count` reaches the file with the evidence
+        still in it.
+        """
+        _, _, lst, qa = self._finish(tmp_path)
+        total = qa.sum(axis=0)
+        # Pixel (1, 1) is source fill in every scene, so it has no evidence at
+        # all and no temperature. Every other pixel of the fixture carries 8 or
+        # more observations and keeps its value.
+        assert total[1, 1] == 0
+        assert lst[1, 1] == LST_NODATA_DN
+        assert (total[total > 0] >= MIN_TOTAL_OBSERVATIONS).all()
+        assert (lst[total >= MIN_TOTAL_OBSERVATIONS] != LST_NODATA_DN).all()
 
     def test_the_counts_are_one_dataarray(self, fake_load, tmp_path):
         out = graph([{} for _ in range(N_TIME)])
