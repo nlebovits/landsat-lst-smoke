@@ -789,3 +789,76 @@ class TestTheDriverBranch:
             shard_lst_p95.parse_args(["--tile", "S30W065", "--engine", "fused"]).engine
             == "fused"
         )
+
+
+# --------------------------------------------------------------------------
+# The block memory model, and which engine pays the tile's time axis
+# --------------------------------------------------------------------------
+
+
+class TestTheMemoryModel:
+    """The loaded term is the block's depth on one engine and the tile on the
+    other, and the guard refuses on whichever the run will actually pay.
+
+    MEASURED over five whole tiles at 48 fused slots: 58.01 to 64.70 GiB. The
+    fused model puts them at 90.7 to 92.6 GiB. Charging the time axis put them
+    at 152.6 to 184.6 GiB and made the prediction a function of the tile, which
+    is what these tests pin.
+    """
+
+    def depths(self):
+        items, boxes = walk_items(400, TILE_BBOX)
+        return composite.block_depths(TILE_BBOX, PPD, 360, boxes), len(items)
+
+    def test_the_fused_demand_ignores_the_tiles_scene_count(self):
+        depths, n = self.depths()
+        near = composite.memory_demand(360, n, depths, 48, fused=True)
+        far = composite.memory_demand(360, n * 10, depths, 48, fused=True)
+        assert near == far
+
+    def test_the_graph_demand_scales_with_the_tiles_scene_count(self):
+        """And by exactly the loaded term, which is what `open_stack` holds."""
+        depths, n = self.depths()
+        near = composite.memory_demand(360, n, depths, 48)
+        far = composite.memory_demand(360, n * 2, depths, 48)
+        extra = 48 * 360 * 360 * n * composite.LOADED_BYTES_PER_PIXEL_SCENE
+        assert far - near == pytest.approx(extra / composite.GIB)
+
+    def test_fused_never_demands_more_than_graph(self):
+        depths, n = self.depths()
+        fused = composite.memory_demand(360, n, depths, 48, fused=True)
+        graph = composite.memory_demand(360, n, depths, 48)
+        assert fused < graph
+        # The fused engine reads only the block's own scenes, so the loaded
+        # term collapses from the time axis to the depth.
+        assert fused == pytest.approx(
+            sum(
+                composite.block_bytes(360, d, d)
+                for d in sorted(depths.ravel().tolist(), reverse=True)[:48]
+            )
+        )
+
+    def test_the_guard_refuses_on_the_engine_it_was_given(self):
+        depths, n = self.depths()
+        fused = composite.memory_demand(360, n, depths, 48, fused=True)
+        machine = int((fused + 1) * 1024**3)
+
+        assert composite.memory_guard(
+            360, n, depths, 48, total_bytes=machine, fused=True
+        ) == pytest.approx(fused)
+        with pytest.raises(SystemExit):
+            composite.memory_guard(360, n, depths, 48, total_bytes=machine)
+
+    def test_a_block_pays_its_own_depth_twice_under_fusion(self):
+        chunk, depth = 360, 800
+        got = composite.block_bytes(chunk, depth, depth)
+        want = (
+            chunk
+            * chunk
+            * depth
+            * (
+                composite.LOADED_BYTES_PER_PIXEL_SCENE
+                + composite.PRESENT_BYTES_PER_PIXEL_SCENE
+            )
+        ) / composite.GIB + composite.FIXED_GIB
+        assert got == pytest.approx(want)

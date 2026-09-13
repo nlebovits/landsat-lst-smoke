@@ -25,10 +25,18 @@ DataArray the run computes. Nothing larger than one block returns to the
 driver, and nothing is written to disk except those two files and the COGs
 made from them.
 
-    memory per block, DERIVED, to be checked against the first measured run:
-        chunk^2 x n_scenes  x 4 B   the two uint16 bands dask holds
+    memory per block, DERIVED, and the loaded term differs by engine:
+        chunk^2 x n_loaded  x 4 B   the two uint16 bands the block holds
       + chunk^2 x n_present x 13 B  the decoded stack and its reduction
-    360 px, 4,776 scenes, 820 present: 2.5 GB + 1.4 GB = 3.9 GB
+    graph: n_loaded is the tile's time axis, because `open_stack` opens it.
+    fused: n_loaded is the block's own depth, because `read_block` reads it.
+    360 px, 820 present: graph at 4,776 scenes 2.5 + 1.4 = 3.9 GB;
+    fused 0.4 + 1.4 = 1.8 GB.
+
+    MEASURED over five whole tiles at 48 fused slots: 58.01 to 64.70 GiB. The
+    fused model puts the same five at 90.7 to 92.6 GiB, flat the way the
+    measurement is flat. Charging the time axis put them at 152.6 to
+    184.6 GiB, and made the prediction a function of the tile.
 
 That graph's one remaining cost scales with the tile's time axis rather than
 with what a block reads. `odc.stac.load` puts two open tasks per item into it
@@ -85,8 +93,7 @@ LOADED_BYTES_PER_PIXEL_SCENE = 4
 #: Bytes per pixel-scene of the decoded work on the scenes present in a block:
 #: celsius float32, valid bool, the sort copy the percentile makes, and the two
 #: uint16 subsets `reduce_block` cuts before decoding. MEASURED at 15 for the
-#: shard path, whose loaded bands were already the subset; the 4 loaded bytes
-#: above are counted at full depth instead.
+#: shard path, whose loaded bands were already the subset.
 PRESENT_BYTES_PER_PIXEL_SCENE = 13
 
 #: Per-worker overhead outside the arrays, in GiB. From the shard measurement.
@@ -178,20 +185,45 @@ def block_depths(bbox, pixels_per_degree: int, chunk: int, item_bboxes):
     return (rows.astype("int64") @ cols.astype("int64").T).astype("int64")
 
 
-def block_bytes(chunk: int, n_scenes: int, n_present: int) -> float:
-    """Peak working set of one block, in GiB. DERIVED; see the module docstring."""
-    loaded = chunk * chunk * n_scenes * LOADED_BYTES_PER_PIXEL_SCENE
+def block_bytes(chunk: int, n_loaded: int, n_present: int) -> float:
+    """Peak working set of one block, in GiB. DERIVED; see the module docstring.
+
+    `n_loaded` is how many scenes the block holds as loaded uint16 bands, and
+    the two engines differ on it. `open_stack` opens the tile's whole time axis
+    and every block of the dask array carries it, so the graph engine loads
+    `n_scenes`. `fused_block` calls `read_block` with `block.item_indices`, so
+    the fused engine loads the block's own depth and nothing else.
+
+    `n_present` is the block's depth either way: it prices the decoded work,
+    which only ever runs on the scenes that reach the block.
+    """
+    loaded = chunk * chunk * n_loaded * LOADED_BYTES_PER_PIXEL_SCENE
     present = chunk * chunk * n_present * PRESENT_BYTES_PER_PIXEL_SCENE
     return (loaded + present) / GIB + FIXED_GIB
 
 
-def memory_demand(chunk: int, n_scenes: int, depths, slots: int) -> float:
-    """What `slots` concurrent blocks need at the deepest blocks, in GiB."""
+def memory_demand(
+    chunk: int, n_scenes: int, depths, slots: int, *, fused=False
+) -> float:
+    """What `slots` concurrent blocks need at the deepest blocks, in GiB.
+
+    `fused` charges each block its own depth for the loaded bands rather than
+    the tile's time axis. MEASURED over five whole tiles at 48 slots, the
+    difference is the whole shape of the model: charging the time axis made
+    demand a function of the tile and predicted 152.6 to 184.6 GiB against a
+    measured 58.01 to 64.70 GiB, a 2.36x to 3.18x spread. Charging the block's
+    depth predicts 90.7 to 92.6 GiB over the same five, which is flat the way
+    the measurement is flat, and 1.42x to 1.56x above it. A guard wants that
+    margin. It does not want the tile's scene count in a term the engine never
+    pays.
+    """
     deepest = sorted(np.asarray(depths).ravel().tolist(), reverse=True)[:slots]
-    return sum(block_bytes(chunk, n_scenes, d) for d in deepest)
+    return sum(block_bytes(chunk, d if fused else n_scenes, d) for d in deepest)
 
 
-def memory_guard(chunk, n_scenes, depths, slots, *, total_bytes=None) -> float:
+def memory_guard(
+    chunk, n_scenes, depths, slots, *, total_bytes=None, fused=False
+) -> float:
     """Refuse a configuration that cannot fit, before the cluster starts.
 
     Returns the demand in GiB so the caller can report what it checked.
@@ -203,7 +235,7 @@ def memory_guard(chunk, n_scenes, depths, slots, *, total_bytes=None) -> float:
         import psutil
 
         total_bytes = psutil.virtual_memory().total
-    demand = memory_demand(chunk, n_scenes, depths, slots)
+    demand = memory_demand(chunk, n_scenes, depths, slots, fused=fused)
     total = total_bytes / GIB
     if demand <= total:
         return demand

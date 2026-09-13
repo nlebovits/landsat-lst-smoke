@@ -831,18 +831,29 @@ def _dry_run(args, bbox, height, width, say) -> int:
     cols = -(-width // chunk)
     say(f"blocks        {rows * cols}  of {chunk}x{chunk} px ({rows} x {cols})")
     slots = args.workers * args.threads_per_worker
-    say(f"\nnaive budget across {slots} slots, DERIVED from the block model:")
+    fused = args.engine == "fused"
+    say(
+        f"\nnaive budget across {slots} slots, DERIVED from the block model, "
+        f"engine {args.engine}:"
+    )
     for n, present in ((711, 200), (1765, 400), (4776, 820)):
-        per = composite.block_bytes(chunk, n, present)
+        per = composite.block_bytes(chunk, present if fused else n, present)
         total = per * slots
         verdict = ""
         if args.target_memory_gib:
             over = total - args.target_memory_gib
             verdict = f"   OVER by {over:.1f} GiB" if over > 0 else "   fits"
+        # The fused engine reads only a block's own scenes, so the tile's time
+        # axis prices nothing and printing it beside the depth would imply it
+        # does.
+        where = (
+            f"  at {present:>3} scenes per block:                 "
+            if fused
+            else f"  at {n:>5} scenes, {present:>3} present per block: "
+        )
         say(
-            f"  at {n:>5} scenes, {present:>3} present per block: "
-            f"{per:5.2f} GiB per block, {total:6.1f} GiB across {slots} slots"
-            f"{verdict}"
+            f"{where}{per:5.2f} GiB per block, "
+            f"{total:6.1f} GiB across {slots} slots{verdict}"
         )
     (args.out_dir / "blocks.json").write_text(
         json.dumps(
@@ -1099,11 +1110,15 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
     memory_demand_gib = None
     if not args.rehearse and not args.force:
         memory_demand_gib = composite.memory_guard(
-            args.chunk, len(item_dicts), depths, slots
+            args.chunk,
+            len(item_dicts),
+            depths,
+            slots,
+            fused=args.engine == "fused",
         )
         say(
             f"memory        {memory_demand_gib:.1f} GiB demanded across "
-            f"{slots} slots (DERIVED), fits"
+            f"{slots} slots ({args.engine}, DERIVED), fits"
         )
 
     sampler = MemorySampler(args.out_dir / "memory.csv", args.sample_interval)
