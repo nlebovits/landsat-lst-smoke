@@ -2176,6 +2176,49 @@ exactly on a bound can differ by one DN step between the two. And the published
 COGs already had the pair rule applied, so the replay cannot show the in-gap
 pixels between 70 C and 80 C that withdrawing the pair restores.
 
+#### The pixels between 60 C and 80 C, and the ceiling that keeps them
+
+MEASURED by `lst-tiles/hotpx.py` and `lst-tiles/profile.py` on the five
+published tiles. The pixels above 60 C are a thin tail everywhere: 0.0169% of
+N30E075, 0.0025% of S30W065, 0.0013% of N40W080, 0.0009% of N00E110, and
+0.0001% of S25E030.
+
+None of the explanations the pipeline could offer for them holds. They are well
+observed, at a median of 190 observations on N30E075 and 116 on S30W065. Their
+feather weight sum is 1.000, so they are not the pooled-fallback pixels at a
+swath edge. Their distribution over swath coverage matches the tile's own on
+every tile, so no WRS path is enriched.
+
+Two populations, separated by the radial profile of the ground around them.
+Broad hot ground decays with distance, in median C by ring:
+
+| centre | 0-0.5 km | 1-2 km | 4-8 km | 8-28 km |
+|---|---|---|---|---|
+| 25.15 N 76.04 E, Rajasthan | 59.0 | 58.9 | 57.6 | 56.0 |
+| 39.16 N 76.73 W, Baltimore | 43.0 | 38.8 | 38.9 | 36.8 |
+| 3.66 S 114.62 E, S. Kalimantan | 43.4 | 40.0 | 38.0 | 37.5 |
+
+Isolated spikes do not decay at all. At 28.87 N 76.04 E the 1 km core has a
+median of 51.6 C against a 28 km median of 51.2 C, and a core p95 of 70.1 C. At
+31.35 S 63.00 W the core median is 45.9 C against 45.0 C, with a core p95 of
+69.6 C, and the radial medians read 45.8, 45.1, 44.8, 44.9, 44.8, 44.9.
+
+A P95 over N observations is near the 0.05N-th hottest value, so a P95 of 70 C
+behind 190 observations needs about ten separate observations at or above 70 C
+over five years. A one-off artifact cannot reach that, whatever its
+source. The pixel has to be hot repeatedly, and persistent sub-pixel thermal
+sources are what fits: 28.87 N 76.04 E is the Haryana brick-kiln belt and
+3.66 S 114.62 E is the South Kalimantan coal field.
+
+So the ceiling stays at 80 C. A 60 C ceiling would cost under 0.02% of every
+tile and would also delete rural Rajasthan, 56 C over 28 km of it.
+Setting a ceiling from these five tiles would repeat the mistake the pair rule
+made on one, and the hottest ground on Earth lies outside all five.
+
+UNKNOWN: the ground truth of the isolated spikes. A VIIRS active-fire or gas
+flare inventory read against their coordinates would confirm or refute the
+sub-pixel source, and nothing in this repository can.
+
 #### The mask goes on once, in the client
 
 The run builds it before staging and applies it after the gather. It depends on

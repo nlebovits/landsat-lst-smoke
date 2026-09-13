@@ -127,8 +127,23 @@ pixel the floor lets through.
 The hot bound is the same number as the per-observation ceiling, applied again
 because the first application does not hold. `destripe.subtract_offsets` shifts
 a decoded value after `lst_qa.in_trusted_range` has passed it. MEASURED on
-N30E075, 205 published pixels sit above 80 C and the bound removes them, which
+N30E075, 205 published pixels read above 80 C and the bound removes them, which
 takes the tile maximum from 82.99 C to 80.00 C.
+
+The ceiling stays at 80 C on purpose, and the pixels between 60 C and 80 C
+that pass it were measured rather than assumed. Some are broad hot ground with
+a spatial gradient. MEASURED: rural Rajasthan holds 56 C across 28 km, and the
+Baltimore urban core and the South Kalimantan coal belt each decay by 5 C over
+8 km. The rest are isolated pixels 25 C above everything within a kilometre, on
+a flat radial profile, in the Haryana brick-kiln belt and industrial Cordoba.
+
+A P95 over N observations is near the 0.05N-th hottest value. These pixels have
+a median of 190 observations, so a P95 of 70 C needs about ten separate
+observations at or above 70 C across five years, which no one-off artifact can
+produce. Persistent sub-pixel thermal sources explain them. A 60 C ceiling would
+cost under 0.02% of every audited tile and would also delete rural Rajasthan.
+UNKNOWN: the ground truth of the isolated spikes. A VIIRS active-fire or gas
+flare inventory read against their coordinates would settle it.
 
 ### The ASTER GED gap region is reported, not masked
 
