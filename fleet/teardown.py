@@ -2,11 +2,16 @@
 # requires-python = ">=3.12,<3.15"
 # dependencies = []
 # ///
-"""Price a run, then terminate it. In that order, because the order matters.
+"""Terminate a run, then price it. In that order, because the order matters.
 
-A terminated instance stays queryable for about an hour, after which
-`LaunchTime` and `StateTransitionReason` are gone and its lifetime is
-unrecoverable. So the cost report runs first and its output is saved.
+`cost_report.py` reads `StateTransitionReason` for the end of an instance's
+life and excludes anything still running from its totals. Pricing first
+therefore reports only the instances that had already stopped: the first run of
+this script priced one of five and put $2.98 against a run that cost about
+$12.60.
+
+Terminating first fixes that, and the window is wide enough to allow it. AWS
+answers queries about a terminated instance for roughly an hour.
 
 Terminating is often refused for an agent by the permission layer. When that
 happens this prints the exact command for a human rather than leaving an
@@ -54,9 +59,53 @@ def main() -> int:
         print("no instances in the manifest")
         return 0
 
-    if not a.skip_cost:
-        report = a.manifest.with_suffix(".cost.txt")
-        argv = [
+    argv = terminate_argv(cfg, ids)
+    if a.dry_run:
+        print(" ".join(argv))
+        if not a.skip_cost:
+            print("\nthen the cost report, once every instance has stopped")
+        return 0
+
+    terminated = False
+    try:
+        subprocess.run(argv, check=True, capture_output=True, text=True)
+        print(f"terminated {len(ids)}: {' '.join(ids)}")
+        terminated = True
+    except (subprocess.CalledProcessError, PermissionError) as err:
+        print(
+            f"\nCould not terminate: {err}\n"
+            f"These instances are still billing. Run this yourself:\n\n"
+            f"  {' '.join(argv)}\n",
+            file=sys.stderr,
+        )
+
+    if a.skip_cost:
+        return 0 if terminated else 1
+
+    if terminated:
+        # `StateTransitionReason` carries the timestamp the report prices
+        # against, and it is not set the instant the call returns.
+        print("waiting for the instances to stop, so the report can price them")
+        subprocess.run(
+            [
+                "aws",
+                "ec2",
+                "wait",
+                "instance-terminated",
+                "--profile",
+                cfg["aws"]["profile"],
+                "--region",
+                cfg["aws"]["region"],
+                "--instance-ids",
+                *ids,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    report = a.manifest.with_suffix(".cost.txt")
+    out = subprocess.run(
+        [
             sys.executable,
             str(HERE.parent / "cost_report.py"),
             "--tag",
@@ -65,32 +114,16 @@ def main() -> int:
             cfg["aws"]["region"],
             "--profile",
             cfg["aws"]["profile"],
-        ]
-        print(
-            f"cost report first, the query window is about an hour after "
-            f"termination\n  {' '.join(argv)}"
-        )
-        if not a.dry_run:
-            out = subprocess.run(argv, capture_output=True, text=True)
-            report.write_text(out.stdout + out.stderr)
-            print(f"  saved {report}")
-
-    argv = terminate_argv(cfg, ids)
-    if a.dry_run:
-        print("\n" + " ".join(argv))
-        return 0
-    try:
-        subprocess.run(argv, check=True, capture_output=True, text=True)
-        print(f"terminated {len(ids)}: {' '.join(ids)}")
-        return 0
-    except (subprocess.CalledProcessError, PermissionError) as err:
-        print(
-            f"\nCould not terminate: {err}\n"
-            f"These instances are still billing. Run this yourself:\n\n"
-            f"  {' '.join(argv)}\n",
-            file=sys.stderr,
-        )
-        return 1
+        ],
+        capture_output=True,
+        text=True,
+    )
+    report.write_text(out.stdout + out.stderr)
+    print(f"cost report saved to {report}")
+    for line in out.stdout.splitlines():
+        if "TOTAL" in line or "subtotal" in line or "known lines" in line:
+            print(f"  {line.strip()}")
+    return 0 if terminated else 1
 
 
 if __name__ == "__main__":

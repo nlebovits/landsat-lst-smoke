@@ -48,6 +48,18 @@ mark setup_done
 
 nohup sar -o "$RUN/sar.bin" 5 > /dev/null 2>&1 &
 
+# A liveness signal, because the phases are long and silent. Staging runs about
+# 19 minutes between `prep_start` and `prep_done` and writes no marker, so a
+# watcher reading markers alone cannot tell a staging tile from a wedged one.
+# Appending rather than rewriting is deliberate: the uploader re-sends a file
+# whose size changed, and a rewritten timestamp is the same size every time.
+( while :; do
+    echo "BEAT $(date -u +%FT%TZ)" >> "$RUN/heartbeat.txt"
+    sleep 60
+  done ) > /dev/null 2>&1 &
+HEARTBEAT=$!
+trap 'kill $HEARTBEAT 2>/dev/null' EXIT
+
 # `--stage-dir` on the instance store, `--target-memory-gib` so a configuration
 # that cannot fit stops before the fetch, `--stage-threads 128` because MEASURED
 # staging runs at 321 MB/s there against 233 at the default 64.

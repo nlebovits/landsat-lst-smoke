@@ -7,6 +7,8 @@ was written after the rule was broken in production.
 
 from __future__ import annotations
 
+import json
+
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -282,3 +284,137 @@ class TestTheOneOffAssertionIsGone:
         """`git grep -n "cut: bool = False"` was an assertion for a single
         2026-09-13 change, hardcoded into the general launcher."""
         assert "cut: bool = False" not in (ROOT / "fleet" / "run.sh").read_text()
+
+
+class TestTheHeartbeatSeparatesSilenceFromTrouble:
+    """The first run of the watcher called a healthy tile `hung`.
+
+    Staging runs about 19 minutes between `prep_start` and `prep_done` and
+    writes no marker, so a window sized against markers must either accuse a
+    working tile or be widened until it reports nothing. `run.sh` now appends
+    to `heartbeat.txt` every 60 seconds and the window is sized against that.
+    """
+
+    NOW = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+
+    def at(self, minutes_ago):
+        return (self.NOW - timedelta(minutes=minutes_ago)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+    def test_a_long_silent_phase_with_a_fresh_beat_is_running(self):
+        """The exact false positive from 2026-09-14: N40W080, 16 minutes into
+        staging, reported `hung` while it was staging 381 GB normally."""
+        s = watch.classify(
+            "T",
+            f"MARKER prep_start rc=0 {self.at(16)}",
+            False,
+            True,
+            self.NOW,
+            heartbeat=f"BEAT {self.at(1)}",
+        )
+        assert s.status == "running"
+
+    def test_a_stopped_beat_is_hung(self):
+        s = watch.classify(
+            "T",
+            f"MARKER prep_start rc=0 {self.at(16)}",
+            False,
+            True,
+            self.NOW,
+            heartbeat=f"BEAT {self.at(9)}",
+        )
+        assert s.status == "hung"
+
+    def test_without_a_heartbeat_it_falls_back_to_the_marker(self):
+        """An older run, or one whose heartbeat died with the shell."""
+        s = watch.classify(
+            "T",
+            f"MARKER prep_start rc=0 {self.at(16)}",
+            False,
+            True,
+            self.NOW,
+        )
+        assert (s.status, "marker" in s.detail) == ("hung", True)
+
+    def test_it_reads_the_last_beat_not_the_first(self):
+        text = "\n".join(f"BEAT {self.at(m)}" for m in (30, 20, 10, 1))
+        assert watch.last_beat(text) == self.NOW - timedelta(minutes=1)
+
+    def test_a_malformed_beat_is_skipped(self):
+        assert watch.last_beat("BEAT nonsense\nnoise\n") is None
+
+    def test_run_sh_appends_rather_than_rewrites(self):
+        """The uploader re-sends a file whose size changed. A rewritten
+        timestamp is the same size every time and would never be uploaded."""
+        script = (ROOT / "fleet" / "run.sh").read_text()
+        assert '>> "$RUN/heartbeat.txt"' in script
+
+
+class TestTheWatcherSurvivesAnExpiredToken:
+    """An expired SSO token took down the whole poll on 2026-09-14, including
+    the object-storage half, which uses a static key that does not expire.
+    """
+
+    NOW = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+
+    def test_not_knowing_is_a_third_answer(self):
+        marker = f"MARKER prep_start rc=0 {(self.NOW - timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        s = watch.classify("T", marker, False, None, self.NOW)
+        assert s.status == "running"
+        assert "instance state unknown" in s.detail
+
+    def test_a_known_dead_instance_is_still_gone(self):
+        marker = f"MARKER prep_start rc=0 {(self.NOW - timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        assert watch.classify("T", marker, False, False, self.NOW).status == "gone"
+
+    def test_an_ec2_failure_returns_none_rather_than_raising(self):
+        class Broken:
+            def describe_instances(self, **kw):
+                raise RuntimeError("UnauthorizedSSOTokenError")
+
+        assert watch.running_instances(Broken(), ["i-1"]) is None
+
+    def test_no_instances_is_an_empty_set_not_unknown(self):
+        assert watch.running_instances(None, []) == set()
+
+
+class TestTeardownTerminatesBeforeItPrices:
+    """`cost_report.py` excludes instances that are still running. Pricing
+    first reported one instance of five and put $2.98 against a run that cost
+    about $12.60.
+    """
+
+    def test_the_dry_run_names_the_terminate_first(self, tmp_path, cfg):
+        manifest = tmp_path / "run.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "run_id": "x",
+                    "commit": SHA,
+                    "config": cfg,
+                    "instances": [{"tile": "T", "name": "n", "instance_id": "i-1"}],
+                }
+            )
+        )
+        import subprocess as sp
+
+        out = sp.run(
+            [
+                sys.executable,
+                str(ROOT / "fleet" / "teardown.py"),
+                "--manifest",
+                str(manifest),
+                "--dry-run",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert out.index("terminate-instances") < out.index("cost report")
+
+    def test_it_waits_for_the_state_to_settle(self):
+        """`StateTransitionReason` carries the timestamp the report prices
+        against, and it is not set the instant the call returns."""
+        source = (ROOT / "fleet" / "teardown.py").read_text()
+        assert "instance-terminated" in source

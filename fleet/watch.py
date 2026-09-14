@@ -31,7 +31,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-STALL = timedelta(minutes=12)
+#: How long a tile may go without any sign of life before it reads `hung`.
+#:
+#: The signal is `heartbeat.txt`, which `run.sh` appends to every 60 seconds,
+#: not the phase markers. MEASURED, staging runs about 19 minutes between
+#: `prep_start` and `prep_done` and writes no marker at all, so a window sized
+#: against markers either calls a healthy tile hung or has to be widened until
+#: it reports nothing useful. The first run of this watcher did the former.
+STALL = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -65,20 +72,38 @@ def parse_markers(text: str) -> list[tuple[str, int, datetime]]:
     return out
 
 
+def last_beat(text: str | None) -> datetime | None:
+    """The most recent `BEAT <iso8601>` line, or None if there is no heartbeat."""
+    for line in reversed((text or "").splitlines()):
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "BEAT":
+            try:
+                return datetime.fromisoformat(parts[1].replace("Z", "+00:00"))
+            except ValueError:
+                continue
+    return None
+
+
 def classify(
     tile: str,
     markers: str | None,
     complete: bool,
-    instance_alive: bool,
+    instance_alive: bool | None,
     now: datetime,
+    heartbeat: str | None = None,
     stall: timedelta = STALL,
 ) -> State:
-    """One tile's state. Pure, so the interesting cases have tests."""
+    """One tile's state. Pure, so the interesting cases have tests.
+
+    `instance_alive` is None when nobody could ask. An expired SSO token took
+    the whole poll down on the first run, including the object-storage half
+    that was working, so not knowing is a third answer rather than an error.
+    """
     if complete:
         return State(tile, "uploaded", "finished", "manifest complete")
     events = parse_markers(markers or "")
     if not events:
-        if not instance_alive:
+        if instance_alive is False:
             return State(tile, "-", "gone", "no instance and no markers")
         return State(tile, "-", "starting", "no markers yet")
     phase, rc, when = events[-1]
@@ -86,14 +111,45 @@ def classify(
         return State(tile, phase, "failed", f"rc={rc}")
     if phase == "all_done":
         return State(tile, phase, "finished", "waiting on upload")
-    if not instance_alive:
+    if instance_alive is False:
         return State(tile, phase, "gone", "instance ended before all_done")
-    idle = now - when
-    if idle > stall:
-        return State(
-            tile, phase, "hung", f"no marker for {int(idle.total_seconds() // 60)} min"
+    beat = last_beat(heartbeat)
+    if beat and beat > when:
+        since, source = now - beat, "beat"
+    else:
+        since, source = now - when, "marker"
+    unknown = " (instance state unknown)" if instance_alive is None else ""
+    minutes = int(since.total_seconds() // 60)
+    if since > stall:
+        return State(tile, phase, "hung", f"no {source} for {minutes} min{unknown}")
+    return State(
+        tile, phase, "running", f"{int(since.total_seconds())}s since {source}{unknown}"
+    )
+
+
+def running_instances(ec2, ids: list[str]) -> set[str] | None:
+    """Which of `ids` are alive, or None when nobody could ask.
+
+    An expired SSO token must not take down the markers. Those come from object
+    storage on a separate, static key that does not expire, and on the first
+    run of this watcher the EC2 half took the whole poll down with it.
+    """
+    if not ids:
+        return set()
+    try:
+        desc = ec2.describe_instances(InstanceIds=ids)
+    except Exception as err:  # noqa: BLE001  not knowing is an answer
+        print(
+            f"# cannot reach EC2, reporting from markers only: {type(err).__name__}",
+            flush=True,
         )
-    return State(tile, phase, "running", f"{int(idle.total_seconds())}s since marker")
+        return None
+    return {
+        i["InstanceId"]
+        for r in desc["Reservations"]
+        for i in r["Instances"]
+        if i["State"]["Name"] in ("pending", "running")
+    }
 
 
 def main() -> int:
@@ -128,14 +184,9 @@ def main() -> int:
             return None
 
     while True:
-        ids = [e["instance_id"] for e in run["instances"] if e.get("instance_id")]
-        alive = set()
-        if ids:
-            desc = ec2.describe_instances(InstanceIds=ids)
-            for r in desc["Reservations"]:
-                for i in r["Instances"]:
-                    if i["State"]["Name"] in ("pending", "running"):
-                        alive.add(i["InstanceId"])
+        alive = running_instances(
+            ec2, [e["instance_id"] for e in run["instances"] if e.get("instance_id")]
+        )
         now = datetime.now(timezone.utc)
         states = []
         for e in run["instances"]:
@@ -145,8 +196,9 @@ def main() -> int:
                     e["tile"],
                     fetch(f"{prefix}/markers.txt"),
                     fetch(f"{prefix}/_MANIFEST.json") is not None,
-                    e.get("instance_id") in alive,
+                    None if alive is None else e.get("instance_id") in alive,
                     now,
+                    heartbeat=fetch(f"{prefix}/heartbeat.txt"),
                 )
             )
         stamp = now.strftime("%H:%M:%SZ")
