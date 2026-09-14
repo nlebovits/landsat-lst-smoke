@@ -711,6 +711,33 @@ def _window_label(start: str, end: str) -> str:
 # --------------------------------------------------------------------------
 
 
+def coverage_properties(coverage: dict[str, Any] | None) -> dict[str, Any]:
+    """The item's own coverage, as properties a reader can filter on.
+
+    A nodata `lst_p95` pixel carries no reason with it, and the three reasons
+    differ: water was never this product's subject, an emissivity gap is a
+    failed retrieval, and empty land is cloud. Only the last scales with the
+    window, and on a cloudy tile it dominates. MEASURED, `N00E110` returns
+    45.2% of its land empty and nothing in its raster says so.
+
+    `lst:ged_gap_fraction` is the share of this tile's land inside an ASTER GED
+    gap, which is ground a second instrument also lost to cloud two decades
+    earlier. MEASURED over five tiles, land pixels with no clear observation
+    that fall outside a gap number 0 of 289,580 on `N40W080`, 0 of 35,754,489
+    on `S25E030`, and 5,895 of 105,608,892 on `N00E110`. It ranks tiles by how
+    much product to expect. It is not calibrated to predict a percentage.
+    """
+    if not coverage:
+        return {}
+    return {
+        "lst:land_pixels": int(coverage["land_pixels"]),
+        "lst:valid_pixels": int(coverage["valid_pixels"]),
+        "lst:empty_land_pixels": int(coverage["empty_land_pixels"]),
+        "lst:valid_fraction": round(float(coverage["valid_fraction"]), 6),
+        "lst:ged_gap_fraction": round(float(coverage["ged_gap_fraction"]), 6),
+    }
+
+
 def build_item(
     item_id: str,
     bbox,
@@ -722,6 +749,7 @@ def build_item(
     crs: str,
     mask_rule: dict[str, Any] | None = None,
     correction_rule: dict[str, Any] | None = None,
+    coverage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The tile item: one footprint, one acquisition window, two COGs.
 
@@ -769,6 +797,7 @@ def build_item(
             "end_datetime": _rfc3339(end),
             "proj:code": crs,
             "renders": _renders([{"assets": assets}]),
+            **coverage_properties(coverage),
             **lineage,
         },
         "assets": assets,
@@ -1046,17 +1075,43 @@ def _root_readme(collection_id: str) -> str:
     )
 
 
-def _tile_list(item_ids: list[str]) -> str:
-    """The collection's tiles, as a Markdown list of their item documents."""
-    return "".join(
-        f"- [`{item_id}`](./{item_id}/{item_id}.json)\n" for item_id in item_ids
-    )
+def _tile_list(items: list[dict[str, Any]]) -> str:
+    """The collection's tiles, with how much of each one carries a temperature.
+
+    Rebuilt from the items on disk every time a tile is written, so the table
+    describes the collection as it stands rather than as it was first written.
+    A tile published before `lst:valid_fraction` existed shows a dash rather
+    than a zero, because the two mean different things.
+    """
+    rows = [
+        "| Tile | Land with a temperature | Empty land pixels | Land in an "
+        "ASTER GED gap |",
+        "|---|---|---|---|",
+    ]
+    for item in items:
+        item_id = item["id"]
+        props = item.get("properties", {})
+        link = f"[`{item_id}`](./{item_id}/{item_id}.json)"
+        if "lst:valid_fraction" not in props:
+            rows.append(f"| {link} | — | — | — |")
+            continue
+        rows.append(
+            f"| {link} | {props['lst:valid_fraction'] * 100:.1f}% | "
+            f"{props['lst:empty_land_pixels']:,} | "
+            f"{props['lst:ged_gap_fraction'] * 100:.1f}% |"
+        )
+    return "\n".join(rows) + "\n"
 
 
 def _collection_readme(
-    collection_id: str, item_ids: list[str], start: str, end: str, license_id: str
+    collection_id: str,
+    items: list[dict[str, Any]],
+    start: str,
+    end: str,
+    license_id: str,
 ) -> str:
-    item_id = item_ids[0]
+    item_id = items[0]["id"]
+    item_ids = [item["id"] for item in items]
     return (
         "# Landsat P95 Land Surface Temperature Composite\n\n"
         "The 95th percentile of clear-sky land surface temperature over "
@@ -1065,7 +1120,7 @@ def _collection_readme(
         "## Tiles\n\n"
         f"One item per tile of the degree grid, {len(item_ids)} so far. Each "
         "item carries both assets for its own footprint.\n\n"
-        f"{_tile_list(item_ids)}\n"
+        f"{_tile_list(items)}\n"
         "## Assets\n\n"
         "| Asset | Name | Dtype | Scale | Offset | Nodata | Units |\n"
         "|---|---|---|---|---|---|---|\n"
@@ -1083,6 +1138,23 @@ def _collection_readme(
         "Only the first would improve with a wider window. Each item's "
         "`processing:lineage` states the rules that produced its pixels and "
         "names the artifacts they read by checksum.\n\n"
+        "### Cloud decides how much of a tile exists\n\n"
+        "Over persistent cloud a five-year window returns nothing to "
+        "composite. This is not a rule the pipeline applies. It is the absence "
+        "of a clear observation, and no compositing rule recovers a pixel "
+        "nothing ever saw. The table above gives each tile's share, and "
+        f"`{QA_ASSET_KEY}` gives it per pixel: its twelve bands sum to the "
+        "evidence behind each value.\n\n"
+        "MEASURED over five tiles, land with no clear observation in 2021 to "
+        "2025 ran from 27,915 pixels on `N30E075` to 105,608,892 on "
+        "`N00E110`, which is 45.2% of that tile's land.\n\n"
+        "`lst:ged_gap_fraction` ranks tiles by how much to expect. A gap cell "
+        "is ground ASTER caught no clear sky over between 2000 and 2008, and "
+        "Landsat loses the same ground to the same cloud. MEASURED, land "
+        "pixels with no clear observation that fall outside a gap number 0 of "
+        "289,580 on `N40W080`, 0 of 35,754,489 on `S25E030`, and 5,895 of "
+        "105,608,892 on `N00E110`. It is a ranking, not a calibrated "
+        "prediction: the two share a cause, not a ratio.\n\n"
         "### Two tiles are not always comparable\n\n"
         "A tile may be built with a WRS seam correction, which shifts every "
         "scene to its own calendar-month median before the percentile. That "
@@ -1580,6 +1652,7 @@ def write_catalog(
         crs=crs,
         mask_rule=meta.get("mask_rule"),
         correction_rule=meta.get("correction_rule"),
+        coverage=meta.get("coverage"),
     )
     _dump(item_dir / f"{item_id}.json", item)
 
@@ -1613,7 +1686,7 @@ def write_catalog(
         bound[:10] for bound in collection["extent"]["temporal"]["interval"][0]
     )
     (collection_dir / "README.md").write_text(
-        _collection_readme(collection_id, item_ids, start, end, license_id)
+        _collection_readme(collection_id, ordered, start, end, license_id)
     )
     (collection_dir / "AGENTS.md").write_text(_agents_md(collection_id, item_ids))
     (root / "README.md").write_text(_root_readme(collection_id))

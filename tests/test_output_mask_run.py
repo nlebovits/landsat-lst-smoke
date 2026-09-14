@@ -455,3 +455,46 @@ class TestTheEscapeHatchAndTheGuards:
         )
         assert code == 0
         assert "blocks.json" in capsys.readouterr().out
+
+
+class TestTheCoverageSummary:
+    """`shard_lst_p95.coverage` divides land, not the raster.
+
+    Sea was never this product's subject, so counting it as missing coverage
+    would say `S25E030` is 44% valid when 80% of its land carries a
+    temperature. The denominator is the land the water rule kept.
+    """
+
+    def counts(self, **over):
+        base = {
+            "pixels_total": 1_000,
+            "pixels_water": 400,
+            "pixels_kept": 600,
+            "pixels_emissivity_gap_on_land": 150,
+        }
+        return base | over
+
+    def stats(self, kept):
+        return [{"kept": kept, "total": 1_000}]
+
+    def test_land_is_the_denominator_not_the_raster(self):
+        out = shard_lst_p95.coverage(self.counts(), self.stats(480))
+        assert out is not None
+        assert out["land_pixels"] == 600
+        assert out["valid_fraction"] == pytest.approx(0.8)
+        assert out["empty_land_pixels"] == 120
+
+    def test_the_gap_fraction_is_also_a_share_of_land(self):
+        out = shard_lst_p95.coverage(self.counts(), self.stats(480))
+        assert out is not None
+        assert out["ged_gap_fraction"] == pytest.approx(0.25)
+
+    def test_it_returns_none_when_no_mask_ran(self):
+        """`--no-output-mask` leaves no land count, and a coverage figure
+        without one would divide by the raster and understate every coastal
+        tile."""
+        assert shard_lst_p95.coverage(None, self.stats(480)) is None
+
+    def test_it_returns_none_on_a_tile_with_no_land(self):
+        out = shard_lst_p95.coverage(self.counts(pixels_kept=0), self.stats(0))
+        assert out is None
