@@ -504,7 +504,14 @@ class TestCorrected:
         prep = prep_for(uncovered_cols=1)
         out = computed(graph(items, prep=prep))
         want_dn, _, want_fallback = oracle(stack, items, prep, uncovered_cols=1)
-        assert int(out["fallback"].sum()) == NY
+        # The subject: no swath reaches column 0, so all of it takes the
+        # fallback. The count is a lower bound, not an equality. This fixture
+        # is ten scenes deep, so a covered pixel can also fall back when a
+        # path holds fewer than DESTRIPE_MIN_PATH_OBSERVATIONS there. The
+        # oracle runs that same rule, so the array comparison below is what
+        # pins the behaviour.
+        assert out["fallback"].values[:, 0].all()
+        assert int(out["fallback"].sum()) >= NY
         np.testing.assert_array_equal(out["fallback"].values, want_fallback)
         np.testing.assert_array_equal(out["lst_p95"].values, want_dn)
 

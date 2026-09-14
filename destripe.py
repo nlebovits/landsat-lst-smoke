@@ -78,6 +78,32 @@ DESTRIPE_MIN_SCENE_PIXELS = 500
 #: share against this floor on a real tile, the way the cap was swept.
 DESTRIPE_MIN_PREP_SAMPLES = 200
 
+#: Valid observations one WRS path needs at a pixel before its own percentile
+#: may carry that path's geometric weight there.
+#:
+#: `path_weights` splits the blend on swath geometry alone. Geometry says a
+#: path covers ground it barely images: a WRS scene is a rotated parallelogram
+#: inside a much larger product bounding rectangle, so at a tile's edge a path
+#: can own the cross-fade on ground almost none of its scenes reach.
+#:
+#: MEASURED on N40W080, block rows 720-1080 cols 17640-18000, rebuilt from its
+#: 765 scenes and reproduced against the published COG to 0 DN. Path 013 holds
+#: weight 0.983 over 98.4% of that block on a median of **1** valid observation
+#: per pixel, while path 014 carries a median of 159 and holds 0.001. The
+#: published block reads 11.45 C. Its neighbours read 33.8 to 39.1 C.
+#:
+#: The value is not a measured optimum. Every floor from 3 to 20 gives the same
+#: answer on every block tried, because the paths that should hold weight carry
+#: 86 to 172 observations and the one that should not carries 1. It is set to
+#: `lst_qa.MIN_TOTAL_OBSERVATIONS` so that one number means one thing: five
+#: clear observations is what it takes to have an opinion, whether the opinion
+#: is a path's about a pixel or the product's about publishing it.
+#:
+#: Cost, MEASURED on three blocks each rebuilt and gated at 0 DN: the defect
+#: block moves +26.29 C over 96.0% of its pixels. A well-observed control block
+#: and a mostly uncovered block move 0.00 C over 0.0% of theirs.
+DESTRIPE_MIN_PATH_OBSERVATIONS = 5
+
 #: Width of one anomaly histogram bin, in Celsius. This is the output encoding
 #: step (`lst_qa.LST_SCALE`), so a median read off the histogram is exact to the
 #: quantisation the product already carries.
@@ -785,9 +811,12 @@ def feathered_percentile(celsius, path_of_scene, paths, weight, q=95.0):
     the two paths' distributions, which is why it jumps where one path's
     coverage stops.
 
-    A path covering a pixel but observing nothing there drops out of that
+    A path covering a pixel but observing too little there drops out of that
     pixel's blend and the remaining paths renormalise, so a thin path cannot
-    pull a value toward nodata.
+    pull a value toward nodata. Too little is
+    `DESTRIPE_MIN_PATH_OBSERVATIONS`, because geometry alone cannot tell a path
+    that images a pixel from one whose product bounding rectangle merely covers
+    it.
 
     A pixel no swath covers falls back to the pooled percentile of whatever
     observed it. A swath is the ground at least `SWATH_QUAD_SHARE` of a quad's
@@ -826,7 +855,10 @@ def feathered_percentile(celsius, path_of_scene, paths, weight, q=95.0):
         if not sel.any():
             continue
         subset = celsius[sel]
-        present = np.isfinite(subset).any(axis=0)
+        # Evidence, not just presence. A path with one valid observation used
+        # to clear this test and take its full geometric weight, outvoting a
+        # path with two hundred whose own weight is zero there.
+        present = np.isfinite(subset).sum(axis=0) >= DESTRIPE_MIN_PATH_OBSERVATIONS
         if not present.any():
             continue
         with np.errstate(all="ignore"):
