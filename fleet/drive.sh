@@ -60,7 +60,7 @@ ssh_run "export PATH=\$HOME/.local/bin:\$PATH
     --prefix $RUNS/$NAME --profile $UPROF \
     > /mnt/nvme/run/upload.log 2>&1 < /dev/null &"
 
-ssh_run "export ART_URI=$ART
+ssh_run "export ART_URI=$ART PREP_ONLY=${PREP_ONLY:-}
   setsid nohup /home/ubuntu/run.sh $TILE $COMMIT \
     > /mnt/nvme/run/nohup.log 2>&1 < /dev/null &"
 sleep 8

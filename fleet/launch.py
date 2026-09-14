@@ -154,9 +154,21 @@ def run_instances_argv(cfg: dict, name: str, tile: str, user_data: Path) -> list
 
 
 def aws(argv: list[str]) -> str:
-    return subprocess.run(
-        argv, check=True, capture_output=True, text=True
-    ).stdout.strip()
+    """One AWS call, with its error message intact.
+
+    `check=True` under `capture_output` raises a `CalledProcessError` whose
+    text is the argv and nothing else, so the reason a call failed is lost
+    exactly when it is needed. A dry run validates the request but not capacity
+    or quota, so the message is often the only way to tell a malformed call
+    from a full region. Twice on 2026-09-14 this swallowed the answer.
+    """
+    out = subprocess.run(argv, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit(
+            f"aws {' '.join(argv[1:3])} failed with {out.returncode}:\n"
+            f"{out.stderr.strip() or out.stdout.strip()}"
+        )
+    return out.stdout.strip()
 
 
 def launch_one(

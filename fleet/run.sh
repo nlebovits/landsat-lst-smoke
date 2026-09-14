@@ -73,6 +73,16 @@ uv run tile_prep.py --tile "$TILE" \
 RC=$?; mark prep_done $RC; [ $RC -eq 0 ] || exit $RC
 test -f "$RUN/prep/tile-prep.npz" || die no_prep_artifact 1
 
+# A prep-only run answers questions about the offsets without paying for the
+# composite. The seam between two adjacent tiles is one: it is decided entirely
+# by how much a shared scene's offset differs between them, and both numbers
+# are in `tile-prep.npz`.
+if [ "${PREP_ONLY:-}" = "1" ]; then
+  mark all_done 0
+  echo "prep only, stopping before the composite"
+  exit 0
+fi
+
 # Four flags whose defaults are wrong for an instance. `--engine fused` is not
 # the default and changes both the speed and the memory model. `--tile-prep`
 # omitted composites the pooled percentile and leaves the WRS seam in a
