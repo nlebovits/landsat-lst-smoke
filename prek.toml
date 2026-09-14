@@ -157,7 +157,7 @@ hooks = [
   {
     id = "ty",
     name = "ty type check",
-    entry = "uv run ty check --extra-search-path . --extra-search-path tests",
+    entry = "uv run ty check --extra-search-path . --extra-search-path tests --extra-search-path fleet",
     language = "system",
     types = ["python"],
     pass_filenames = false,
