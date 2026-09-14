@@ -189,3 +189,43 @@ MEASURED on five blocks, each reproducing the published product at a floor of
 one. The defect block moves to 37.74 C. The seam falls from 60.9 times the
 background gradient to 1.16, the ratio ordinary terrain shows. A well-observed
 control block, a mostly uncovered block, and one on N00E110 each move 0.00 C.
+
+### Cloud decides how much of a tile exists
+
+Over persistent cloud a five-year window returns nothing to composite. This is
+not a rule this repository applies. It is the absence of a clear observation,
+and no compositing rule recovers a pixel nothing ever saw.
+
+MEASURED across the five audited tiles, land pixels with no clear observation
+in 2021 to 2025:
+
+| tile | place | land pixels | no clear observation |
+|---|---|---|---|
+| `N30E075` | Delhi, north India | 324,000,000 | 27,915, 0.009% |
+| `S30W065` | interior Argentina | 324,000,000 | 85,489, 0.03% |
+| `N40W080` | Philadelphia, Pennsylvania | 307,324,200 | 289,580, 0.09% |
+| `S25E030` | Durban, South Africa | 178,974,823 | 35,754,489, 20.0% |
+| `N00E110` | Borneo, Kalimantan | 233,439,938 | 105,608,892, **45.2%** |
+
+Read `qa_count` before reading a temperature. Its twelve bands sum to the
+evidence behind each pixel, and a tile can be 45% empty without any band of
+`lst_p95` saying so.
+
+The vertical stripes across `N00E110` are this, and not a seam. MEASURED on
+that tile, the column means of `lst_p95` step by 0.058 C between adjacent
+columns, and the horizontal gradient across a change of dominant WRS path is
+1.14 times the gradient elsewhere. The stripes are the nodata pattern showing
+through.
+
+ASTER GED predicts where this happens, which is useful before a run rather than
+after one. A GED gap cell is ground ASTER caught no clear sky over between 2000
+and 2008, and Landsat fails on the same ground for the same reason. MEASURED,
+land pixels with no clear observation that fall outside a GED gap: 0 of 289,580
+on `N40W080`, 0 of 35,754,489 on `S25E030`, 5,895 of 105,608,892 on `N00E110`,
+and 77 of 85,489 on `S30W065`. `N30E075` has no gap cells and also has almost
+no empty land, 27,915 pixels of 324 million. The gap is the wider mask: 78.7%
+of `N00E110`'s land sits in one against the 45.2% that came back empty.
+
+So `artifacts/aster_numobs.tif`, a static 43 MB global raster this repository
+already builds, bounds how much of a tile can exist before any scene is
+read.
