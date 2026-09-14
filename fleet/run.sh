@@ -24,12 +24,26 @@ git rev-parse HEAD | tee "$RUN/commit.txt"
 test "$(git rev-parse HEAD)" = "$COMMIT" || die commit_mismatch 1
 uv sync || die uv_sync $?
 
+# boto3 through `uv`, not the `aws` CLI. The AMI has no CLI installed, and
+# adding one is a second way to do what the run's own dependencies already do.
+# The artifacts prefix is public, so the download is unsigned and needs no
+# credentials at all.
 mkdir -p "$REPO/artifacts"
-for f in tile_scene_inventory.parquet land_tiles.parquet aster_numobs.tif \
-         aster_numobs_manifest.json land_buffered.gpkg land_buffered_sha256.txt; do
-  aws s3 cp --no-sign-request "$ART/$f" "$REPO/artifacts/$f" || die "artifact_$f" $?
-  echo "got $f $(stat -c %s "$REPO/artifacts/$f")"
-done
+uv run python - "$ART" "$REPO/artifacts" <<'PY' || die artifacts $?
+import sys, pathlib, boto3
+from botocore import UNSIGNED
+from botocore.config import Config
+
+uri, dest = sys.argv[1], pathlib.Path(sys.argv[2])
+bucket, _, prefix = uri.removeprefix("s3://").partition("/")
+s3 = boto3.client("s3", region_name="us-west-2", config=Config(signature_version=UNSIGNED))
+for name in ["tile_scene_inventory.parquet", "land_tiles.parquet",
+             "aster_numobs.tif", "aster_numobs_manifest.json",
+             "land_buffered.gpkg", "land_buffered_sha256.txt"]:
+    out = dest / name
+    s3.download_file(bucket, f"{prefix}/{name}", str(out))
+    print("got", name, out.stat().st_size, flush=True)
+PY
 mark setup_done
 
 nohup sar -o "$RUN/sar.bin" 5 > /dev/null 2>&1 &

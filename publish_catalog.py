@@ -48,6 +48,12 @@ sys.path.insert(0, str(REPO))
 import cog_catalog  # noqa: E402
 
 ITEM_FILES = ("lst_p95.tif", "qa_count.tif")
+
+#: A publish copies a prefix wholesale, so anything a run left behind becomes
+#: part of the published catalog. MEASURED on the 2026-09-14 run: two
+#: `qa_count.tif.ovr.tmp` files, one of them 199 MB, which GDAL wrote while
+#: building overviews and the uploader caught mid-write.
+COPY_EXCLUDE = ("*.tmp", "*.staging.tif", "*.lock")
 COLLECTION_FILES = (
     "collection.json",
     "items.parquet",
@@ -74,24 +80,36 @@ def split(uri: str) -> tuple[str, str]:
 def find_tiles(runs_uri: str, collection_id: str) -> dict[str, str]:
     """Each tile id under `runs_uri`, mapped to the item prefix that holds it.
 
-    A tile that ran twice appears under two run prefixes. The later one wins,
-    because `aws s3 ls --recursive` returns keys in lexical order and a run id
-    carries its timestamp.
+    A tile that ran more than once appears under more than one run prefix, and
+    the most recently written item wins.
+
+    The tie-break reads the object's own timestamp rather than sorting the run
+    ids. MEASURED on 2026-09-14: sorting by key chose `lst-tile-20260913-125234`
+    over `lst-S30W065-20260914-170047`, because an uppercase `S` precedes a
+    lowercase `t`. The run ids come from several eras and share no convention,
+    so their names carry no order. That would have published the tile this
+    day's work exists to replace.
     """
     listing = s3("ls", "--recursive", runs_uri.rstrip("/") + "/")
-    found: dict[str, str] = {}
+    found: dict[str, tuple[str, str]] = {}
     bucket, _ = split(runs_uri)
     marker = f"/catalog/{collection_id}/"
     for line in listing.splitlines():
-        key = line.split()[-1]
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        stamp, key = f"{fields[0]} {fields[1]}", fields[-1]
         if marker not in key or not key.endswith(".json"):
             continue
         tail = key.split(marker, 1)[1]
         parts = tail.split("/")
         if len(parts) != 2 or parts[1] != f"{parts[0]}.json":
             continue
-        found[parts[0]] = f"s3://{bucket}/{key.rsplit('/', 1)[0]}"
-    return dict(sorted(found.items()))
+        tile = parts[0]
+        prefix = f"s3://{bucket}/{key.rsplit('/', 1)[0]}"
+        if tile not in found or stamp > found[tile][0]:
+            found[tile] = (stamp, prefix)
+    return {tile: prefix for tile, (_, prefix) in sorted(found.items())}
 
 
 def existing(dest_uri: str) -> list[str]:
@@ -149,7 +167,10 @@ def cmd_copy(a) -> int:
     for tile, prefix in tiles.items():
         target = f"{a.dest.rstrip('/')}/{a.collection}/{tile}"
         print(f"{tile}: {prefix} -> {target}", flush=True)
-        s3("cp", prefix + "/", target + "/", "--recursive", capture=False)
+        argv = ["cp", prefix + "/", target + "/", "--recursive"]
+        for pattern in COPY_EXCLUDE:
+            argv += ["--exclude", pattern]
+        s3(*argv, capture=False)
     print(
         f"\n{len(tiles)} tile(s) copied. Run `finish` to rebuild the "
         f"collection from them."

@@ -22,7 +22,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_EXCLUDE = ("*.staging.tif", "*.lock", "stage/*")
+DEFAULT_EXCLUDE = ("*.staging.tif", "*.lock", "*.tmp", "stage/*")
 
 
 def wanted(rel: str, exclude=DEFAULT_EXCLUDE) -> bool:
@@ -33,6 +33,13 @@ def wanted(rel: str, exclude=DEFAULT_EXCLUDE) -> bool:
     `composite.cleanup_staging` deletes both on the success path, so they are
     an intermediate the bucket was storing as if it were a product: about 85%
     of every run's uploaded bytes.
+
+    `*.tmp` came from the first run that used this uploader. It polls every 30
+    seconds and caught GDAL part way through building overviews, so
+    `qa_count.tif.ovr.tmp` reached the bucket at 199 MB on one tile. GDAL then
+    renamed it away on the instance and the copy stayed. A publish copies a
+    prefix wholesale, so a temp file left here becomes a temp file in the
+    public catalog.
     """
     posix = Path(rel).as_posix()
     return not any(
