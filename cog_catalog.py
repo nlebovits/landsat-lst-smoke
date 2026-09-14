@@ -1605,6 +1605,75 @@ def _check_no_clash(collection_dir: Path, item_id: str, bbox: list[float]) -> No
         raise ValueError(msg)
 
 
+def rebuild_collection(
+    root: Path,
+    collection_id: str,
+    *,
+    host_name: str = DEFAULT_HOST_NAME,
+    host_url: str = DEFAULT_HOST_URL,
+    license_id: str = DEFAULT_LICENSE,
+    updated: str | None = None,
+    lst_uri=None,
+) -> Path:
+    """Everything the collection derives from its items, rebuilt from them.
+
+    The collection, the root catalog, the thumbnail, the item mirror, and both
+    Markdown files all describe every item under `root/collection_id`, not the
+    tile that happened to trigger the write. Splitting this out of
+    `write_catalog` lets a fleet reach the same tree: five instances each write
+    one item directory into one collection, and one call afterwards makes the
+    collection describe all five. `write_catalog` calls it too, so a one-tile
+    run and a five-tile merge run the same code.
+
+    `lst_uri` resolves an item id to the raster the thumbnail reads. It
+    defaults to the file beside the item, which is what a local write has. A
+    merge that publishes to object storage holds the item documents and leaves
+    the rasters remote, so it passes a resolver returning a `/vsis3` path and
+    moves no gigabytes to draw a 480 px preview.
+    """
+    collection_dir = Path(root) / collection_id
+    updated = updated or _now()
+    items = read_items(collection_dir)
+    item_ids = sorted(items)
+    ordered = [items[known] for known in item_ids]
+
+    # A separate name. Binding `lst_uri` here would make the parameter a local
+    # throughout the function, and the `is None` test above it would read an
+    # unbound variable.
+    resolve = lst_uri or (lambda item_id: collection_dir / item_id / LST_FILENAME)
+    thumbnail = render_thumbnail(
+        collection_dir / THUMBNAIL_FILENAME,
+        [(known["bbox"], resolve(known["id"])) for known in ordered],
+    )
+    mirror = write_item_mirror(collection_dir / MIRROR_FILENAME, ordered)
+    collection = build_collection(
+        collection_id,
+        ordered,
+        assets=_collection_assets(thumbnail, mirror),
+        host_name=host_name,
+        host_url=host_url,
+        license_id=license_id,
+        updated=updated,
+    )
+    _dump(collection_dir / "collection.json", collection)
+    _dump(root / "catalog.json", build_root_catalog(collection_id, updated=updated))
+
+    start, end = (
+        bound[:10] for bound in collection["extent"]["temporal"]["interval"][0]
+    )
+    (collection_dir / "README.md").write_text(
+        _collection_readme(collection_id, ordered, start, end, license_id)
+    )
+    (collection_dir / "AGENTS.md").write_text(
+        _agents_md(collection_id, [item["id"] for item in ordered])
+    )
+    (Path(root) / "README.md").write_text(_root_readme(collection_id))
+    (Path(root) / "AGENTS.md").write_text(
+        _agents_md(collection_id, [item["id"] for item in ordered])
+    )
+    return Path(root)
+
+
 def write_catalog(
     out_dir: Path,
     lst,
@@ -1658,37 +1727,12 @@ def write_catalog(
 
     # Read every item back, this one included, so the collection describes the
     # whole tree rather than the tile this call happened to write.
-    items = read_items(collection_dir)
-    item_ids = sorted(items)
-    ordered = [items[known] for known in item_ids]
-
-    thumbnail = render_thumbnail(
-        collection_dir / THUMBNAIL_FILENAME,
-        [
-            (known["bbox"], collection_dir / known["id"] / LST_FILENAME)
-            for known in ordered
-        ],
-    )
-    mirror = write_item_mirror(collection_dir / MIRROR_FILENAME, ordered)
-    collection = build_collection(
+    rebuild_collection(
+        root,
         collection_id,
-        ordered,
-        assets=_collection_assets(thumbnail, mirror),
         host_name=host_name,
         host_url=host_url,
         license_id=license_id,
         updated=updated,
     )
-    _dump(collection_dir / "collection.json", collection)
-    _dump(root / "catalog.json", build_root_catalog(collection_id, updated=updated))
-
-    start, end = (
-        bound[:10] for bound in collection["extent"]["temporal"]["interval"][0]
-    )
-    (collection_dir / "README.md").write_text(
-        _collection_readme(collection_id, ordered, start, end, license_id)
-    )
-    (collection_dir / "AGENTS.md").write_text(_agents_md(collection_id, item_ids))
-    (root / "README.md").write_text(_root_readme(collection_id))
-    (root / "AGENTS.md").write_text(_agents_md(collection_id, item_ids))
     return root

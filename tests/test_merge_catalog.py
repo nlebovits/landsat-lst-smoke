@@ -15,6 +15,7 @@ under `<out-dir>/rehearsal-scenes` and reads no object.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import composite  # noqa: E402
 import shard_lst_p95  # noqa: E402
+import cog_catalog  # noqa: E402
 from cog_catalog import collection_id_for_window, write_catalog  # noqa: E402
 
 BBOX = "-65.0,-32.5,-64.5,-32.0"
@@ -308,3 +310,63 @@ class TestOneCatalogForEveryTile:
 
         report = validate(two_tiles)
         assert not report.findings, "\n".join(f.message for f in report.findings)
+
+
+class TestRebuildingFromItemsAlone:
+    """A fleet reaches one collection by writing one item directory each.
+
+    One graph composites one tile, so the instance that ran it cannot describe
+    the others. `rebuild_collection` derives the collection from the items
+    present, which is what lets five single-item writes become one collection
+    without recompositing anything.
+    """
+
+    @pytest.fixture(scope="class")
+    def two_tiles(self, tmp_path_factory):
+        work = tmp_path_factory.mktemp("rebuild")
+        catalog = work / "catalog"
+        for name, bbox in (("a", BBOX), ("b", NEIGHBOUR_BBOX)):
+            assert (
+                run(work / f"tile-{name}", "--catalog-dir", str(catalog), bbox=bbox)
+                == 0
+            )
+        return catalog
+
+    def test_it_describes_every_item_present(self, two_tiles):
+        """Delete the collection, rebuild it, and it comes back describing
+        both tiles. Nothing recomposites and no raster is reread in full."""
+        collection = two_tiles / COLLECTION_ID / "collection.json"
+        collection.unlink()
+        cog_catalog.rebuild_collection(two_tiles, COLLECTION_ID)
+        rebuilt = json.loads(collection.read_text())
+        assert sum(1 for link in rebuilt["links"] if link["rel"] == "item") == 2
+        assert rebuilt["extent"]["spatial"]["bbox"][0][0] == -65.0
+
+    def test_the_merge_path_and_the_write_path_agree(self, two_tiles):
+        """`write_catalog` calls this function, so a one-tile run and a
+        five-tile merge cannot drift apart."""
+        collection = two_tiles / COLLECTION_ID / "collection.json"
+        before = json.loads(collection.read_text())
+        cog_catalog.rebuild_collection(two_tiles, COLLECTION_ID)
+        after = json.loads(collection.read_text())
+        for key in ("id", "extent", "stac_extensions", "title"):
+            assert after[key] == before[key]
+        assert [link["href"] for link in after["links"] if link["rel"] == "item"] == [
+            link["href"] for link in before["links"] if link["rel"] == "item"
+        ]
+
+    def test_the_thumbnail_raster_is_resolvable(self, two_tiles, tmp_path):
+        """`lst_uri` is what lets a publish leave the rasters on object storage
+        and still draw a preview. Redirecting it to copies under another name
+        proves the default is a choice rather than a hard-coded path."""
+        collection_dir = two_tiles / COLLECTION_ID
+        moved = tmp_path / "elsewhere"
+        moved.mkdir()
+        for item_dir in sorted(p for p in collection_dir.iterdir() if p.is_dir()):
+            source = item_dir / "lst_p95.tif"
+            shutil.copy(source, moved / f"{item_dir.name}.tif")
+            source.unlink()
+        cog_catalog.rebuild_collection(
+            two_tiles, COLLECTION_ID, lst_uri=lambda tile: moved / f"{tile}.tif"
+        )
+        assert (collection_dir / "thumbnail.png").stat().st_size > 0
