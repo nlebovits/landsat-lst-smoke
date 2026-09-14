@@ -887,3 +887,83 @@ class TestCoarseningAMaskOverAStack:
         assert got.shape == (3, 3)
         assert got[2, 2]
         assert got.sum() == 1
+
+
+class TestThePathEvidenceFloor:
+    """A path needs observations, not just geometry, to hold its weight.
+
+    The defect these cover, MEASURED on N40W080 block rows 720-1080 cols
+    17640-18000: path 013 held weight 0.983 over 98.4% of the block on a median
+    of one valid observation per pixel, while path 014 carried a median of 159
+    and held 0.001. The block published 11.45 C against 33.8 to 39.1 C next
+    door. A WRS scene is a rotated parallelogram inside a much larger product
+    bounding rectangle, so swath geometry credits a path with ground it barely
+    images.
+    """
+
+    COLD, WARM = 10.0, 40.0
+    EAST_ONLY = slice(36, WIDTH)
+
+    def stack(self, n_east_valid: int, n_scenes: int = 24):
+        """Both paths observe everywhere. Only the east path is starved.
+
+        `stack_and_labels` above blanks a scene outside its own swath, which is
+        the ordinary case. Here every scene reaches every pixel, so the east
+        path's weight is the only reason its handful of values decides the
+        east-only columns. That is the shape of the real defect.
+        """
+        labels = np.array([WEST, EAST] * (n_scenes // 2))
+        stack = np.full((n_scenes, HEIGHT, WIDTH), np.nan, dtype="float32")
+        seen = 0
+        for s in range(n_scenes):
+            if labels[s] == WEST:
+                stack[s] = self.WARM
+            elif seen < n_east_valid:
+                stack[s] = self.COLD
+                seen += 1
+        return stack, labels
+
+    def weights(self):
+        return destripe.path_weights(two_paths(), grid_transform(), factor=1)
+
+    def test_a_path_below_the_floor_loses_its_weight(self):
+        """Four observations, and the floor is five.
+
+        The counts are literals on purpose. Deriving them from the constant
+        would move the input whenever the constant moved, and the test would
+        pass at any floor including the one that ships the defect.
+        """
+        paths, weight, _ = self.weights()
+        assert destripe.DESTRIPE_MIN_PATH_OBSERVATIONS == 5
+        stack, labels = self.stack(n_east_valid=4)
+        out, _ = destripe.feathered_percentile(stack, labels, paths, weight)
+        east_only = out[:, self.EAST_ONLY]
+        assert np.isfinite(east_only).all()
+        assert east_only.min() > (self.COLD + self.WARM) / 2
+
+    def test_a_path_at_the_floor_keeps_its_weight(self):
+        """Five observations is enough. The bound is inclusive."""
+        paths, weight, _ = self.weights()
+        assert destripe.DESTRIPE_MIN_PATH_OBSERVATIONS == 5
+        stack, labels = self.stack(n_east_valid=5)
+        out, _ = destripe.feathered_percentile(stack, labels, paths, weight)
+        assert np.allclose(out[:, self.EAST_ONLY], self.COLD)
+
+    def test_the_floor_turns_no_observed_pixel_into_nodata(self):
+        paths, weight, _ = self.weights()
+        for n in range(0, 8):
+            stack, labels = self.stack(n_east_valid=n)
+            out, _ = destripe.feathered_percentile(stack, labels, paths, weight)
+            observed = np.isfinite(stack).any(axis=0)
+            assert np.isfinite(out[observed]).all(), n
+
+    def test_a_well_observed_stack_is_untouched_by_the_floor(self):
+        """The regression guard. Both paths clear the floor by a wide margin,
+        so every pixel must still equal its own path's percentile alone."""
+        stack, labels = TestTheFeatheredPercentile().stack_and_labels()
+        paths, weight, inside = destripe.path_weights(two_paths(), grid_transform())
+        out, _ = destripe.feathered_percentile(stack, labels, paths, weight)
+        for j, path in enumerate(paths):
+            single = (inside.sum(axis=0) == 1) & inside[j]
+            alone = destripe.pooled_percentile(stack[labels == path])
+            assert np.array_equal(out[single], alone[single])

@@ -166,8 +166,26 @@ pair reached none of them. The unconditional 80 C bound above replaced it.
 
 ### A cold wedge along WRS path 013 in N40W080
 
-Philadelphia carries a cold swath-edge artifact from path-specific feather
-weighting inside `destripe.feathered_percentile`. MEASURED on the tile's
-north-east wedge, the cold pixels there carry a median of 94 observations, so
-the evidence rule does not reach them and should not: they are well observed
-and wrongly weighted. The wedge is a separate defect with its own fix.
+Philadelphia carried a cold swath-edge artifact from path-specific feather
+weighting inside `destripe.feathered_percentile`. The pixels are well observed
+and wrongly weighted, so `MIN_TOTAL_OBSERVATIONS` does not reach them and
+should not. They carry a median of 94 observations. What decides the value is a
+different count, the observations one path contributes, and it comes from the
+scenes rather than from the product.
+
+MEASURED on one 360 by 360 block of that wedge, rebuilt from its own 765 scenes
+and reproduced against the published raster to 0 DN on all 129,600 pixels. Path
+013 took a weight of 0.983 over 98.4% of the block on a median of one valid
+observation per pixel. Path 014 contributed a median of 159 observations and
+took a weight of 0.001. The block published 11.45 C where its neighbours read
+33.8 to 39.1 C.
+
+`DESTRIPE_MIN_PATH_OBSERVATIONS` is the fix. A path needs five valid
+observations at a pixel before it takes that path's geometric weight there. A
+path below the floor drops out and the rest renormalise, which the blend already
+did for a path that observed nothing.
+
+MEASURED on five blocks, each reproducing the published product at a floor of
+one. The defect block moves to 37.74 C. The seam falls from 60.9 times the
+background gradient to 1.16, the ratio ordinary terrain shows. A well-observed
+control block, a mostly uncovered block, and one on N00E110 each move 0.00 C.
