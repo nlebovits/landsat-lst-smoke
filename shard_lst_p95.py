@@ -807,7 +807,46 @@ def correction_rule(args, prep) -> dict | None:
     }
 
 
-def run_meta(args, bbox, height, width, mask_rule_value, correction_rule_value) -> dict:
+def coverage(mask_counts, lst_statistics) -> dict | None:
+    """How much of the tile's land carries a temperature, and how much cloud
+    took. None under `--no-output-mask`, which leaves no land to divide by.
+
+    Every number here is already computed. `masks.apply_output_mask` returns
+    the land count and `composite.finish_staging` returns the valid count, so
+    this costs one division and puts both on the published item. Without it a
+    reader has to fetch a 350 to 640 MB `qa_count` to learn that a tile is
+    half empty.
+
+    `empty_land_pixels` is land the five-year window never saw clear. MEASURED
+    over five tiles it runs from 27,915 on N30E075 to 105,608,892 on N00E110,
+    which is 45.2% of that tile's land, and no compositing rule recovers any of
+    it.
+    """
+    if not mask_counts:
+        return None
+    land = int(mask_counts.get("pixels_kept") or 0)
+    if not land:
+        return None
+    valid = int(lst_statistics[0]["kept"])
+    gap_on_land = int(mask_counts.get("pixels_emissivity_gap_on_land") or 0)
+    return {
+        "land_pixels": land,
+        "valid_pixels": valid,
+        "empty_land_pixels": land - valid,
+        "valid_fraction": valid / land,
+        "ged_gap_fraction": gap_on_land / land,
+    }
+
+
+def run_meta(
+    args,
+    bbox,
+    height,
+    width,
+    mask_rule_value,
+    correction_rule_value,
+    coverage_value=None,
+) -> dict:
     """What the catalog needs to describe this tile. The former part-meta."""
     return {
         "raster": [height, width],
@@ -816,6 +855,7 @@ def run_meta(args, bbox, height, width, mask_rule_value, correction_rule_value) 
         "pixels_per_degree": args.pixels_per_degree,
         "chunk_px": args.chunk,
         "mask_rule": mask_rule_value,
+        "coverage": coverage_value,
         "correction_rule": correction_rule_value,
         "start": args.start,
         "end": args.end,
@@ -1262,6 +1302,7 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
             width,
             mask_rule(args, mask_counts, ged_provenance),
             correction_rule(args, prep),
+            coverage(mask_counts, lst_statistics),
         )
         catalog_root = None
         if args.no_catalog:

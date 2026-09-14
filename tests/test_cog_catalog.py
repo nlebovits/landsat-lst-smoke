@@ -958,3 +958,75 @@ class TestTheWindowIsNeverAssumed:
         assert provenance["start"] == "2021-01-01"
         assert provenance["end"] == "2025-12-31T23:59:59Z"
         assert provenance["lst_scale"] == LST_SCALE
+
+
+COVERAGE = {
+    "land_pixels": 356_400,
+    "valid_pixels": 352_836,
+    "empty_land_pixels": 3_564,
+    "valid_fraction": 352_836 / 356_400,
+    "ged_gap_fraction": 0.25,
+}
+
+
+class TestCoverageReachesTheItem:
+    """A nodata pixel carries no reason with it, so the item has to.
+
+    Without these properties a reader fetches a 350 to 640 MB `qa_count` to
+    learn that a tile is half empty. MEASURED, `N00E110` returns 45.2% of its
+    land empty and nothing in its raster says so.
+    """
+
+    def written(self, tmp_path, composite):
+        _celsius, lst, qa = composite
+        meta = meta_for(BBOX) | {"coverage": COVERAGE}
+        root = write_catalog(
+            tmp_path / "catalog", lst, qa, meta, collection_id=COLLECTION_ID
+        )
+        item = json.loads(
+            (root / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        readme = (root / COLLECTION_ID / "README.md").read_text()
+        return item, readme
+
+    def test_the_five_numbers_are_on_the_item(self, tmp_path, composite):
+        item, _ = self.written(tmp_path, composite)
+        props = item["properties"]
+        assert props["lst:land_pixels"] == 356_400
+        assert props["lst:valid_pixels"] == 352_836
+        assert props["lst:empty_land_pixels"] == 3_564
+        assert props["lst:valid_fraction"] == pytest.approx(0.99, abs=1e-4)
+        assert props["lst:ged_gap_fraction"] == pytest.approx(0.25)
+
+    def test_the_empty_count_is_the_difference(self, tmp_path, composite):
+        """The two counts and their difference travel together, so a reader
+        never has to trust one against the other."""
+        item, _ = self.written(tmp_path, composite)
+        p = item["properties"]
+        assert (
+            p["lst:land_pixels"] - p["lst:valid_pixels"] == p["lst:empty_land_pixels"]
+        )
+
+    def test_the_collection_readme_carries_the_tile_table(self, tmp_path, composite):
+        _item, readme = self.written(tmp_path, composite)
+        assert "| Tile | Land with a temperature |" in readme
+        assert "99.0%" in readme
+        assert "3,564" in readme
+        assert "Cloud decides how much of a tile exists" in readme
+
+    def test_a_tile_without_coverage_shows_a_dash_not_a_zero(self, tmp_path, composite):
+        """Absent and empty are different claims. A tile published before
+        these properties existed must not read as fully masked."""
+        _celsius, lst, qa = composite
+        root = write_catalog(
+            tmp_path / "catalog",
+            lst,
+            qa,
+            meta_for(BBOX),
+            collection_id=COLLECTION_ID,
+        )
+        item = json.loads(
+            (root / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
+        )
+        assert "lst:valid_fraction" not in item["properties"]
+        assert "| — | — | — |" in (root / COLLECTION_ID / "README.md").read_text()
