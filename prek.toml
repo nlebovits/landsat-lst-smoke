@@ -68,9 +68,10 @@ hooks = [
     # One directory, not a list of files. This used to name 22 modules, and the
     # same 22 were written again in .github/workflows/ci.yml with a comment
     # asking the next person to keep them in step. They did not stay in step:
-    # both copies omitted lst_qa, publish_catalog, stage_bench,
-    # measure_tile_seam and every fleet module, so none of those was ever
-    # checked for dead code. A package name cannot drift from itself.
+    # both copies omitted lst_qa, stage_bench, measure_tile_seam and every
+    # fleet module, so none of those was ever checked for dead code. main
+    # added `publish_catalog.py` to both lists while this branch was open,
+    # which is the drift happening again and the reason for the glob.
     args = ["src/lst", "fleet/upload.py", "--min-confidence", "80"],
     pass_filenames = false,
   },

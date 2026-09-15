@@ -465,6 +465,14 @@ def parse_args(argv=None):
         help="the buffered land geometry the pixel mask rasterises",
     )
     p.add_argument(
+        "--strict-land-geometry-uri",
+        type=Path,
+        default=masks.STRICT_LAND_GEOMETRY_URI,
+        help="the unbuffered land geometry the coverage counts divide by. It "
+        "masks nothing. Absent without error, and then the item carries the "
+        "two counts that need no land geometry and no share of land at all",
+    )
+    p.add_argument(
         "--no-output-mask",
         action="store_true",
         help="write every pixel the composite produced, including sea and "
@@ -679,6 +687,12 @@ def mask_rule(args, counts, ged_provenance=None) -> dict | None:
         "lst_output_max_c": lst_qa.LST_OUTPUT_MAX_C,
         "land_geometry_sha256": masks.geometry_checksum(args.land_geometry_uri),
     }
+    # The geometry that divides rather than masks. Recorded only when it was
+    # read, because a digest of a file a run never opened is a false claim.
+    if args.strict_land_geometry_uri.exists():
+        rule["strict_land_geometry_sha256"] = masks.geometry_checksum(
+            args.strict_land_geometry_uri
+        )
     if ged_provenance:
         rule["aster_ged"] = ged_provenance
     return rule
@@ -794,35 +808,16 @@ def correction_rule(args, prep) -> dict | None:
     }
 
 
-def coverage(mask_counts, lst_statistics) -> dict | None:
-    """How much of the tile's land carries a temperature, and how much cloud
-    took. None under `--no-output-mask`, which leaves no land to divide by.
+def coverage(mask_counts, lst_statistics, split=None, valid=None) -> dict | None:
+    """The coverage block for this run's item. `masks.coverage` owns the rule.
 
-    Every number here is already computed. `masks.apply_output_mask` returns
-    the land count and `composite.finish_staging` returns the valid count, so
-    this costs one division and puts both on the published item. Without it a
-    reader has to fetch a 350 to 640 MB `qa_count` to learn that a tile is
-    half empty.
-
-    `empty_land_pixels` is land the five-year window never saw clear. MEASURED
-    over five tiles it runs from 27,915 on N30E075 to 105,608,892 on N00E110,
-    which is 45.2% of that tile's land, and no compositing rule recovers any of
-    it.
+    Kept as a name here because this is where a run assembles what the catalog
+    records, and because the arithmetic has one home. It moved to `masks` when
+    the publish path became a second caller: `lst-publish-catalog recount`
+    rebuilds the same block from a published raster, and two copies of a
+    division are two answers waiting to disagree.
     """
-    if not mask_counts:
-        return None
-    land = int(mask_counts.get("pixels_kept") or 0)
-    if not land:
-        return None
-    valid = int(lst_statistics[0]["kept"])
-    gap_on_land = int(mask_counts.get("pixels_emissivity_gap_on_land") or 0)
-    return {
-        "land_pixels": land,
-        "valid_pixels": valid,
-        "empty_land_pixels": land - valid,
-        "valid_fraction": valid / land,
-        "ged_gap_fraction": gap_on_land / land,
-    }
+    return masks.coverage(mask_counts, lst_statistics, split=split, valid=valid)
 
 
 def run_meta(
@@ -1020,21 +1015,46 @@ def main(argv=None) -> int:  # noqa: C901
     # so a tile it empties can be recorded without staging a single object.
     ged_provenance = check_mask_inputs(args, say)
     keep = mask_counts = None
+    strict_land = land_split_counts = None
     if ged_provenance is not None:
         with observe.phase("masks", marks=marks):
             # The gap region is reported in `mask_counts` and removes nothing.
-            keep, _gap, mask_counts = masks.output_mask(
+            keep, gap, mask_counts = masks.output_mask(
                 bbox,
                 args.pixels_per_degree,
                 numobs_uri=args.numobs_uri,
                 land_geometry_uri=args.land_geometry_uri,
             )
+            # Land, which masks nothing and is what the coverage counts divide
+            # by. `keep` is handed over so the buffered geometry is rasterised
+            # once for both.
+            if args.strict_land_geometry_uri.exists():
+                strict_land, _, land_split_counts = masks.land_split(
+                    bbox,
+                    args.pixels_per_degree,
+                    strict_land_geometry_uri=args.strict_land_geometry_uri,
+                    processing=keep,
+                    gap=gap,
+                )
         say(
             f"              {mask_counts['pixels_kept'] / mask_counts['pixels_total']:.1%} "
-            f"of the tile is land: {mask_counts['pixels_water']:,} px sea, "
+            f"of the tile is inside the processing mask: "
+            f"{mask_counts['pixels_water']:,} px sea, "
             f"{mask_counts['pixels_emissivity_gap_on_land']:,} px inside the "
             f"ASTER gap region over land"
         )
+        if land_split_counts is None:
+            say(
+                f"              no strict land geometry at "
+                f"{args.strict_land_geometry_uri}; the item reports no share "
+                f"of land"
+            )
+        else:
+            say(
+                f"              {land_split_counts['pixels_strict_land']:,} px "
+                f"land, {land_split_counts['pixels_coastal_buffer']:,} px "
+                f"coastal buffer"
+            )
         if not mask_counts["pixels_kept"]:
             return no_unmasked_pixels(args, tile_id, bbox, mask_counts, ged_provenance)
 
@@ -1282,6 +1302,20 @@ def main(argv=None) -> int:  # noqa: C901
             descriptions=tuple(MONTH_NAMES),
             nodata=None,
         )
+        # Where the surviving values sit, land against coastal buffer. One
+        # strip scan of the local staging file, both regions in the same pass.
+        valid_counts = None
+        if strict_land is not None:
+            valid_counts = masks.count_valid_within(
+                staged_paths["lst_p95"],
+                LST_NODATA_DN,
+                land=strict_land,
+                coast=keep & ~strict_land,
+            )
+            say(
+                f"              {valid_counts['land']:,} px carry a value on "
+                f"land, {valid_counts['coast']:,} px in the coastal buffer"
+            )
         meta = run_meta(
             args,
             bbox,
@@ -1289,7 +1323,12 @@ def main(argv=None) -> int:  # noqa: C901
             width,
             mask_rule(args, mask_counts, ged_provenance),
             correction_rule(args, prep),
-            coverage(mask_counts, lst_statistics),
+            coverage(
+                mask_counts,
+                lst_statistics,
+                split=land_split_counts,
+                valid=valid_counts,
+            ),
         )
         catalog_root = None
         if args.no_catalog:

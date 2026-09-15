@@ -1,6 +1,6 @@
 """The two corrections, each tested against the defect it exists to remove.
 
-`destripe.py` carries claims that are cheap to state and expensive to get
+`lst.destripe` carries claims that are cheap to state and expensive to get
 wrong. Four of them decide whether the correction is honest:
 
 The offset is one scalar per scene, so subtracting it cannot move any pixel

@@ -44,6 +44,22 @@ the seam correction. Read `lst/composite.py`'s module docstring first.
   weights, masks, and statistics are lazy arrays or lazy reductions in the
   same graph.
 - Output is the two COGs. No `.npy`, no `.npz`, no part files, no merge.
+- Two land geometries, and only one of them masks. `artifacts/land_buffered.gpkg`
+  is Natural Earth grown by 25 km and it decides pixels.
+  `artifacts/land_strict.gpkg` is the same polygons unbuffered and it decides
+  nothing: every published share of land divides by it, through
+  `masks.land_split` and `masks.coverage`. MEASURED 2026-09-15 at 3600 pixels
+  per degree, `S40W065` is 73,254,945 pixels of mask and 45,407,126 of land, so
+  the two are not interchangeable. Never name a count `land` when it came from
+  the buffered geometry.
+- `qa_count` does not say whether a pixel was imaged. It counts observations
+  that passed `not_fill AND qa_clear AND in_trusted_range`, so a source fill and
+  a rejected observation both read zero. A scene bounding rectangle is not
+  evidence either: it describes a file, and MEASURED at 26.49 S 61.64 W, 60 of
+  60 source reads inside 295 overlapping footprints were fill. Splitting
+  `lst:empty_land_pixels` needs a source-presence reduction in
+  `composite.reduce_block`, and no arithmetic on the published rasters
+  substitutes for it.
 
 ## Measuring and reporting
 

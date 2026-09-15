@@ -10,7 +10,7 @@ is normally good for.
 
 Three explanations fit that shape and the run could not separate them, because
 one flag set all of them: the pool was smaller than the thread count, the
-connections were not reused, or the per-object overhead dominated. `staging.py`
+connections were not reused, or the per-object overhead dominated. `lst.staging`
 now has a knob per explanation. This runs one fixed sample once per setting and
 prints the throughput each produced, so the next fleet run is configured off a
 measurement rather than off the argument above.

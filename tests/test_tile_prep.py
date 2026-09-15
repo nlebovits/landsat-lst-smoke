@@ -522,7 +522,7 @@ class TestTheStagingThreadCount:
     """`tile_prep` stages the whole tile, and until now could not be told how.
 
     It called `staging.stage_scenes` with no thread argument, so every prep
-    took `min(64, 4 x cores)`. MEASURED by `stage_bench.py` on an
+    took `min(64, 4 x cores)`. MEASURED by `lst.measure.stage_bench` on an
     `m6id.16xlarge` over 200 objects: 64 threads 233 MB/s, 128 threads
     321 MB/s, 192 threads 293, 256 threads 277. Staging is about 45% of a
     tile's wall clock.

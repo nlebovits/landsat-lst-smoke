@@ -7,7 +7,7 @@ another year. So the sample is stratified rather than convenient, and the
 comparison is exact wherever exactness is available.
 
 One value has a tolerance, and only one: the acquisition centre. Two separate
-things separate it from the published one, and `measure_scene_centre.py`
+things separate it from the published one, and `lst.measure.scene_centre`
 measures each on its own, because timestamp precision in the bulk file is
 mixed. On the rows carrying microseconds the residual is a systematic 4.24 ms,
 which is the difference between two definitions of "scene centre". On the rows
@@ -49,7 +49,7 @@ pytestmark = [pytest.mark.network, pytest.mark.timeout(1800)]
 #: The bound on the gap between the computed centre and the published one,
 #: derived rather than sampled. Truncating start and stop to whole seconds
 #: moves their midpoint by strictly under 1 s, and the definitional offset
-#: measured on the untruncated rows adds 4.24 ms. `measure_scene_centre.py`
+#: measured on the untruncated rows adds 4.24 ms. `lst.measure.scene_centre`
 #: reports both; the worst it has seen is 0.89 s.
 DATETIME_TOLERANCE_S = 1.01
 

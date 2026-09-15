@@ -99,7 +99,7 @@ class TestTheCallCarriesWhatTeardownNeeds:
             assert value in argv, value
 
     def test_the_purpose_tag_is_the_one_cost_report_filters_on(self, cfg):
-        """`cost_report.py --tag Key=Value` is the only way a finished run gets
+        """`lst-cost-report --tag Key=Value` is the only way a finished run gets
         priced, and an untagged instance cannot be found by teardown either."""
         spec = launch.tag_spec(cfg, "lst-T-1", "T")
         assert f"{{Key=purpose,Value={cfg['tags']['purpose']}}}" in spec
@@ -385,7 +385,7 @@ class TestTheWatcherSurvivesAnExpiredToken:
 
 
 class TestTeardownTerminatesBeforeItPrices:
-    """`cost_report.py` excludes instances that are still running. Pricing
+    """`lst.fleet.cost_report` excludes instances that are still running. Pricing
     first reported one instance of five and put $2.98 against a run that cost
     about $12.60.
     """

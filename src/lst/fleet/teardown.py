@@ -1,6 +1,6 @@
 """Terminate a run, then price it. In that order, because the order matters.
 
-`cost_report.py` reads `StateTransitionReason` for the end of an instance's
+`lst.fleet.cost_report` reads `StateTransitionReason` for the end of an instance's
 life and excludes anything still running from its totals. Pricing first
 therefore reports only the instances that had already stopped: the first run of
 this script priced one of five and put $2.98 against a run that cost about

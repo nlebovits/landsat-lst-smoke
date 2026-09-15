@@ -15,7 +15,7 @@ the expensive way:
   instance exists. A key under a session scratchpad was cleared by a
   workstation restart while its instance kept running, and this account's role
   cannot call `ec2-instance-connect`, `ssm`, or the serial console.
-- Every instance carries the tags `cost_report.py --tag` needs. An untagged
+- Every instance carries the tags `lst-cost-report --tag` needs. An untagged
   instance cannot be priced and cannot be found by teardown.
 """
 

@@ -8,7 +8,7 @@ available.
 The multiplier is geometry. A 512 px block at 3600 px per degree covers about
 209 km². A Landsat scene covers 185 x 180 km, or 33,300 km². So about 155
 blocks touch each scene, and each one opens the file again, in a different
-worker process, with no shared cache. `measure_s3_requests.py` counts 4.77
+worker process, with no shared cache. `lst.measure.s3_requests` counts 4.77
 ranged GETs per open. The product is 739 requests per object, and across 895
 tiles it comes to about $1,822 against $807 to $928 of on-demand compute. The
 default 360 px block is smaller still, so it can only make the count worse.
@@ -924,7 +924,7 @@ class StagingRun:
 
         Objects, bytes, seconds, billable GETs, retries, how many objects were
         already on disk, the estimate the disk guard reserved, and the settings
-        that produced all of it. `cost_report.py --s3-get-requests` prices
+        that produced all of it. `lst-cost-report --s3-get-requests` prices
         `get_requests` directly, so these key names are an interface.
 
         `get_requests` and `retries` are counted separately rather than one

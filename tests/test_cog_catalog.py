@@ -957,12 +957,26 @@ class TestTheWindowIsNeverAssumed:
         assert provenance["lst_scale"] == LST_SCALE
 
 
+#: The coverage block of a tile whose processing mask reaches sea. Every count
+#: is a round share of `SIZE**2 = 360000`, so a wrong one reads as a number that
+#: is off rather than as noise. Land is 356,400 of a 360,000 mask, so the
+#: coastal buffer is 3,600.
 COVERAGE = {
     "land_pixels": 356_400,
     "valid_pixels": 352_836,
     "empty_land_pixels": 3_564,
     "valid_fraction": 352_836 / 356_400,
     "ged_gap_fraction": 0.25,
+    "coastal_buffer_pixels": 3_600,
+    "coastal_buffer_valid_pixels": 3_564,
+    "processing_mask_pixels": 360_000,
+}
+
+#: What a run with no strict land geometry reports: the two counts that need no
+#: land geometry, and no share of land at all.
+COVERAGE_WITHOUT_LAND = {
+    "processing_mask_pixels": 360_000,
+    "valid_pixels": 356_400,
 }
 
 
@@ -972,11 +986,17 @@ class TestCoverageReachesTheItem:
     Without these properties a reader fetches a 350 to 640 MB `qa_count` to
     learn that a tile is half empty. MEASURED, `N00E110` returns 45.2% of its
     land empty and nothing in its raster says so.
+
+    `lst:land_pixels` is land. It was the processing mask until 2026-09-15,
+    which is Natural Earth land grown by 25 km so a coastal scene is not cut at
+    the waterline, and every share of land divided by it. MEASURED at 3600
+    pixels per degree, that denominator is 73,254,945 on `S40W065` where the
+    land is 45,407,126.
     """
 
-    def written(self, tmp_path, composite):
+    def written(self, tmp_path, composite, coverage=None):
         _celsius, lst, qa = composite
-        meta = meta_for(BBOX) | {"coverage": COVERAGE}
+        meta = meta_for(BBOX) | {"coverage": coverage or COVERAGE}
         root = write_catalog(
             tmp_path / "catalog", lst, qa, meta, collection_id=COLLECTION_ID
         )
@@ -986,12 +1006,15 @@ class TestCoverageReachesTheItem:
         readme = (root / COLLECTION_ID / "README.md").read_text()
         return item, readme
 
-    def test_the_five_numbers_are_on_the_item(self, tmp_path, composite):
+    def test_the_eight_numbers_are_on_the_item(self, tmp_path, composite):
         item, _ = self.written(tmp_path, composite)
         props = item["properties"]
         assert props["lst:land_pixels"] == 356_400
         assert props["lst:valid_pixels"] == 352_836
         assert props["lst:empty_land_pixels"] == 3_564
+        assert props["lst:coastal_buffer_pixels"] == 3_600
+        assert props["lst:coastal_buffer_valid_pixels"] == 3_564
+        assert props["lst:processing_mask_pixels"] == 360_000
         assert props["lst:valid_fraction"] == pytest.approx(0.99, abs=1e-4)
         assert props["lst:ged_gap_fraction"] == pytest.approx(0.25)
 
@@ -1004,12 +1027,82 @@ class TestCoverageReachesTheItem:
             p["lst:land_pixels"] - p["lst:valid_pixels"] == p["lst:empty_land_pixels"]
         )
 
+    def test_land_and_the_buffer_sum_to_the_processing_mask(self, tmp_path, composite):
+        """The equation that says which footprint each count describes.
+
+        Land is not the mask a run wrote through. Publishing both and their
+        difference is what lets a reader tell a share of land from a share of
+        what was processed, without fetching a raster to find out.
+        """
+        item, _ = self.written(tmp_path, composite)
+        p = item["properties"]
+        assert (
+            p["lst:land_pixels"] + p["lst:coastal_buffer_pixels"]
+            == p["lst:processing_mask_pixels"]
+        )
+
+    def test_no_share_of_land_exceeds_one(self, tmp_path, composite):
+        """What a mask denominator could not guarantee.
+
+        Values over the coastal buffer are real and published. Counting them
+        against land would let `lst:valid_fraction` pass 1 on a tile of islands.
+        """
+        item, _ = self.written(tmp_path, composite)
+        p = item["properties"]
+        assert 0 <= p["lst:valid_fraction"] <= 1
+        assert p["lst:valid_pixels"] <= p["lst:land_pixels"]
+        assert p["lst:coastal_buffer_valid_pixels"] <= p["lst:coastal_buffer_pixels"]
+
     def test_the_collection_readme_carries_the_tile_table(self, tmp_path, composite):
         _item, readme = self.written(tmp_path, composite)
-        assert "| Tile | Land with a temperature |" in readme
+        assert "| Tile | Land pixels | Land with a temperature |" in readme
+        assert "356,400" in readme
         assert "99.0%" in readme
         assert "3,564" in readme
         assert "Cloud decides how much of a tile exists" in readme
+
+    def test_the_readme_says_which_footprint_each_count_describes(
+        self, tmp_path, composite
+    ):
+        _item, readme = self.written(tmp_path, composite)
+        assert "## Coverage on the item" in readme
+        assert "`lst:processing_mask_pixels`" in readme
+        assert "`lst:coastal_buffer_pixels`" in readme
+
+    def test_the_empty_land_paragraph_is_derived_from_the_items(
+        self, tmp_path, composite
+    ):
+        """The sentence used to quote five tiles measured against the mask.
+
+        Changing the denominator left that prose true of a footprint the
+        collection no longer reports, so it is computed from the items instead.
+        """
+        _item, readme = self.written(tmp_path, composite)
+        assert "MEASURED on `S32W065`, 3,564 land pixels came back with no" in readme
+        assert "1.0% of that tile's land" in readme
+
+    def test_a_run_without_land_geometry_publishes_no_share_of_land(
+        self, tmp_path, composite
+    ):
+        """An instance with only the buffered artifact cannot name land.
+
+        It reports what it counted and no fraction. Naming a share of land
+        without land is the defect this work exists to end, so the honest answer
+        is fewer properties rather than a mislabelled one.
+        """
+        item, readme = self.written(tmp_path, composite, coverage=COVERAGE_WITHOUT_LAND)
+        props = item["properties"]
+        assert props["lst:processing_mask_pixels"] == 360_000
+        assert props["lst:valid_pixels"] == 356_400
+        for absent in (
+            "lst:land_pixels",
+            "lst:empty_land_pixels",
+            "lst:coastal_buffer_pixels",
+            "lst:valid_fraction",
+            "lst:ged_gap_fraction",
+        ):
+            assert absent not in props
+        assert "| — | — | — | — |" in readme
 
     def test_a_tile_without_coverage_shows_a_dash_not_a_zero(self, tmp_path, composite):
         """Absent and empty are different claims. A tile published before
@@ -1026,4 +1119,4 @@ class TestCoverageReachesTheItem:
             (root / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
         )
         assert "lst:valid_fraction" not in item["properties"]
-        assert "| — | — | — |" in (root / COLLECTION_ID / "README.md").read_text()
+        assert "| — | — | — | — |" in (root / COLLECTION_ID / "README.md").read_text()

@@ -230,7 +230,7 @@ class TestStagingRun:
 
     def test_the_report_matches_what_stage_scenes_returns(self, real_items, tmp_path):
         # One fetch, two orderings. They must not diverge on the counts that
-        # `cost_report.py` prices.
+        # `lst.fleet.cost_report` prices.
         items, _ = real_items
         fresh = copy.deepcopy(items)
         serial = staging.stage_scenes(
@@ -466,7 +466,7 @@ class TestTheDefaultClient:
     def test_botocore_does_not_retry_behind_the_counter(self):
         # `legacy` retries a 503 up to five times inside get_object. Those are
         # billable GETs that `_fetch_one` cannot see, so a throttled run would
-        # under-report the S3 line that `cost_report.py --s3-get-requests`
+        # under-report the S3 line that `lst-cost-report --s3-get-requests`
         # prices. Retrying belongs to this module, where MAX_ATTEMPTS bounds it.
         client = staging._default_client()
         # total_max_attempts, not max_attempts: botocore reads the latter as

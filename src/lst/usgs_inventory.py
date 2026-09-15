@@ -85,7 +85,7 @@ MAX_SNAP_METERS = 7.5
 #:
 #: The centre here is the midpoint of the acquisition start and stop. Earth
 #: Search publishes the scene centre from the product metadata. Two separate
-#: things separate them, and `measure_scene_centre.py` measures each on its own
+#: things separate them, and `lst.measure.scene_centre` measures each on its own
 #: because timestamp precision in `LANDSAT_OT_C2_L2` is mixed:
 #:
 #:     L8 2021        231,144 scenes    0% whole-second

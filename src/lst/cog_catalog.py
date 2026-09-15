@@ -718,7 +718,13 @@ def _rfc3339(value: str) -> str:
     return value if zoned else f"{value}Z"
 
 
-def _now() -> str:
+def now_utc() -> str:
+    """The `updated` stamp, in the one format every document here carries.
+
+    Public because `lst-publish-catalog recount` stamps an item it rewrote, and
+    a second spelling of this format would put two shapes of timestamp in one
+    collection.
+    """
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -733,14 +739,41 @@ def _window_label(start: str, end: str) -> str:
 # --------------------------------------------------------------------------
 
 
+#: Each coverage key, the property it becomes, and how it is rounded. A key the
+#: block does not hold produces no property: a tile written before a property
+#: existed says nothing about it, which is a different fact from zero.
+COVERAGE_PROPERTIES = (
+    ("land_pixels", "lst:land_pixels", int),
+    ("valid_pixels", "lst:valid_pixels", int),
+    ("empty_land_pixels", "lst:empty_land_pixels", int),
+    ("coastal_buffer_pixels", "lst:coastal_buffer_pixels", int),
+    ("coastal_buffer_valid_pixels", "lst:coastal_buffer_valid_pixels", int),
+    ("processing_mask_pixels", "lst:processing_mask_pixels", int),
+    ("valid_fraction", "lst:valid_fraction", lambda v: round(float(v), 6)),
+    ("ged_gap_fraction", "lst:ged_gap_fraction", lambda v: round(float(v), 6)),
+)
+
+
 def coverage_properties(coverage: dict[str, Any] | None) -> dict[str, Any]:
     """The item's own coverage, as properties a reader can filter on.
 
-    A nodata `lst_p95` pixel carries no reason with it, and the three reasons
-    differ: water was never this product's subject, an emissivity gap is a
-    failed retrieval, and empty land is cloud. Only the last scales with the
-    window, and on a cloudy tile it dominates. MEASURED, `N00E110` returns
-    45.2% of its land empty and nothing in its raster says so.
+    A nodata `lst_p95` pixel carries no reason with it, and the reasons differ:
+    water was never this product's subject, an emissivity gap is a failed
+    retrieval, and empty land had no usable observation. Only the last scales
+    with the window, and on a cloudy tile it dominates. MEASURED, `N00E110`
+    returns 45.2% of its land empty and nothing in its raster says so.
+
+    `lst:land_pixels` is land. It is not the mask a run wrote through, which
+    reaches 25 km out to sea so that a coastal scene is not cut at the
+    waterline. `lst:processing_mask_pixels` is that mask and
+    `lst:coastal_buffer_pixels` is the difference. MEASURED 2026-09-15 at 3600
+    pixels per degree, S40W065 is 45,407,126 pixels of land inside a mask of
+    73,254,945. Every share of land here divides by the first.
+
+    `lst:empty_land_pixels` is land that came back with no usable observation.
+    It counts two conditions together: ground Landsat never photographed, and
+    ground it photographed where every observation failed the QA or range rule.
+    No published raster separates them, because `qa_count` reads zero for both.
 
     `lst:ged_gap_fraction` is the share of this tile's land inside an ASTER GED
     gap, which is ground a second instrument also lost to cloud two decades
@@ -752,11 +785,9 @@ def coverage_properties(coverage: dict[str, Any] | None) -> dict[str, Any]:
     if not coverage:
         return {}
     return {
-        "lst:land_pixels": int(coverage["land_pixels"]),
-        "lst:valid_pixels": int(coverage["valid_pixels"]),
-        "lst:empty_land_pixels": int(coverage["empty_land_pixels"]),
-        "lst:valid_fraction": round(float(coverage["valid_fraction"]), 6),
-        "lst:ged_gap_fraction": round(float(coverage["ged_gap_fraction"]), 6),
+        name: cast(coverage[key])
+        for key, name, cast in COVERAGE_PROPERTIES
+        if coverage.get(key) is not None
     }
 
 
@@ -1082,25 +1113,62 @@ def _tile_list(items: list[dict[str, Any]]) -> str:
     describes the collection as it stands rather than as it was first written.
     A tile published before `lst:valid_fraction` existed shows a dash rather
     than a zero, because the two mean different things.
+
+    The land column is the denominator of the two beside it, and it is land
+    rather than the processing mask. A reader who wants the mask reads
+    `lst:processing_mask_pixels` on the item.
     """
     rows = [
-        "| Tile | Land with a temperature | Empty land pixels | Land in an "
-        "ASTER GED gap |",
-        "|---|---|---|---|",
+        "| Tile | Land pixels | Land with a temperature | Empty land pixels | "
+        "Land in an ASTER GED gap |",
+        "|---|---|---|---|---|",
     ]
     for item in items:
         item_id = item["id"]
         props = item.get("properties", {})
         link = f"[`{item_id}`](./{item_id}/{item_id}.json)"
         if "lst:valid_fraction" not in props:
-            rows.append(f"| {link} | — | — | — |")
+            rows.append(f"| {link} | — | — | — | — |")
             continue
         rows.append(
-            f"| {link} | {props['lst:valid_fraction'] * 100:.1f}% | "
+            f"| {link} | {props['lst:land_pixels']:,} | "
+            f"{props['lst:valid_fraction'] * 100:.1f}% | "
             f"{props['lst:empty_land_pixels']:,} | "
             f"{props['lst:ged_gap_fraction'] * 100:.1f}% |"
         )
     return "\n".join(rows) + "\n"
+
+
+def _empty_land_range(items: list[dict[str, Any]]) -> str:
+    """The published spread of empty land, as a paragraph, or nothing.
+
+    Derived from the items rather than written down, because the sentence that
+    used to stand here quoted five tiles measured against the processing mask.
+    Changing the denominator to land left the prose true of a footprint the
+    collection no longer reports. A number a reader can recompute from the items
+    beside it cannot go stale that way.
+    """
+    rows = [
+        (item["id"], props["lst:empty_land_pixels"], props["lst:land_pixels"])
+        for item in items
+        for props in (item.get("properties", {}),)
+        if "lst:empty_land_pixels" in props and props.get("lst:land_pixels")
+    ]
+    if not rows:
+        return ""
+    low = min(rows, key=lambda row: row[1])
+    high = max(rows, key=lambda row: row[1])
+    if low[0] == high[0]:
+        return (
+            f"MEASURED on `{high[0]}`, {high[1]:,} land pixels came back with "
+            f"no usable observation, which is {100 * high[1] / high[2]:.1f}% of "
+            f"that tile's land.\n\n"
+        )
+    return (
+        f"MEASURED over {len(rows)} tiles, land with no usable observation ran "
+        f"from {low[1]:,} pixels on `{low[0]}` to {high[1]:,} on `{high[0]}`, "
+        f"which is {100 * high[1] / high[2]:.1f}% of that tile's land.\n\n"
+    )
 
 
 def _collection_readme(
@@ -1131,13 +1199,23 @@ def _collection_readme(
         f"`{QA_ASSET_KEY}` has no nodata value by design. A value of 0 means "
         "that no valid observation survived masking for that month. Keeping "
         "zero visible lets you tell this gap apart from masked data.\n\n"
+        "## Coverage on the item\n\n"
+        "`lst:land_pixels` is land: Natural Earth 10m land with no buffer. A "
+        "run masks on that geometry grown by 25 km, so that a coastal scene is "
+        "not cut at the waterline, and `lst:processing_mask_pixels` is the "
+        "grown one. `lst:coastal_buffer_pixels` is the difference, and the "
+        "first two of those three sum to the third. Every share of land on the "
+        "item divides by `lst:land_pixels`, so `lst:valid_fraction` and "
+        "`lst:empty_land_pixels` describe land. The values the product still "
+        "publishes over water are counted by "
+        "`lst:coastal_buffer_valid_pixels`.\n\n"
         "## Limitations\n\n"
-        f"A nodata `{LST_ASSET_KEY}` pixel means one of three things, and the "
-        "raster separates none of them: no usable observation, water, or an "
-        "emissivity retrieval that failed inside an ASTER GED coverage gap. "
-        "Only the first would improve with a wider window. Each item's "
-        "`processing:lineage` states the rules that produced its pixels and "
-        "names the artifacts they read by checksum.\n\n"
+        f"A nodata `{LST_ASSET_KEY}` pixel means one of four things, and the "
+        "raster separates none of them: no usable observation, ground no scene "
+        "imaged, water, or an emissivity retrieval that failed inside an ASTER "
+        "GED coverage gap. Only the first would improve with a wider window. "
+        "Each item's `processing:lineage` states the rules that produced its "
+        "pixels and names the artifacts they read by checksum.\n\n"
         "### Cloud decides how much of a tile exists\n\n"
         "Over persistent cloud a five-year window returns nothing to "
         "composite. This is not a rule the pipeline applies. It is the absence "
@@ -1145,9 +1223,7 @@ def _collection_readme(
         "nothing ever saw. The table above gives each tile's share, and "
         f"`{QA_ASSET_KEY}` gives it per pixel: its twelve bands sum to the "
         "evidence behind each value.\n\n"
-        "MEASURED over five tiles, land with no clear observation in 2021 to "
-        "2025 ran from 27,915 pixels on `N30E075` to 105,608,892 on "
-        "`N00E110`, which is 45.2% of that tile's land.\n\n"
+        f"{_empty_land_range(items)}"
         "### A nodata pixel can be ground no scene photographed\n\n"
         "Sharp-edged rectangles of nodata appear inside otherwise complete "
         f"ground, a few hundred pixels across, with `{QA_ASSET_KEY}` at zero "
@@ -1160,15 +1236,24 @@ def _collection_readme(
         "under 20% cloud list that point inside their footprint, and reading "
         "30 of them at that pixel returns 30 source fills. None imaged it.\n\n"
         f"So `lst:empty_land_pixels` counts two different things: ground "
-        "Landsat never photographed, and ground it photographed through cloud. "
-        "Only the second would improve with a wider window. Read "
-        f"`{QA_ASSET_KEY}` to tell them apart, and treat a rectangle of zeros "
-        "with straight edges as geometry rather than weather.\n\n"
+        "Landsat never photographed, and ground it photographed where no "
+        "observation survived the QA and range rules. Only the second would "
+        f"improve with a wider window, and `{QA_ASSET_KEY}` cannot tell you "
+        "which you are looking at. It reads zero for both, because a source "
+        "fill increments nothing and a rejected observation increments "
+        "nothing.\n\n"
+        "Read a straight-edged region of zero observations as ground outside "
+        "Landsat's imaged footprint, even where scene bounding rectangles "
+        "cover it. Those pixels are not cloudy. A bounding rectangle is the "
+        "shape of a file and not the shape of the ground a sensor saw, so no "
+        "count of overlapping footprints is evidence that a pixel was "
+        "imaged.\n\n"
         "`lst:ged_gap_fraction` ranks tiles by how much to expect. A gap cell "
         "is ground ASTER caught no clear sky over between 2000 and 2008, and "
-        "Landsat loses the same ground to the same cloud. MEASURED, land "
-        "pixels with no clear observation that fall outside a gap number 0 of "
-        "289,580 on `N40W080`, 0 of 35,754,489 on `S25E030`, and 5,895 of "
+        "Landsat loses the same ground to the same cloud. MEASURED on the "
+        "2026-09-14 run, against the processing mask that build divided by, "
+        "land pixels with no clear observation that fall outside a gap number "
+        "0 of 289,580 on `N40W080`, 0 of 35,754,489 on `S25E030`, and 5,895 of "
         "105,608,892 on `N00E110`. It is a ranking, not a calibrated "
         "prediction: the two share a cause, not a ratio.\n\n"
         "### Two tiles are not always comparable\n\n"
@@ -1229,11 +1314,13 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
         f"{_decode_snippet(f'{item_id}/{LST_FILENAME}')}\n"
         f"DN {LST_NODATA_DN} is nodata. Treat it as absent rather than cold.\n\n"
         "## What a nodata pixel means\n\n"
-        "Four different facts, and the raster separates none of them:\n\n"
+        "Five different facts, and the raster separates none of them:\n\n"
         "| Meaning | Rule | Would a wider window fix it |\n"
         "|---|---|---|\n"
-        "| No usable observation | every scene was cloudy, or the pixel is "
-        "off every footprint | yes |\n"
+        "| No usable observation | every observation failed the QA or range "
+        "rule | yes |\n"
+        "| Never imaged | the pixel is off every imaged footprint, whatever "
+        "the scene rectangles say | no |\n"
         "| Water | outside the buffered land geometry | no |\n"
         f"| Too little evidence | fewer than {MIN_TOTAL_OBSERVATIONS} clear "
         "observations over the whole window | yes |\n"
@@ -1242,10 +1329,17 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
         "Do not read a nodata pixel as missing data over the ocean: the water "
         "rule zeroes `qa_count` with the temperature, so a count of 0 beside "
         "a nodata pixel is the signature of sea rather than of cloud. The "
-        "other two rules leave `qa_count` alone, so a nodata pixel with a "
-        "count above 0 was screened rather than never seen, and the count "
-        "itself says which rule reached it. The item's `processing:lineage` "
-        "states every rule and names the artifacts they read by checksum.\n\n"
+        "evidence and range rules leave `qa_count` alone, so a nodata pixel "
+        "with a count above 0 was screened rather than never seen, and the "
+        "count itself says which rule reached it. The item's "
+        "`processing:lineage` states every rule and names the artifacts they "
+        "read by checksum.\n\n"
+        "A count of 0 over land does not say which of the first two rows you "
+        "have. Both produce the same zero: a source fill increments nothing "
+        "and a rejected observation increments nothing. Do not call such a "
+        "pixel cloudy. A straight-edged region of them is ground outside "
+        "Landsat's imaged footprint, and the scene rectangles that cover it "
+        "describe files rather than ground.\n\n"
         "## Reading the observation counts\n\n"
         f"`{QA_ASSET_KEY}` has 12 bands, January through December. Band `m` "
         "counts the clear observations that entered the percentile for that "
@@ -1284,7 +1378,7 @@ _QA_LINEAGE = (
 
 #: What a pixel means with no seam correction applied. Named separately because
 #: it is the claim a consumer makes by default, and because a part written
-#: before `destripe.py` existed carries no `correction_rule` at all.
+#: before `lst.destripe` existed carries no `correction_rule` at all.
 _POOLED_LINEAGE = (
     "No seam correction ran. Each pixel is the pooled 95th percentile of every "
     "scene that observed it, at each scene's own atmospheric baseline. WRS-2 "
@@ -1348,14 +1442,25 @@ def correction_lineage(correction_rule: dict[str, Any] | None) -> str:
     return " ".join(sentences)
 
 
+def strict_land_sentence(digest: str) -> str:
+    """The lineage sentence naming the geometry the coverage counts divide by.
+
+    One spelling, two writers. A run states it when it read the artifact, and
+    `lst-publish-catalog recount` appends it to an item whose numbers it
+    recomputed. Comparing the whole sentence is what makes the second writer
+    idempotent, so a recount run twice does not say it twice.
+    """
+    return f"Land geometry for the coverage counts, unbuffered, sha256 {digest}."
+
+
 def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
     """The properties that say which pixels the output mask removed, and why.
 
-    A nodata `lst_p95` pixel carries four meanings: no usable observation,
-    water, too few observations to support a five-year percentile, or a value
-    outside the temperatures this product publishes. Nothing in the raster
-    separates them, so the item states the rules it was masked under and names
-    the artifacts by DOI and checksum.
+    A nodata `lst_p95` pixel carries five meanings: no usable observation,
+    ground no scene imaged, water, too few observations to support a five-year
+    percentile, or a value outside the temperatures this product publishes.
+    Nothing in the raster separates them, so the item states the rules it was
+    masked under and names the artifacts by DOI and checksum.
 
     `processing:lineage` and `sci:publications` are the registered homes for
     this. No `lst:`-prefixed property restates any of it.
@@ -1401,6 +1506,8 @@ def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
         sentences.append(f"{read_from}.")
     if mask_rule.get("land_geometry_sha256"):
         sentences.append(f"Land geometry sha256 {mask_rule['land_geometry_sha256']}.")
+    if mask_rule.get("strict_land_geometry_sha256"):
+        sentences.append(strict_land_sentence(mask_rule["strict_land_geometry_sha256"]))
     properties: dict[str, Any] = {"processing:lineage": " ".join(sentences)}
     if ged.get("doi"):
         properties["sci:publications"] = [
@@ -1445,7 +1552,7 @@ def catalog_provenance(meta: dict[str, Any], *, collection_id: str) -> dict[str,
         "lst_offset": LST_OFFSET,
         "lst_nodata": LST_NODATA_DN,
         # The seam correction the pixels were built under, or None for the
-        # pooled percentile. Absent from a part written before `destripe.py`,
+        # pooled percentile. Absent from a part written before `lst.destripe`,
         # and None is the right reading of that: those pixels are pooled.
         "correction_rule": meta.get("correction_rule"),
     }
@@ -1648,7 +1755,7 @@ def rebuild_collection(
     moves no gigabytes to draw a 480 px preview.
     """
     collection_dir = Path(root) / collection_id
-    updated = updated or _now()
+    updated = updated or now_utc()
     items = read_items(collection_dir)
     item_ids = sorted(items)
     ordered = [items[known] for known in item_ids]
@@ -1717,7 +1824,7 @@ def write_catalog(
     provenance = catalog_provenance(meta, collection_id=collection_id)
     bbox, crs = provenance["bbox"], provenance["crs"]
     item_id = tile_id(bbox)
-    updated = _now()
+    updated = now_utc()
 
     root = Path(out_dir)
     collection_dir = root / collection_id

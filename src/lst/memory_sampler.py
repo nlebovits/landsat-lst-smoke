@@ -2,11 +2,11 @@
 
 The number this exists to produce is worker RSS at fleet width.
 `composite.block_bytes` predicts it, and until this module was wired into
-`shard_lst_p95.py` nothing on a production run measured it. `FINDINGS.md`
+`lst.shard_lst_p95` nothing on a production run measured it. `FINDINGS.md`
 carried a worst-case figure in a MEASURED table that was the block model's own
 output, read back as evidence the model held. A model cannot check itself.
 
-`shard_lst_p95.py` samples every run, so each one writes a `memory.csv` and a
+`lst.shard_lst_p95` samples every run, so each one writes a `memory.csv` and a
 peak beside its summary and the next instance that dies of memory leaves the
 measurement behind rather than a prediction.
 

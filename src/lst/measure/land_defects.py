@@ -1,6 +1,6 @@
 """What each defect in the shared land method selects, measured.
 
-`land_tiles.py` corrects two defects it inherits from the pixel mask's geometry
+`lst.land_tiles` corrects two defects it inherits from the pixel mask's geometry
 in `nlebovits/landsat-lst`. Both mark open ocean as land. `FINDINGS.md` states
 what each one costs, and this script is where those numbers come from.
 

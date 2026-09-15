@@ -285,7 +285,7 @@ class TestBuiltList:
 
         Recording the count in the file and checking the file against itself
         cannot fail. This is the assertion that catches a change to the land
-        method, and `measure_land_defects.py` is where the number comes from.
+        method, and `lst.measure.land_defects` is where the number comes from.
         """
         names, prov = built
         assert int(prov["tile_count"]) == len(names)

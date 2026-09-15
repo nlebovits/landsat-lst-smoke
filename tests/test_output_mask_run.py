@@ -65,8 +65,13 @@ COLLECTION_ID = "lst-p95-2021-2025"
 pytestmark = [needs_land_geometry, pytest.mark.timeout(600)]
 
 
-def rehearse(out_dir, tile, numobs_uri, land_geometry, *extra):
-    """One masked rehearsal, and its summary."""
+def rehearse(out_dir, tile, numobs_uri, land_geometry, *extra, strict=None):
+    """One masked rehearsal, and its summary.
+
+    `strict` is named explicitly, never left to the default. The default is a
+    gitignored artifact, so a run that fell back to it would report land here
+    and report none in CI, and the two would test different code.
+    """
     argv = [
         "--tile",
         tile,
@@ -76,6 +81,8 @@ def rehearse(out_dir, tile, numobs_uri, land_geometry, *extra):
         str(numobs_uri),
         "--land-geometry-uri",
         str(land_geometry),
+        "--strict-land-geometry-uri",
+        str(strict or Path("artifacts") / "absent-on-purpose.gpkg"),
         "--pixels-per-degree",
         str(PPD),
         "--chunk",
@@ -116,13 +123,20 @@ def published_bands(out_dir: Path, tile: str):
 
 
 @pytest.fixture(scope="module")
-def masked_coastal(tmp_path_factory, numobs_artifact, land_geometry):
+def masked_coastal(
+    tmp_path_factory, numobs_artifact, land_geometry, strict_land_geometry
+):
     """One masked rehearsal of the coastal tile, shared by every test that
     reads it. Each of these drives a real cluster over 324 blocks, so a
     function-scoped fixture would put minutes on the file for nothing.
+
+    Both geometries are given. `N40W075` is 4.43% land inside a mask that
+    reaches the Atlantic, which is the shape the coverage split exists for.
     """
     out = tmp_path_factory.mktemp("masked")
-    return rehearse(out, COASTAL, numobs_artifact, land_geometry) + (out,)
+    return rehearse(
+        out, COASTAL, numobs_artifact, land_geometry, strict=strict_land_geometry
+    ) + (out,)
 
 
 class TestAMaskedRun:
@@ -212,6 +226,49 @@ class TestAMaskedRun:
         assert summary["valid_fraction"] == pytest.approx(
             written / summary["mask"]["pixels_total"]
         )
+
+    def test_the_item_divides_by_land_not_by_the_mask(self, run):
+        """A whole run, on a real coastal bbox, end to end.
+
+        `N40W075` is the New Jersey coast. MEASURED at 1/360 degree, 4.43% of it
+        is land, and the processing mask reaches well past that into the
+        Atlantic. So the three counts have to differ here, and their equations
+        have to hold on numbers no test wrote down.
+        """
+        _, summary, out = run
+        item = json.loads((item_dir(out, COASTAL) / f"{COASTAL}.json").read_text())
+        props = item["properties"]
+        land = props["lst:land_pixels"]
+        buffer_pixels = props["lst:coastal_buffer_pixels"]
+        assert land + buffer_pixels == props["lst:processing_mask_pixels"]
+        assert props["lst:processing_mask_pixels"] == summary["mask"]["pixels_kept"]
+        assert 0 < land < props["lst:processing_mask_pixels"]
+        assert land - props["lst:valid_pixels"] == props["lst:empty_land_pixels"]
+        assert props["lst:valid_fraction"] == pytest.approx(
+            props["lst:valid_pixels"] / land
+        )
+
+    def test_the_two_regions_account_for_every_published_value(self, run):
+        """Nothing the raster carries is left out of the item's arithmetic.
+
+        Land and the coastal buffer partition the processing mask, and the water
+        rule zeroed everything outside it, so the two valid counts have to sum to
+        the raster's own. A grid mismatch is what this catches, and it would
+        otherwise return two plausible numbers.
+        """
+        _, _, out = run
+        item = json.loads((item_dir(out, COASTAL) / f"{COASTAL}.json").read_text())
+        props = item["properties"]
+        lst, _ = published_bands(out, COASTAL)
+        assert props["lst:valid_pixels"] + props[
+            "lst:coastal_buffer_valid_pixels"
+        ] == int((lst != LST_NODATA_DN).sum())
+
+    def test_the_lineage_names_the_geometry_the_counts_divide_by(self, run):
+        _, _, out = run
+        item = json.loads((item_dir(out, COASTAL) / f"{COASTAL}.json").read_text())
+        lineage = item["properties"]["processing:lineage"]
+        assert "Land geometry for the coverage counts, unbuffered, sha256" in lineage
 
     def test_the_water_rule_zeroes_both_bands_together(
         self, run, numobs_artifact, land_geometry
@@ -322,7 +379,7 @@ class TestATileOfNothingButGapStillPublishes:
 class TestATileWithNoLand:
     """The water rule can still empty a tile, and that path still works.
 
-    `land_tiles.py` selects tiles from the same geometry the mask rasterises,
+    `lst.land_tiles` selects tiles from the same geometry the mask rasterises,
     so no tile on the fleet's list reaches here. An operator naming a bbox by
     hand does.
     """
@@ -456,11 +513,17 @@ class TestTheEscapeHatchAndTheGuards:
 
 
 class TestTheCoverageSummary:
-    """`shard_lst_p95.coverage` divides land, not the raster.
+    """`shard_lst_p95.coverage` divides land, not the raster and not the mask.
 
     Sea was never this product's subject, so counting it as missing coverage
     would say `S25E030` is 44% valid when 80% of its land carries a
-    temperature. The denominator is the land the water rule kept.
+    temperature. Nor is the denominator the processing mask: that mask is land
+    grown by 25 km so a coastal scene is not cut at the waterline, and it
+    reaches open sea. MEASURED 2026-09-15 at 3600 pixels per degree, `S40W065`
+    is 73,254,945 pixels of mask and 45,407,126 pixels of land.
+
+    The fabricated numbers below are a 1,000 pixel tile: 600 inside the mask,
+    of which 500 are land and 100 are coastal buffer.
     """
 
     def counts(self, **over):
@@ -472,20 +535,111 @@ class TestTheCoverageSummary:
         }
         return base | over
 
+    def split(self, **over):
+        base = {
+            "pixels_strict_land": 500,
+            "pixels_coastal_buffer": 100,
+            "pixels_processing_mask": 600,
+            "pixels_emissivity_gap_on_strict_land": 125,
+        }
+        return base | over
+
     def stats(self, kept):
         return [{"kept": kept, "total": 1_000}]
 
+    def land(self, on_land=400, on_coast=80):
+        return {"land": on_land, "coast": on_coast, "total": on_land + on_coast}
+
+    def full(self, **over):
+        return shard_lst_p95.coverage(
+            self.counts(), self.stats(480), split=self.split(**over), valid=self.land()
+        )
+
     def test_land_is_the_denominator_not_the_raster(self):
-        out = shard_lst_p95.coverage(self.counts(), self.stats(480))
+        out = self.full()
         assert out is not None
-        assert out["land_pixels"] == 600
+        assert out["land_pixels"] == 500
+        assert out["valid_pixels"] == 400
         assert out["valid_fraction"] == pytest.approx(0.8)
-        assert out["empty_land_pixels"] == 120
+        assert out["empty_land_pixels"] == 100
+
+    def test_the_buffer_is_named_rather_than_called_land(self):
+        out = self.full()
+        assert out is not None
+        assert out["coastal_buffer_pixels"] == 100
+        assert out["coastal_buffer_valid_pixels"] == 80
+        assert out["processing_mask_pixels"] == 600
+        assert out["land_pixels"] + out["coastal_buffer_pixels"] == 600
 
     def test_the_gap_fraction_is_also_a_share_of_land(self):
-        out = shard_lst_p95.coverage(self.counts(), self.stats(480))
+        out = self.full()
         assert out is not None
         assert out["ged_gap_fraction"] == pytest.approx(0.25)
+
+    def test_without_land_geometry_it_names_no_share_of_land(self):
+        """An instance that has only the buffered artifact reports what it has.
+
+        The alternative is to divide by the mask and call the quotient a share
+        of land, which is the mislabel this function exists to end.
+        """
+        out = shard_lst_p95.coverage(self.counts(), self.stats(480))
+        assert out == {"processing_mask_pixels": 600, "valid_pixels": 480}
+
+    def test_the_two_halves_of_the_split_must_arrive_together(self):
+        with pytest.raises(ValueError, match="together, or neither"):
+            shard_lst_p95.coverage(self.counts(), self.stats(480), split=self.split())
+        with pytest.raises(ValueError, match="together, or neither"):
+            shard_lst_p95.coverage(self.counts(), self.stats(480), valid=self.land())
+
+    def test_more_values_than_land_is_refused(self):
+        """A grid mismatch returns a plausible number rather than an error.
+
+        The mask and the raster have to describe the same ground. If they ever
+        stop doing so, this is the first count that cannot be true.
+        """
+        with pytest.raises(ValueError, match="valid pixels on"):
+            shard_lst_p95.coverage(
+                self.counts(),
+                self.stats(600),
+                split=self.split(),
+                valid=self.land(on_land=600, on_coast=0),
+            )
+
+    def test_the_regions_must_sum_to_what_the_raster_carries(self):
+        with pytest.raises(ValueError, match="different ground"):
+            shard_lst_p95.coverage(
+                self.counts(),
+                self.stats(480),
+                split=self.split(),
+                valid={"land": 400, "coast": 50, "total": 450},
+            )
+
+    def test_a_tile_with_no_land_reports_counts_and_no_fraction(self):
+        """The buffer alone can put a cell of open sea inside the mask.
+
+        MEASURED 2026-09-15, the published `S35W055` is 588,696 pixels of
+        processing mask over the Atlantic and 0 pixels of land. It reported all
+        588,696 as land, and the first recount of the real catalog died on it
+        with `ZeroDivisionError`. There is no share of land to report on such a
+        tile, and 0/0 is not zero.
+        """
+        out = shard_lst_p95.coverage(
+            self.counts(),
+            self.stats(80),
+            split=self.split(
+                pixels_strict_land=0,
+                pixels_coastal_buffer=600,
+                pixels_emissivity_gap_on_strict_land=0,
+            ),
+            valid=self.land(on_land=0, on_coast=80),
+        )
+        assert out is not None
+        assert out["land_pixels"] == 0
+        assert out["empty_land_pixels"] == 0
+        assert out["coastal_buffer_pixels"] == 600
+        assert out["coastal_buffer_valid_pixels"] == 80
+        assert "valid_fraction" not in out
+        assert "ged_gap_fraction" not in out
 
     def test_it_returns_none_when_no_mask_ran(self):
         """`--no-output-mask` leaves no land count, and a coverage figure

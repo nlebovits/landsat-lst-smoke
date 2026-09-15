@@ -14,7 +14,7 @@ observation count per cell, and a count of zero is the gap exactly. That is a
 direct definition rather than a fill-value heuristic, which is why the mask
 reads this rather than inferring the gap from the composite.
 
-This module has two halves, the way `land_tiles.py` does.
+This module has two halves, the way `lst.land_tiles` does.
 
 The CLI builds the artifact once, on a laptop, before any instance starts. It
 fetches the AG1km v003 granules the buffered land geometry touches, reads the
@@ -136,7 +136,7 @@ def granule_cell(name: str) -> tuple[int, int] | None:
     The filename carries the NORTHWEST corner, so `AG1km.v003.33.-115.0010.h5`
     covers latitude [32, 33] and longitude [-115, -114]. Reading it as the
     southwest corner shifts the whole mask one degree, which is 100 cells, and
-    the shift scan in `measure_ged_registration.py` is what would catch it.
+    the shift scan in `lst.measure.ged_registration` is what would catch it.
     """
     match = GRANULE_NAME.match(name)
     if match is None:

@@ -1,6 +1,6 @@
 """Every argparse help string has to survive argparse's own %-formatting.
 
-`tile_prep.py` carried `"Staging is about 45% of a tile"` in a `help=` string.
+`lst.tile_prep` carried `"Staging is about 45% of a tile"` in a `help=` string.
 argparse runs every help string through `%` formatting, so a bare `%` is a
 format specifier. What it costs depends on the interpreter:
 
@@ -10,7 +10,7 @@ format specifier. What it costs depends on the interpreter:
             because 3.14 validates inside `add_argument` and `parse_args`
             calls that before it reads a flag.
 
-`fleet/run.sh:67` runs `tile_prep.py` first on every instance, and its inline
+`fleet/run.sh:67` runs `lst.tile_prep` first on every instance, and its inline
 block allows `<3.15`. `.python-version` pins 3.12 inside the repository, which
 is why no gate saw it.
 

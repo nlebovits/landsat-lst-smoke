@@ -264,7 +264,7 @@ class TestThePrepRuntimeResolves:
 
 
 class TestTheFleetPlannerResolves:
-    """`fleet_plan.py` runs before the fleet, so its failure is the cheap one.
+    """`lst.fleet.planner` runs before the fleet, so its failure is the cheap one.
 
     It is still a failure that stops everything, and its dependency surface is the
     shortest in the repository, which is exactly the block a new import gets
@@ -293,7 +293,7 @@ class TestTheFleetPlannerResolves:
 
 
 class TestTheCostReportResolves:
-    """`cost_report.py` prices the run after it ends.
+    """`lst.fleet.cost_report` prices the run after it ends.
 
     `pyproject` calls it standard library only. That claim is worth a check,
     because it is the reason nothing installs anything for it.

@@ -220,7 +220,7 @@ def tile_level_claim(inventory_uri, land_tiles_uri, numobs_uri, land_geometry_ur
 #: that calibrated it. This script owns the number because nothing in the
 #: pipeline applies it any more. The fleet screened a pixel only where this
 #: threshold and the GED gap region held together, and that pair was withdrawn
-#: after five tiles showed the two halves do not coincide. `lst_qa.py` owns the
+#: after five tiles showed the two halves do not coincide. `lst.lst_qa` owns the
 #: unconditional ceiling that replaced it.
 #:
 #: The value stays here so the six-rule pricing below stays reproducible.
@@ -297,7 +297,7 @@ def temperature_census(counts, covered, lst, land) -> dict:
     }
 
 
-#: The rule `masks.py` applies. Named here so the table marks which row ships
+#: The rule `lst.masks` applies. Named here so the table marks which row ships
 #: rather than leaving a reader to infer it from the order.
 SHIPPED_RULE = "numobs == 0, 1-cell buffer AND >= 70 C"
 
@@ -374,7 +374,7 @@ def rule_table(numobs_uri, bbox, shape, lst, land, pixels_per_degree: int) -> li
     Each row is what the rule costs and what it buys: ordinary pixels removed
     against hot-tail pixels removed. The first four vary the geometry alone.
     The last two intersect the geometry with the temperature, which is what
-    `masks.py` applies, and `SHIPPED_RULE` marks the one that ships.
+    `lst.masks` applies, and `SHIPPED_RULE` marks the one that ships.
 
     The first four are here because a threshold nobody priced is a threshold
     nobody chose, and because the geometry alone was shipped once, in this

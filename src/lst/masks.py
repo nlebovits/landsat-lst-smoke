@@ -1,6 +1,6 @@
 """Which pixels a finished tile is allowed to carry a temperature on.
 
-`lst_qa.py` decides whether one observation of one pixel is usable. This module
+`lst.lst_qa` decides whether one observation of one pixel is usable. This module
 decides whether the pixel is one the product should describe at all. The two
 are different questions and they fail differently. A pixel that was cloudy on
 every pass is a thin time axis, and a wider window fixes it. A pixel over the
@@ -9,7 +9,7 @@ product has nothing to say about, in this window or any other.
 
 One rule, and it is permanent for the pixel.
 
-Water. `land_tiles.py` selects the tiles the fleet runs by intersecting the
+Water. `lst.land_tiles` selects the tiles the fleet runs by intersecting the
 grid with Natural Earth 10m land buffered by 25 km. That module's docstring
 states the contract this module completes: one geometry answers both "which
 tiles does the fleet run" and "which pixels carry a temperature". A tile chosen
@@ -19,7 +19,15 @@ nodata, and pixels no tile ever visits.
 The geometry arrives as an artifact rather than as a download.
 `load_land_polygons` fetches Natural Earth when its cache is cold, and a fetch
 inside a run is what `tests/test_no_stac_at_runtime.py` exists to forbid.
-`land_tiles.py --write-geometry` ships it; this module reads it.
+`lst-land-tiles --write-geometry` ships it; this module reads it.
+
+The buffered geometry decides pixels. It does not define land, and a published
+property that divides by it may not say land either. MEASURED 2026-09-15 at
+3600 pixels per degree, S40W065 holds 73,254,945 pixels of processing mask and
+45,407,126 pixels of land, so the buffer is a third of what an item used to
+call land. `land_split` reads a second, unbuffered artifact and separates the
+two, and `coverage` divides by the right one. That is reporting, not masking:
+no pixel's value depends on it.
 
 Emissivity, as a region rather than as a rule. Landsat Collection 2 Level-2
 Surface Temperature needs a land surface emissivity value per pixel, taken from
@@ -59,6 +67,23 @@ from lst.aster_ged import (
 from lst.lst_qa import LST_NODATA_DN
 
 DEFAULT_LAND_GEOMETRY_URI = Path("artifacts/land_buffered.gpkg")
+
+#: The same Natural Earth 10m land with no buffer, which is what the word
+#: "land" means in a published property. The buffered geometry decides which
+#: pixels a run may describe, and it reaches 25 km out to sea so a coastal
+#: scene is not cut at the waterline. Dividing by it and calling the quotient a
+#: share of land overstates the denominator: MEASURED 2026-09-15 at 3600
+#: pixels per degree, S40W065 is 73,254,945 pixels of processing mask and
+#: 45,407,126 pixels of land.
+#:
+#: Written by `lst-land-tiles --write-strict-geometry`. Absent without error: a
+#: run that has only the buffered artifact reports the counts it can.
+STRICT_LAND_GEOMETRY_URI = Path("artifacts/land_strict.gpkg")
+
+#: How many raster rows `count_valid_within` reads at once. Matches
+#: `composite.STAGING_BLOCK`, which is the strip height every other scan of a
+#: finished tile uses.
+COUNT_BLOCK_ROWS = 512
 
 #: A GED cell with this count holds no clear-sky ASTER observation, so USGS
 #: interpolated its emissivity. Zero alone: the tiers at one and two
@@ -126,12 +151,17 @@ def transform_for(bbox, pixels_per_degree: int):
 
 
 def land_mask(bbox, pixels_per_degree: int, land_geometry_uri=None):
-    """True where the buffered land geometry covers the pixel.
+    """True where the land geometry covers the pixel.
+
+    Defaults to the buffered geometry, which is the processing mask. Pass
+    `STRICT_LAND_GEOMETRY_URI` for land itself. One function serves both so the
+    two masks cannot differ by anything except the polygons they read.
 
     A pixel counts as land when its centre falls inside the geometry, which is
     `rasterize`'s default. `all_touched=True` would widen every coastline by
     one pixel on all sides, and the 25 km buffer is already the decision about
-    how much coast to keep.
+    how much coast to keep. MEASURED 2026-09-15 on S40W065, `all_touched` moves
+    the strict count by 28,378 pixels of 45,407,126.
 
     Only the polygons that meet the bbox are read. pyogrio pushes the filter
     into the GeoPackage, so a 5-degree tile does not pay for a global geometry.
@@ -145,10 +175,13 @@ def land_mask(bbox, pixels_per_degree: int, land_geometry_uri=None):
 
     path = Path(land_geometry_uri or DEFAULT_LAND_GEOMETRY_URI)
     if not path.exists():
+        strict = path == Path(STRICT_LAND_GEOMETRY_URI)
+        which = "strict" if strict else "buffered"
+        flag = "--write-strict-geometry" if strict else "--write-geometry"
         msg = (
-            f"no buffered land geometry at {path}. Write it with:\n"
+            f"no {which} land geometry at {path}. Write it with:\n"
             f"  uv run lst-land-tiles --out artifacts/land_tiles.parquet "
-            f"--write-geometry {path}\n"
+            f"{flag} {path}\n"
             f"The pixel mask reads an artifact rather than fetching Natural "
             f"Earth, so that a run needs no network."
         )
@@ -167,6 +200,143 @@ def land_mask(bbox, pixels_per_degree: int, land_geometry_uri=None):
         dtype="uint8",
     )
     return burned.astype(bool)
+
+
+def land_split(
+    bbox,
+    pixels_per_degree: int,
+    *,
+    land_geometry_uri=None,
+    strict_land_geometry_uri=None,
+    processing=None,
+    gap=None,
+):
+    """Land, and the coast the processing mask adds to it.
+
+    The processing mask is the rule a run masks on and it is not land. It
+    reaches 25 km out to sea, so a published property that divides by it and
+    calls the quotient a share of land answers a different question from the
+    one it states. This separates the two. Neither count is a share of the
+    other: they sum to the processing mask.
+
+    Args:
+        bbox: the tile's bounds.
+        pixels_per_degree: the tile's grid.
+        land_geometry_uri: the buffered geometry. Ignored when `processing` is
+            given.
+        strict_land_geometry_uri: the unbuffered geometry. Defaults to
+            `STRICT_LAND_GEOMETRY_URI`.
+        processing: the processing mask, when the caller already holds it from
+            `output_mask`. Saves rasterising the buffered geometry twice.
+        gap: the grown ASTER GED gap region. When given, the counts gain the
+            gap's own strict-land numerator, because the published fraction
+            divides by land and `pixels_emissivity_gap_on_land` does not.
+
+    Returns:
+        `(strict, processing, counts)`. `strict` is True on land. `processing`
+        is True where a run may write a temperature. `counts` names both and
+        their difference, so a caller reports one set of numbers rather than
+        recounting the arrays.
+
+    Raises:
+        MaskError: if either artifact is absent, or if `strict` reaches outside
+            `processing`. That containment is a property of a buffer, so losing
+            it means the two files hold different Natural Earth releases, and
+            every count built from them would compare two worlds. MEASURED
+            2026-09-15 over eight tiles, `strict AND NOT processing` is empty
+            on all of them.
+    """
+    if processing is None:
+        processing = land_mask(bbox, pixels_per_degree, land_geometry_uri)
+    strict = land_mask(
+        bbox, pixels_per_degree, strict_land_geometry_uri or STRICT_LAND_GEOMETRY_URI
+    )
+    outside = int((strict & ~processing).sum())
+    if outside:
+        msg = (
+            f"{outside} land pixel(s) fall outside the processing mask. A "
+            f"buffer contains what it buffers, so the two geometries hold "
+            f"different Natural Earth releases. Rebuild both from one "
+            f"land_tiles.py run."
+        )
+        raise MaskError(msg)
+    land, mask_total = int(strict.sum()), int(processing.sum())
+    counts = {
+        "pixels_strict_land": land,
+        "pixels_coastal_buffer": mask_total - land,
+        "pixels_processing_mask": mask_total,
+    }
+    if gap is not None:
+        counts["pixels_emissivity_gap_on_strict_land"] = int((strict & gap).sum())
+    return strict, processing, counts
+
+
+def count_valid_within(path, nodata, **regions) -> dict[str, int]:
+    """Non-nodata pixels of band 1, counted inside each named region.
+
+    The one implementation of "how many values does this raster carry inside
+    this mask". `composite.file_statistics` answers the whole-raster question
+    and keeps it, because a masked variant of it would be a second reading of
+    the same file under the same name.
+
+    Every region is counted in one pass, so a caller that wants land and coast
+    reads the file once. That matters off `/vsis3`: a recount of the five
+    published tiles moves 33 MB to 471 MB per tile, and twice that for asking
+    twice.
+
+    Read in strips, so the largest thing held is `COUNT_BLOCK_ROWS` rows rather
+    than a 324 million pixel band.
+
+    Args:
+        path: a local file or a `/vsis3` path. A publish recounts a raster it
+            never downloads.
+        nodata: the value that means no data. `None` counts every pixel.
+        **regions: name to boolean mask, each the shape of the raster. `total`
+            is reserved.
+
+    Returns:
+        One count per region, under the name it was passed, plus `total`: every
+        non-nodata pixel in the band, whatever region it sits in. The regions
+        of a tile that carries a water mask sum to `total`, and a caller checks
+        that rather than assuming it.
+
+    Raises:
+        MaskError: if a region is not the shape of the raster. A recount that
+            rasterised its mask on a grid the COG does not use would return a
+            plausible number for the wrong ground.
+        ValueError: if a region is called `total`.
+    """
+    import numpy as np
+    import rasterio
+    from rasterio.windows import Window
+
+    if "total" in regions:
+        msg = "`total` is the whole-band count and cannot name a region"
+        raise ValueError(msg)
+    named = {name: np.asarray(mask) for name, mask in regions.items()}
+    totals = dict.fromkeys(named, 0)
+    totals["total"] = 0
+    with rasterio.Env(GDAL_PAM_ENABLED="NO"), rasterio.open(path) as src:
+        shape = (src.height, src.width)
+        wrong = {name: m.shape for name, m in named.items() if m.shape != shape}
+        if wrong:
+            msg = (
+                f"{path} is {shape} and {wrong} was rasterised on a different "
+                f"grid from the raster it is counting."
+            )
+            raise MaskError(msg)
+        for row in range(0, src.height, COUNT_BLOCK_ROWS):
+            height = min(COUNT_BLOCK_ROWS, src.height - row)
+            window = Window.from_slices((row, row + height), (0, src.width))
+            strip = src.read(1, window=window)
+            present = None if nodata is None else strip != nodata
+            totals["total"] += int(strip.size if present is None else present.sum())
+            for name, mask in named.items():
+                keep = mask[row : row + height]
+                totals[name] += int(
+                    keep.sum() if present is None else (present & keep).sum()
+                )
+    return totals
 
 
 def _gap_and_seen(bbox, pixels_per_degree: int, numobs_uri, buffer_cells: int):
@@ -235,6 +405,11 @@ def output_mask(
     water rule is settled by the tile's bbox alone, which lets a run build it
     before it stages a single object. The emissivity rule needs the assembled
     temperatures, so only its region is known here.
+
+    The strict land mask is not here, because it is not a rule. It decides no
+    pixel's value and only supplies a denominator a published property divides
+    by. `land_split` owns it, and takes `processing` so it does not rasterise
+    the buffered geometry a second time.
 
     Returns:
         `(keep, gap, counts)`. `keep` is True where the water rule allows a
@@ -321,16 +496,119 @@ def apply_output_mask(lst, qa, keep, *, scope="tile") -> dict:
     }
 
 
+def coverage(mask_counts, lst_statistics, split=None, valid=None) -> dict | None:
+    """How much of the tile's land carries a temperature. None with no mask.
+
+    Every number here is already counted. `output_mask` returns what each rule
+    reaches, `land_split` separates land from the coast the processing mask
+    adds, and `count_valid_within` says how many values sit in each. This costs
+    the divisions and puts the result on the published item. Without it a reader
+    fetches a 350 to 640 MB `qa_count` to learn that a tile is half empty.
+
+    `land_pixels` is land, not the processing mask. The two differ by the 25 km
+    coastal buffer, which reaches open sea: MEASURED 2026-09-15 at 3600 pixels
+    per degree, S40W065 is 73,254,945 pixels of processing mask and 45,407,126
+    pixels of land, so a fraction of the first understates a fraction of the
+    second by a third. `coastal_buffer_pixels` names the difference and
+    `processing_mask_pixels` preserves the total under a name that cannot be
+    read as land.
+
+    `empty_land_pixels` is land the five-year window returned no usable
+    observation for. It counts two conditions that no published raster
+    separates: land Landsat never photographed, and land it photographed where
+    every observation failed the QA and range rules. `qa_count` reads zero for
+    both, so a split of this number needs a source-presence record the
+    composite does not yet keep.
+
+    Args:
+        mask_counts: the counts from `output_mask`.
+        lst_statistics: the per-band statistics from `composite.file_statistics`.
+        split: the counts from `land_split`, with its `gap` argument supplied.
+            Absent on a machine that has only the buffered geometry.
+        valid: the counts from `count_valid_within`, under the names `land` and
+            `coast`. Required with `split` and refused without it.
+
+    Returns:
+        The coverage block, or None when the run applied no output mask and so
+        has no land to divide by. Without `split` the block holds the two counts
+        that need no land geometry and no fraction at all, because naming a
+        share of land without land is the defect this function exists to end.
+        A tile with no land at all holds the counts and neither fraction, for the
+        same reason: the buffer alone can put a cell of open sea in the mask.
+
+    Raises:
+        ValueError: if `split` and `valid` do not arrive together, if more
+            pixels carry a value than the mask allows, or if the two regions'
+            valid counts do not sum to the raster's own.
+    """
+    if not mask_counts:
+        return None
+    mask_total = int(mask_counts.get("pixels_kept") or 0)
+    if not mask_total:
+        return None
+    raster_valid = int(lst_statistics[0]["kept"])
+    if (split is None) != (valid is None):
+        msg = "coverage needs `split` and `valid` together, or neither"
+        raise ValueError(msg)
+    # `or valid is None` is redundant at runtime, because the check above has
+    # already refused the mixed case. It is here so the narrowing is visible:
+    # without it, nothing tells a reader or a type checker that `valid` is
+    # present below, and ty reports `valid["land"]` as a subscript of None.
+    if split is None or valid is None:
+        return {
+            "processing_mask_pixels": mask_total,
+            "valid_pixels": raster_valid,
+        }
+
+    land = int(split["pixels_strict_land"])
+    on_land, on_coast = int(valid["land"]), int(valid["coast"])
+    if on_land > land:
+        msg = f"{on_land} valid pixels on {land} land pixels"
+        raise ValueError(msg)
+    if on_land + on_coast != raster_valid:
+        msg = (
+            f"{on_land} valid on land and {on_coast} in the coastal buffer sum "
+            f"to {on_land + on_coast}, and the raster carries {raster_valid}. "
+            f"The masks and the raster describe different ground."
+        )
+        raise ValueError(msg)
+    block = {
+        "land_pixels": land,
+        "valid_pixels": on_land,
+        "empty_land_pixels": land - on_land,
+        "coastal_buffer_pixels": int(split["pixels_coastal_buffer"]),
+        "coastal_buffer_valid_pixels": on_coast,
+        "processing_mask_pixels": int(split["pixels_processing_mask"]),
+    }
+    # A tile can hold no land and still hold pixels. The buffer reaches 25 km
+    # out, so a cell of open sea near a coast enters the processing mask on its
+    # own. MEASURED 2026-09-15, the published `S35W055` is 588,696 pixels of
+    # processing mask over the Atlantic and 0 pixels of land, and it reported
+    # all 588,696 as land. There is no share of land to report there, and 0/0 is
+    # not zero, so both fractions are absent rather than invented.
+    if land:
+        block["valid_fraction"] = on_land / land
+        block["ged_gap_fraction"] = (
+            int(split["pixels_emissivity_gap_on_strict_land"]) / land
+        )
+    return block
+
+
 __all__ = [
+    "COUNT_BLOCK_ROWS",
     "DEFAULT_LAND_GEOMETRY_URI",
     "GAP_BUFFER_CELLS",
     "GAP_NUMOBS",
+    "STRICT_LAND_GEOMETRY_URI",
     "GedError",
     "MaskError",
     "apply_output_mask",
+    "count_valid_within",
+    "coverage",
     "emissivity_gap",
     "geometry_checksum",
     "land_mask",
+    "land_split",
     "output_mask",
     "raster_shape",
     "transform_for",
