@@ -201,7 +201,14 @@ def coverage_row(
     chain like a continent.
 
     `ged_gap_share` divides the ASTER GED gap region by the strict land of the
-    same tile. Over land is the only denominator that ranks tiles: GED has no
+    same tile, and is absent on a tile with no strict land. `masks.coverage`
+    settled that convention for the published item, for the same reason and on
+    the same geometry. 0/0 is not zero, and a tile of open sea inside the 25 km
+    buffer would otherwise sort beside a continent with no gap at all. A
+    scheduler reads the absence, or reads `strict_land_pixels` and gets the
+    same answer.
+
+    Over land is the only denominator that ranks tiles: GED has no
     observation over sea either, so a share of the whole tile would mostly
     measure how much sea the tile holds.
 
@@ -217,8 +224,10 @@ def coverage_row(
     no swath cell.
 
     Returns:
-        One JSON-ready row. Every count is an int and every share a float in
-        `[0, 1]`, so a reader can sort on either without a special case.
+        One JSON-ready row. Every count is an int and every share present is a
+        float in `[0, 1]`. `ged_gap_share` is absent on a tile with no strict
+        land, so a reader either divides a real denominator or sees no share at
+        all. The counts are always there.
     """
     bbox = tile_bounds(tile_id)
     land = masks.land_mask(
@@ -230,7 +239,7 @@ def coverage_row(
     total = int(land.size)
     land_pixels = int(land.sum())
     gap_on_land = int((gap & land).sum())
-    return {
+    row = {
         "tile_id": tile_id,
         "bbox": [float(v) for v in bbox],
         "planning_pixels_per_degree": int(pixels_per_degree),
@@ -238,8 +247,10 @@ def coverage_row(
         "strict_land_pixels": land_pixels,
         "strict_land_share": land_pixels / total if total else 0.0,
         "ged_gap_pixels_on_land": gap_on_land,
-        "ged_gap_share": gap_on_land / land_pixels if land_pixels else 0.0,
     }
+    if land_pixels:
+        row["ged_gap_share"] = gap_on_land / land_pixels
+    return row
 
 
 def coverage_rows(
@@ -590,14 +601,7 @@ def report_coverage(rows, say=print) -> None:
     """
     if not rows:
         return
-    gaps = sorted(row["ged_gap_share"] for row in rows)
     land = sum(row["strict_land_pixels"] for row in rows)
-    heavy = [row for row in rows if row["ged_gap_share"] > 0.40]
-    heavy_land = sum(row["strict_land_pixels"] for row in heavy)
-
-    def under(limit: float) -> int:
-        return sum(1 for gap in gaps if gap < limit)
-
     bare = [row for row in rows if row["strict_land_pixels"] == 0]
     say(f"              {len(rows)} tiles, {land:,} strict-land pixels")
     if bare:
@@ -606,10 +610,26 @@ def report_coverage(rows, say=print) -> None:
             f"resolution. They are in the list because the 25 km buffer reaches "
             f"them, and their islands are under one pixel across"
         )
+
+    # A tile with no land carries no gap share, so it is not in this
+    # distribution at all. Counting it as zero would put a cell of open sea
+    # beside a continent with no gap, which is the reading the absent field
+    # exists to prevent.
+    scored = [row for row in rows if "ged_gap_share" in row]
+    if not scored:
+        say("              no tile holds strict land, so no gap share is defined")
+        return
+    gaps = sorted(row["ged_gap_share"] for row in scored)
+    heavy = [row for row in scored if row["ged_gap_share"] > 0.40]
+    heavy_land = sum(row["strict_land_pixels"] for row in heavy)
+
+    def under(limit: float) -> int:
+        return sum(1 for gap in gaps if gap < limit)
+
     say(
-        f"              GED gap over land: "
-        f"{100 * under(0.05) / len(rows):.0f}% of tiles under 5%, "
-        f"{100 * under(0.20) / len(rows):.0f}% under 20%, "
+        f"              GED gap over land, on the {len(scored)} tiles that hold "
+        f"land: {100 * under(0.05) / len(scored):.0f}% under 5%, "
+        f"{100 * under(0.20) / len(scored):.0f}% under 20%, "
         f"p50 {100 * gaps[len(gaps) // 2]:.1f}%"
     )
     say(

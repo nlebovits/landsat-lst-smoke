@@ -40,6 +40,11 @@ LAND_TILE = "N05E010"
 #: 25 km processing buffer is 38% of the buffered mask, so strict and buffered
 #: land differ by a wide margin here.
 COAST_TILE = "S40W065"
+#: In the geometry slice, and holds no strict land at all. Open Atlantic inside
+#: the 25 km buffer. `masks.coverage` names the same tile for the same reason:
+#: the published `S35W055` is 588,696 pixels of processing mask and 0 pixels of
+#: land, and it once reported all 588,696 as land.
+SEA_TILE = "S35W055"
 
 
 @pytest.fixture
@@ -129,6 +134,34 @@ class TestTheGapShareIsMeasuredOverLand:
         row = screen(LAND_TILE, numobs=numobs)
         assert row["ged_gap_share"] == 1.0
         assert row["ged_gap_pixels_on_land"] == row["strict_land_pixels"]
+
+    def test_a_tile_with_no_strict_land_carries_no_share_at_all(self, screen):
+        """0/0 is not zero. `masks.coverage` settled this for the published
+        item on the same geometry, and both fractions are absent there rather
+        than invented. A scheduler that read 0.0 here would sort a cell of open
+        sea beside a continent with no gap."""
+        row = screen(SEA_TILE)
+        assert row["strict_land_pixels"] == 0
+        assert "ged_gap_share" not in row
+
+    def test_the_counts_are_still_there_on_a_tile_with_no_land(self, screen):
+        """The share goes, the evidence stays. `masks.coverage` keeps its
+        counts on the same tile for the same reason."""
+        row = screen(SEA_TILE)
+        assert row["ged_gap_pixels_on_land"] == 0
+        assert row["strict_land_share"] == 0.0
+        assert row["planning_pixels"] == 500 * 500
+
+    def test_a_gap_over_a_landless_tile_still_reports_no_share(self, screen, tmp_path):
+        """The absence is about the denominator, not about the gap. A mosaic
+        that is nothing but gap here still divides by no land."""
+        numobs = write_numobs(tmp_path / "all.tif", gaps=[tile_bounds(SEA_TILE)])
+        row = screen(SEA_TILE, numobs=numobs)
+        assert "ged_gap_share" not in row
+        assert row["ged_gap_pixels_on_land"] == 0
+
+    def test_a_row_with_no_share_still_serialises(self, screen):
+        assert "ged_gap_share" not in json.loads(json.dumps(screen(SEA_TILE)))
 
     def test_a_gap_over_the_sea_alone_does_not_move_the_share(self, screen, tmp_path):
         """The reason the denominator is land. A sea-only gap is not a fact
@@ -279,28 +312,34 @@ class TestTheReportStatesWhatItDoesNotDo:
         fleet_plan.report_coverage([], say=lines.append)
         assert lines == []
 
-    def test_a_screen_with_no_land_does_not_divide_by_zero(self):
-        rows = [{"tile_id": "A", "strict_land_pixels": 0, "ged_gap_share": 0.0}]
+    def test_a_screen_of_nothing_but_landless_tiles_says_so(self):
+        """No row carries a share, so there is no distribution to report."""
+        rows = [{"tile_id": "A", "strict_land_pixels": 0}]
         lines: list[str] = []
         fleet_plan.report_coverage(rows, say=lines.append)
-        assert lines
+        assert "no gap share is defined" in " ".join(lines)
 
     def test_it_names_the_tiles_with_no_land_at_this_resolution(self):
         """MEASURED on the real plan: 36 of 895. They are in the tile list
         because the 25 km buffer reaches them, and a 100 pixel-per-degree cell
         is about 1.1 km, so an island under that size leaves no pixel."""
         rows = [
-            {"tile_id": "A", "strict_land_pixels": 0, "ged_gap_share": 0.0},
+            {"tile_id": "A", "strict_land_pixels": 0},
             {"tile_id": "B", "strict_land_pixels": 500, "ged_gap_share": 0.0},
         ]
         lines: list[str] = []
         fleet_plan.report_coverage(rows, say=lines.append)
         assert "1 tiles hold no strict-land pixel" in " ".join(lines)
 
-    def test_a_tile_with_no_land_scores_zero_gap_rather_than_raising(self):
-        """A scheduler filtering on `strict_land_pixels` separates these from
-        a tile that really has no gap. Zero is what it can sort on."""
-        row = {"tile_id": "A", "strict_land_pixels": 0, "ged_gap_share": 0.0}
+    def test_a_landless_tile_is_not_counted_as_a_tile_with_no_gap(self):
+        """Counting it as zero would report a cell of open sea as a tile under
+        5%, which is the reading the absent field exists to prevent."""
+        rows = [
+            {"tile_id": "A", "strict_land_pixels": 0},
+            {"tile_id": "B", "strict_land_pixels": 500, "ged_gap_share": 0.9},
+        ]
         lines: list[str] = []
-        fleet_plan.report_coverage([row], say=lines.append)
-        assert lines
+        fleet_plan.report_coverage(rows, say=lines.append)
+        text = " ".join(lines)
+        assert "on the 1 tiles that hold land" in text
+        assert "0% under 5%" in text
