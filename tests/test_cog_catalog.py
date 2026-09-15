@@ -22,7 +22,7 @@ import rasterio
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cog_catalog import (  # noqa: E402
+from cog_catalog import (
     BLOCK_SIZE,
     LST_ASSET_KEY,
     MONTH_NAMES,
@@ -50,7 +50,7 @@ from cog_catalog import (  # noqa: E402
     write_catalog,
     write_cog,
 )
-from lst_qa import (  # noqa: E402
+from lst_qa import (
     LST_MAX_DN,
     LST_MIN_DN,
     LST_NODATA_DN,

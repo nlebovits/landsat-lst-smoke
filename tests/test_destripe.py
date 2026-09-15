@@ -34,8 +34,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import destripe  # noqa: E402
-from masks import transform_for  # noqa: E402
+import destripe
+from masks import transform_for
 
 # A 10 x 1 degree box at 6 cells per degree: 6 rows, 60 columns. Small enough
 # to assert on by hand, wide enough to carry an overlap with an interior.

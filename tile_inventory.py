@@ -109,7 +109,7 @@ def read_manifest(path: Path | str) -> dict:
     try:
         meta = pq.ParquetFile(path).schema_arrow.metadata or {}
         raw = meta.get(b"manifest")
-    except Exception as exc:  # noqa: BLE001 - any reader failure is fatal here
+    except Exception as exc:
         msg = f"cannot read {path} as Parquet: {exc}"
         raise InventoryError(msg) from exc
     if not raw:

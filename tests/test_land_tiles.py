@@ -19,8 +19,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import land_tiles  # noqa: E402
-from land_tiles import (  # noqa: E402
+import land_tiles
+from land_tiles import (
     COASTAL_BUFFER_METERS,
     LATITUDE_LIMIT,
     MAX_NATURAL_EARTH_SCALERANK,

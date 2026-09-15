@@ -287,7 +287,7 @@ class FileBackedS3:
         self.blobs = blobs
         self.calls = []
 
-    def get_object(self, *, Bucket, Key, RequestPayer=None):  # noqa: N803
+    def get_object(self, *, Bucket, Key, RequestPayer=None):
         import io
 
         self.calls.append((Bucket, Key))

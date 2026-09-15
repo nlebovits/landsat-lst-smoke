@@ -776,7 +776,7 @@ def _record_block_span(t0_ns: int, n_present: int, n_unsupported: int) -> None:
             count=n_present,
             unsupported=n_unsupported,
         )
-    except Exception:  # noqa: BLE001  instrumentation never fails the run
+    except Exception:
         return
 
 
@@ -922,7 +922,7 @@ class FileLock:
         self._fh = None
 
     def __enter__(self):
-        self._fh = open(self.path, "a")  # noqa: SIM115  released in __exit__
+        self._fh = open(self.path, "a")
         fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
         return self
 
@@ -1596,7 +1596,7 @@ def _record_fused_span(t0_ns: int, n_items: int) -> None:
             t1,
             count=n_items,
         )
-    except Exception:  # noqa: BLE001  instrumentation never fails the run
+    except Exception:
         return
 
 
@@ -1760,7 +1760,7 @@ def warm_worker() -> int:
     """
     import os
 
-    import odc.geo.xr  # noqa: F401
+    import odc.geo.xr
     import odc.stac  # noqa: F401
     import rasterio  # noqa: F401
 

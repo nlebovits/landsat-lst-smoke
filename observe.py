@@ -47,7 +47,7 @@ def enable(capacity: int = DEFAULT_TRACING_CAPACITY) -> int:
     variables are read by the spawned workers and by the scheduler; only
     `FRISKY_*` names cross into a worker process, so nothing else goes here.
     """
-    global _TRACE_ID  # noqa: PLW0603
+    global _TRACE_ID
     import frisky
 
     os.environ.setdefault("FRISKY_TRACING_CAPACITY", str(capacity))
@@ -116,7 +116,7 @@ def _now_ns() -> int:
         import frisky
 
         return int(frisky.now_ns())
-    except Exception:  # noqa: BLE001
+    except Exception:
         return time.time_ns()
 
 
@@ -177,12 +177,12 @@ def collect(cluster, out_dir: Path, *, span_limit: int = 2_000_000) -> dict:
         scheduler_spans = frisky.query_spans(
             limit=span_limit, dashboard_url=url, request_timeout=120
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         report["span_error"] = repr(exc)
     driver_spans: list = []
     try:
         driver_spans = list(frisky.get_spans())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         report["driver_span_error"] = repr(exc)
     spans = scheduler_spans + driver_spans
     (out_dir / "spans.json").write_text(json.dumps(spans, default=str))
@@ -199,11 +199,9 @@ def collect(cluster, out_dir: Path, *, span_limit: int = 2_000_000) -> dict:
         ("recent_events", "limit=2000"),
     ):
         try:
-            with urllib.request.urlopen(  # noqa: S310
-                f"{url}/api/events?{query}", timeout=120
-            ) as fh:
+            with urllib.request.urlopen(f"{url}/api/events?{query}", timeout=120) as fh:
                 events[name] = json.load(fh)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             events[name] = {"error": repr(exc)}
     (out_dir / "events.json").write_text(json.dumps(events, default=str))
     client_events = events["client_events"].get("events", [])

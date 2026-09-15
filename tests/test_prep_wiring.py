@@ -22,10 +22,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import composite  # noqa: E402
-import destripe  # noqa: E402
-import shard_lst_p95  # noqa: E402
-import tile_prep  # noqa: E402
+import composite
+import destripe
+import shard_lst_p95
+import tile_prep
 
 TILE = "S30W065"
 BBOX = (-66.0, -36.0, -59.0, -29.0)

@@ -480,7 +480,7 @@ def any_observation_mask(qa_path, shape):
     return seen
 
 
-def main(argv=None) -> int:  # noqa: C901 - one report, one branch per section
+def main(argv=None) -> int:
     import numpy as np
 
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])

@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from usgs_inventory import (  # noqa: E402
+from usgs_inventory import (
     MAX_SNAP_METERS,
     MONTH_BOUNDARY_GUARD_SECONDS,
     derive_projection,

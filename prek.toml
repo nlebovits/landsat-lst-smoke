@@ -89,7 +89,6 @@ hooks = [
       "tile_inventory.py",
       "tile_prep.py",
       "usgs_inventory.py",
-      "vulture_whitelist.py",
       "--min-confidence",
       "80",
     ],

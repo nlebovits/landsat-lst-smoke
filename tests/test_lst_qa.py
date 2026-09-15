@@ -21,7 +21,7 @@ import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lst_qa import (  # noqa: E402
+from lst_qa import (
     LST_MIN_TRUSTED_C,
     LST_MIN_TRUSTED_DN,
     LST_NODATA_DN,

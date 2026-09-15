@@ -7,8 +7,12 @@
 # layout, so both prek.toml and .github/workflows/ci.yml pass the flag.
 
 [src]
-# vulture_whitelist.py is deliberately unresolvable: a vulture whitelist names
-# symbols that exist nowhere, which is the format. Everything else is checked.
+# This list is not everything. It omits aster_ged.py, lst_qa.py, masks.py,
+# measure_tile_seam.py, publish_catalog.py, stage_bench.py and all of fleet/,
+# which are therefore not type-checked at all. It used to carry a comment
+# claiming the opposite, excusing one file that no longer exists. Closing the
+# gap needs a search path these modules resolve against, which arrives with the
+# package; until then the omission is stated rather than denied.
 include = [
   "cog_catalog.py",
   "compare_qa_masks.py",

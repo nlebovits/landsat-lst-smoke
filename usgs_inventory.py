@@ -728,7 +728,7 @@ def _git_sha() -> str:
         return ""
 
 
-def build_inventory(  # noqa: C901 - one linear pipeline, read top to bottom
+def build_inventory(
     parquet_path: Path | str,
     land_tiles_path: Path | str,
     out_path: Path | str,

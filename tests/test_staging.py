@@ -55,7 +55,7 @@ class FakeS3:
         self.calls: list[tuple[str, str]] = []
         self.payers: list[str | None] = []
 
-    def get_object(self, *, Bucket, Key, RequestPayer=None):  # noqa: N803
+    def get_object(self, *, Bucket, Key, RequestPayer=None):
         self.calls.append((Bucket, Key))
         self.payers.append(RequestPayer)
         if len(self.calls) <= self.fail_first:
@@ -176,7 +176,7 @@ class TestStagedPaths:
         seen_at_get = []
 
         class Watching(FakeS3):
-            def get_object(self, **kw):  # noqa: N803
+            def get_object(self, **kw):
                 seen_at_get.append(items[0]["assets"]["lwir11"]["href"])
                 return super().get_object(**kw)
 
@@ -253,7 +253,7 @@ class TestStagingRun:
         manifest = staging.repoint_items(items, [0], tmp_path)
         fake = FakeS3(fail_first=staging.MAX_ATTEMPTS)
 
-        with pytest.raises(staging.StagingError):  # noqa: PT012
+        with pytest.raises(staging.StagingError):
             with staging.StagingRun(
                 manifest, tmp_path, threads=1, client_factory=lambda _n: fake
             ) as run:
@@ -267,7 +267,7 @@ class TestStagingRun:
         manifest = staging.repoint_items(items, list(range(20)), tmp_path)
         fake = FakeS3(fail_first=staging.MAX_ATTEMPTS)
 
-        with pytest.raises(staging.StagingError):  # noqa: PT012
+        with pytest.raises(staging.StagingError):
             with staging.StagingRun(
                 manifest, tmp_path, threads=1, client_factory=lambda _n: fake
             ) as run:

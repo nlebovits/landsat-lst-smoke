@@ -138,7 +138,7 @@ def running_instances(ec2, ids: list[str]) -> set[str] | None:
         return set()
     try:
         desc = ec2.describe_instances(InstanceIds=ids)
-    except Exception as err:  # noqa: BLE001  not knowing is an answer
+    except Exception as err:
         print(
             f"# cannot reach EC2, reporting from markers only: {type(err).__name__}",
             flush=True,
@@ -180,7 +180,7 @@ def main() -> int:
     def fetch(key: str) -> str | None:
         try:
             return s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode()
-        except Exception:  # noqa: BLE001  absent is a state, not an error
+        except Exception:
             return None
 
     while True:

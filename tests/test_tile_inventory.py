@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from conftest import (  # noqa: E402
+from conftest import (
     MANIFEST,
     SLICE_TILES,
     WINDOW,
@@ -27,8 +27,8 @@ from conftest import (  # noqa: E402
     needs_full_artifact,
     write_inventory,
 )
-from land_tiles import tile_bounds  # noqa: E402
-from tile_inventory import (  # noqa: E402
+from land_tiles import tile_bounds
+from tile_inventory import (
     ASSET_TEMPLATES,
     InventoryError,
     build_item,
@@ -39,7 +39,7 @@ from tile_inventory import (  # noqa: E402
     row_groups_for_tile,
     tile_ids,
 )
-from usgs_inventory import INVENTORY_SCHEMA_VERSION  # noqa: E402
+from usgs_inventory import INVENTORY_SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
 

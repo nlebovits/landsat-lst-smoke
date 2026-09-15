@@ -562,7 +562,7 @@ def _fetch_one(
                 )
             else:
                 written = _fetch_whole(client, bucket, key, dest, settings, counter)
-        except Exception as exc:  # noqa: BLE001 - every failure is retryable here
+        except Exception as exc:
             dest.unlink(missing_ok=True)
             last = exc
             if attempts < MAX_ATTEMPTS:

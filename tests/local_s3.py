@@ -142,10 +142,10 @@ class _Handler(BaseHTTPRequestHandler):
         """The server, typed. `BaseHTTPRequestHandler.server` is a `BaseServer`."""
         return cast("LocalS3", self.server)
 
-    def log_message(self, format, *args) -> None:  # noqa: A002 - the base names it
+    def log_message(self, format, *args) -> None:
         """Silence. The server answers thousands of requests in one test."""
 
-    def do_GET(self) -> None:  # noqa: N802 - the base class names it
+    def do_GET(self) -> None:
         name = self.path.lstrip("/").split("?", 1)[0]
         obj = self.s3.store.get(name)
         if obj is None:
@@ -218,7 +218,7 @@ def client_for(server: LocalS3, connections: int = 10):
         "s3",
         endpoint_url=server.endpoint,
         aws_access_key_id="staging-test",
-        aws_secret_access_key="staging-test",  # noqa: S106 - a loopback server
+        aws_secret_access_key="staging-test",
         region_name="us-east-1",
         config=Config(
             retries={"total_max_attempts": 1, "mode": "standard"},

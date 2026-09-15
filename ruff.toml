@@ -11,15 +11,24 @@ extend-exclude = [".claude"]
 # module and offers no per-function escape, so on this repository it either
 # fails on four argparse-and-report `main` functions or has to be set so loose
 # that it gates nothing. C901 gates each function and names the ones it
-# exempts.
-extend-select = ["C901"]
+# exempts: `cost_report.main` and `shard_lst_p95.main`, each with a reason
+# beside it.
+#
+# RUF100 fails a `noqa` that suppresses nothing. This repository accumulated 58
+# of them. 32 had outlived the finding they silenced. The other 26 named rules
+# the ruleset never enabled at all, copied wholesale from `nlebovits/landsat-lst`
+# along with a `vulture_whitelist.py` whose own docstring said every name in it
+# was absent here. A suppression for a rule that cannot fire is a claim about
+# the code that nothing checks, and it reads as though somebody considered the
+# finding. This makes the next one fail on arrival.
+extend-select = ["C901", "RUF100"]
 
 [lint.mccabe]
 # The ceiling sits one above `collect_frisky`, the most complex function that
 # is not a CLI entry point. New code has to come in under it.
 max-complexity = 12
 
-[lint.per-file-ignores]
-# The dry-run scripts import mid-file on purpose, so that each import lands
-# inside its own timing block. That placement is the measurement.
-"dryrun/*.py" = ["E402"]
+# No per-file-ignores. The table held one entry, for `dryrun/*.py`, and that
+# directory was deleted on 2026-09-12. An ignore for a path that does not exist
+# excuses nothing and outlives anyone's memory of what it was for. Add an entry
+# back when a real file needs it, with the reason beside it.

@@ -87,7 +87,7 @@ def main() -> int:
             if sent.get(rel) != size:
                 try:
                     push(rel, size)
-                except Exception as err:  # noqa: BLE001  keep pushing
+                except Exception as err:
                     print(f"retry {rel}: {err}", flush=True)
         markers = a.run_dir / "markers.txt"
         if markers.is_file() and a.done_marker in markers.read_text():

@@ -305,7 +305,7 @@ def band_statistics(band, nodata: int | None) -> dict[str, str]:
     )
 
 
-def statistics_tags(*, min, max, mean, std, kept, total) -> dict[str, str]:  # noqa: A002
+def statistics_tags(*, min, max, mean, std, kept, total) -> dict[str, str]:
     """The `STATISTICS_*` tags from already-reduced figures.
 
     `band_statistics` reduces an array in memory and calls this. The composite

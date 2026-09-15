@@ -41,8 +41,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import composite  # noqa: E402
-from lst_qa import (  # noqa: E402
+import composite
+from lst_qa import (
     LST_NODATA_DN,
     LST_OUTPUT_MAX_C,
     LST_OUTPUT_MIN_C,

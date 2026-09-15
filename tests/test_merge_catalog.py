@@ -23,10 +23,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import composite  # noqa: E402
-import shard_lst_p95  # noqa: E402
-import cog_catalog  # noqa: E402
-from cog_catalog import collection_id_for_window, write_catalog  # noqa: E402
+import composite
+import shard_lst_p95
+import cog_catalog
+from cog_catalog import collection_id_for_window, write_catalog
 
 BBOX = "-65.0,-32.5,-64.5,-32.0"
 NEIGHBOUR_BBOX = "-65.0,-32.0,-64.5,-31.5"

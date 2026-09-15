@@ -11,9 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import measure_s3_requests  # noqa: E402
-import shard_lst_p95  # noqa: E402
-from stac_window import (  # noqa: E402
+import measure_s3_requests
+import shard_lst_p95
+from stac_window import (
     DEFAULT_END,
     DEFAULT_START,
     datetime_range,

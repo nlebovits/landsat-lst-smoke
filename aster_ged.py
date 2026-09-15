@@ -449,7 +449,7 @@ def read_manifest(path: Path | str) -> dict:
     try:
         with rasterio.open(path) as ds:
             raw = ds.tags().get(MANIFEST_TAG)
-    except Exception as exc:  # noqa: BLE001 - any reader failure is fatal here
+    except Exception as exc:
         msg = f"cannot read {path} as a raster: {exc}"
         raise GedError(msg) from exc
     if not raw:
@@ -760,7 +760,7 @@ def _git_sha() -> str:
             text=True,
             check=True,
         )
-    except Exception:  # noqa: BLE001 - a build outside a checkout still runs
+    except Exception:
         return ""
     return out.stdout.strip()
 

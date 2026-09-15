@@ -687,7 +687,7 @@ def run_blocks(
     return stats
 
 
-def main(argv=None) -> int:  # noqa: C901
+def main(argv=None) -> int:
     import numpy as np
 
     args = parse_args(argv)

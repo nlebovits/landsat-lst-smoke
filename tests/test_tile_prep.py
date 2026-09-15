@@ -28,9 +28,9 @@ import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import destripe  # noqa: E402
-import tile_prep  # noqa: E402
-from lst_qa import LWIR_OFFSET_C, LWIR_SCALE  # noqa: E402
+import destripe
+import tile_prep
+from lst_qa import LWIR_OFFSET_C, LWIR_SCALE
 
 NY = NX = 8
 RATIO = 2

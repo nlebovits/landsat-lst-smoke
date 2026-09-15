@@ -995,7 +995,7 @@ def run_fused(
     return scalars, staged_paths, vectors.n_rejected, len(plan)
 
 
-def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
+def main(argv=None) -> int:  # noqa: C901
     args = parse_args(argv)
     bbox, tile_id = resolve_area(args)
     res = 1.0 / args.pixels_per_degree
