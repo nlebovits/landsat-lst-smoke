@@ -2,16 +2,29 @@
 
 ## The composite
 
-One tile is one lazy dask-xarray graph. `odc.stac.load` opens every scene of
-the tile once, chunked in space and never in time, because a percentile over
-time needs every scene of a pixel in one block. One task masks,
-corrects, reduces, and encodes each block, and the blocks stream from the
-workers into the two COGs the catalog publishes. The driver receives
-nothing larger than one block. Every phase the driver runs around that graph
-is a frisky client phase. The dashboard shows the current phase and its
-elapsed time while it runs.
+One tile is a plan of blocks, and one submitted task per block. Each task
+reads only the scenes whose footprint reaches its own block. It then masks,
+corrects, reduces, and encodes that block.
+
+A percentile over time needs every scene of a pixel together, so each block
+carries its whole time axis. The finished blocks stream from the
+workers into the two COGs the catalog publishes, and the driver receives
+nothing larger than one of them. Every phase the driver runs is a frisky
+client phase. The dashboard shows the current phase and its elapsed time while
+it runs.
+
 `--rehearse N` runs the whole pipeline over N synthetic scenes on local disk,
 with no S3 reads, and tags every line and every artifact `REHEARSAL:`.
+
+`--engine graph` selects a second implementation: one lazy dask-xarray graph
+over the whole tile, through `odc.stac.load`. It applies the same numeric
+rules and writes the same bytes. `tests/test_composite_fused.py` checks that
+block for block.
+
+Runs do not use it. Its build cost scales with the tile's scene count rather
+than with what a block reads, MEASURED at 62.9 s against 27 ms at 4,776
+scenes. It stays because the test suite compares the two against each other,
+and one implementation gives it nothing to compare.
 
 ## Removing the WRS seam
 

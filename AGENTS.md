@@ -25,18 +25,27 @@ The code is one installed package, `lst`, under `src/`. Read
 
 ## The pipeline
 
-The composite is one lazy dask-xarray graph per tile (`lst.composite`), run
-on a frisky cluster by `lst.shard_lst_p95`, after `lst.tile_prep` has fitted
-the seam correction. Read `lst/composite.py`'s module docstring first.
+The composite is a block plan and one submitted task per block
+(`composite.submit_blocks`), run on a frisky cluster by `lst.shard_lst_p95`,
+after `lst.tile_prep` has fitted the seam correction. Read
+`lst/composite.py`'s module docstring first.
 
+- **Two engines, and `fused` is the default.** `--engine graph` selects
+  `composite.build_graph`, one lazy dask-xarray graph over the whole tile.
+  Both apply every numeric rule through the same `reduce_block` and
+  `finalize_block`, and `tests/test_composite_fused.py` asserts they write
+  identical bytes block for block. Keep it that way. The graph is what makes
+  the default checkable, so a change that breaks the comparison is a change
+  that removes the only second opinion on the pixels a run publishes.
 - The time axis is never chunked. `odc.stac.load` is called with
   `chunks={"time": -1, ...}`, `open_stack` asserts it, and `apply_ufunc`
   refuses a time-chunked input. A percentile over an axis may not chunk that
   axis. `DataArray.quantile` is not used anywhere: on dask it rechunks time
   silently and resets the spatial chunks.
-- The graph's task count scales with the block count, not the scene count.
-  `tests/test_composite_graph.py` asserts it. If a change makes that test
-  fail, the change reintroduced per-scene tasks.
+- Task count scales with the block count, not the scene count.
+  `tests/test_composite_graph.py` asserts it for the graph and
+  `tests/test_block_plan.py` for the plan. If either fails, the change
+  reintroduced per-scene tasks.
 - One implementation per numeric rule. The kernels in `lst.lst_qa` and
   `lst.destripe` are numpy and run inside `composite.reduce_block`. Do not add
   a lazy twin of any of them.
