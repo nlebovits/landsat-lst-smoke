@@ -107,7 +107,7 @@ describes the place.
 | Evidence | 5 clear observations over the window | too few scenes to estimate a percentile |
 | Plausibility | -20 C to 80 C, inclusive | the retrieval failed |
 | Land geometry | outside the buffered land geometry | never this product's subject |
-| Observed water | 75% of clear observations set QA_PIXEL bit 7, and the percentile is at or below 34 C | the surface is water |
+| Observed water | 90% of clear observations set QA_PIXEL bit 7, and the percentile is at or below 34 C | the surface is water |
 
 Read `qa_count` beside a nodata pixel as evidence, not as an answer. The two
 water rules zero the count with the temperature. The other two leave the count
@@ -129,7 +129,7 @@ decides pixels and does not define land.
 The buffered geometry leaves sea inside the buffer and cannot see a river at
 all. The observations can. QA_PIXEL sets bit 7 over water, and
 `lst_qa.observed_water` asks what share of a pixel's usable clear observations
-did so over the whole five years. At or above 75%, the pixel leaves the product.
+did so over the whole five years. At or above 90%, the pixel leaves the product.
 
 One bit is not enough on its own. A reflectance test sets that flag, and it
 matches a dark roof or a rail yard on almost every scene. MEASURED in Center
@@ -153,11 +153,13 @@ rivers, and the Delaware Bay block lies offshore of either bank.
 34 C is where the false positives end and before the cost to open water starts.
 It removes every false positive in that box and takes 0.01% of the Chesapeake.
 
-Read the bound as temperate. The Delaware and the Chesapeake publish a P95 of
-27 C to 29 C. Shallow tropical or desert water can run hotter than 34 C, and
-this rule keeps such a pixel rather than calling it water. The asymmetry is
-the point. A warm pond published as land costs less than a warm roof deleted
-as water, and no block here holds warm shallow water to test the other side.
+Temperate water set the bound, and a later probe tested it against Kalimantan.
+The warm-water fear turned out smaller than expected. The Barito estuary
+classifies at a median of 33.18 C and the Kahayan river at 33.92 C, both under
+the bound. The Kahayan upper quartile of 34.74 C does cross it, so that slice
+of river keeps its temperature and the product publishes it as land. The rule
+errs that way deliberately. A warm pond published as land costs less than a
+warm roof deleted as water.
 
 One thermal alternative lost on the numbers. Water holds steady across
 observations where asphalt swings: the per-pixel spread runs 8.30 C over
@@ -188,12 +190,47 @@ this one does not.
 
 The threshold comes from the distribution rather than from convention. MEASURED
 over 17 cached blocks of `N40W080`, 2,199,809 observed pixels: 93.8% sit below a
-share of 0.05 and 3.0% sit at or above 0.90. The emptiest bin between the two
-modes is [0.70, 0.75). The published temperature agrees. On the Philadelphia
-river block, pixels below 0.05 have a median of 44.82 C and pixels above 0.90
-have a median of 28.92 C inside a 1.6 C interquartile band. The bands between
-run down monotonically: 43.49 C, 39.24 C, 33.87 C. A threshold of 0.25 would
-reach a band whose median is 45.00 C, which is land.
+share of 0.05 and 3.0% sit at or above 0.90. The published temperature agrees.
+On the Philadelphia river block, pixels below 0.05 have a median of 44.82 C and
+pixels above 0.90 have a median of 28.92 C inside a 1.6 C interquartile band.
+The bands between run down monotonically: 43.49 C, 39.24 C, 33.87 C. A
+threshold of 0.25 would reach a band whose median is 45.00 C, which is land.
+
+### The tropics set the threshold, not the temperate blocks
+
+Left to `N40W080` alone the answer would be 0.75, its emptiest bin. Kalimantan
+disagrees. MEASURED on a forest block of `N00E110`, the share ramps smoothly
+from 0 to 1 with no empty bin anywhere, and the band at [0.75, 0.90) reads
+31.60 C against forest at 33.65 C. Two degrees, where the temperate river sits
+eleven below its bank. Those pixels are as likely canopy as stream.
+
+Raising the threshold buys that doubt back for almost nothing, at a bound of
+34 C:
+
+| block | truth | at 0.75 | at 0.90 |
+|---|---|---|---|
+| Delaware Bay | all water | 100.0000% | 100.0000% |
+| Chesapeake | mostly water | 93.0602% | 93.0046% |
+| Delaware shoreline | mostly water | 99.7207% | 99.6998% |
+| Barito estuary | tropical water | 12.0725% | 12.0725% |
+| Kahayan river | tropical water | 6.3156% | 6.3156% |
+| Kalimantan forest | tropical land | 0.4599% | 0.1111% |
+| Sebangau peat | tropical land | 0.0000% | 0.0000% |
+| Rajasthan desert | arid land | 0.0000% | 0.0000% |
+| Center City | no water | 0.0000% | 0.0000% |
+
+Delaware Bay loses nothing, the Chesapeake loses 0.056%, and the ambiguous
+forest classifications fall four times over. Both rules now err the same way.
+A pixel of water published as land costs this product less than a pixel of land
+deleted as water.
+
+Much of the tropical water is already absent before any rule runs. 69% of the
+Barito block and 80% of the Kahayan block carry no usable clear observation.
+Landsat retrieves no surface temperature over water, and cloud accounts for
+most of the rest.
+
+The rule keeps flooded peat forest, which is the failure this probe went
+looking for. Sebangau classifies 3 pixels of 22,515.
 
 Until 2026-09-15 every published share of land divided by it. MEASURED at 3600
 pixels per degree, `S40W065` holds 73,254,945 pixels of processing mask and

@@ -210,10 +210,25 @@ class TestTheObservedWaterClassification:
         # different floor here would decide nothing and read as a second rule.
         assert MIN_WATER_OBSERVATIONS == MIN_TOTAL_OBSERVATIONS
 
-    def test_the_threshold_sits_between_the_two_measured_modes(self):
-        # MEASURED over 17 cached blocks of N40W080: land below 0.05, water at
-        # or above 0.90. A threshold outside that gap would cut a mode in half.
-        assert 0.05 < WATER_SHARE_THRESHOLD < 0.90
+    def test_the_threshold_clears_the_land_mode(self):
+        """It has to sit above the land mode and at or below the water one.
+
+        MEASURED over 17 cached blocks of N40W080: 93.8% of pixels sit below a
+        share of 0.05 and 3.0% sit at or above 0.90. A threshold inside the
+        land mode would delete ground, and one above the water mode would
+        classify nothing.
+        """
+        assert 0.05 < WATER_SHARE_THRESHOLD <= 0.90
+
+    def test_the_threshold_is_where_the_tropics_put_it(self):
+        """The temperate blocks alone would take 0.75.
+
+        MEASURED on a Kalimantan forest block, whose share ramps smoothly with
+        no empty bin: 0.75 classifies 0.4599% of it and 0.90 classifies
+        0.1111%, while Delaware Bay stays at 100.0000% and the Chesapeake
+        falls only from 93.0602% to 93.0046%.
+        """
+        assert WATER_SHARE_THRESHOLD == 0.90
 
     def test_large_counters_do_not_wrap(self):
         # The counters are uint32 and the threshold is a Python float. Without
@@ -224,8 +239,11 @@ class TestTheObservedWaterClassification:
         assert bool(np.asarray(observed_water(water, clear))[0]) is True
 
     def test_it_is_elementwise(self):
-        water = np.array([0, 50, 75, 100], dtype="uint32")
-        clear = np.array([100, 100, 100, 100], dtype="uint32")
+        # Written against the constant rather than a literal, so the case
+        # either side of the threshold survives a change to it.
+        on = int(np.ceil(WATER_SHARE_THRESHOLD * 100))
+        water = np.array([0, on - 1, on, 100], dtype="uint32")
+        clear = np.full(4, 100, dtype="uint32")
         got = list(np.asarray(observed_water(water, clear)))
         assert got == [False, False, True, True]
 

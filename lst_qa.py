@@ -154,15 +154,38 @@ LST_OUTPUT_MAX_C = 80.0
 #: MEASURED over 17 cached 360 px blocks of `N40W080`, 2,199,809 observed
 #: pixels with five-year stacks 569 to 765 scenes deep. The distribution has
 #: two modes: 93.8% of pixels sit below 0.05 and 3.0% sit at or above 0.90.
-#: The emptiest bin between them is [0.70, 0.75), holding 1,468 pixels.
+#: The published temperature separates them. On the Philadelphia river block,
+#: pixels below 0.05 have a median of 44.82 C and pixels at or above 0.90 have
+#: a median of 28.92 C inside a 1.6 C interquartile band. The bands between run
+#: monotonically down: 43.49 C over [0.25, 0.50), 39.24 C over [0.50, 0.75),
+#: 33.87 C over [0.75, 0.90). A threshold of 0.25 reaches [0.05, 0.25), whose
+#: median of 45.00 C is land, so it would delete ground.
 #:
-#: The published temperature is what fixes the value. On the Philadelphia
-#: river block, pixels below 0.05 have a median of 44.82 C and pixels at or
-#: above 0.90 have a median of 28.92 C inside a 1.6 C interquartile band. The
-#: bands between run monotonically down: 43.49 C over [0.25, 0.50), 39.24 C
-#: over [0.50, 0.75), 33.87 C over [0.75, 0.90). A threshold of 0.25 reaches
-#: [0.05, 0.25), whose median of 45.00 C is land, so it would delete ground.
-WATER_SHARE_THRESHOLD = 0.75
+#: The temperate blocks would take 0.75, which is their emptiest bin. The
+#: tropics decide otherwise. MEASURED on `N00E110`, a Kalimantan forest block
+#: has no empty bin at all: the share ramps smoothly from 0 to 1 and the band
+#: at [0.75, 0.90) reads 31.60 C against forest at 33.65 C, two degrees rather
+#: than the eleven that separate the temperate river from its bank. Those
+#: pixels are as likely canopy as stream.
+#:
+#: Raising the threshold costs almost nothing and halves that doubt, at a
+#: bound of 34 C:
+#:
+#:     block                 truth             at 0.75    at 0.90
+#:     Delaware Bay          all water        100.0000%  100.0000%
+#:     Chesapeake            mostly water      93.0602%   93.0046%
+#:     Delaware shoreline    mostly water      99.7207%   99.6998%
+#:     Barito estuary        tropical water    12.0725%   12.0725%
+#:     Kahayan river         tropical water     6.3156%    6.3156%
+#:     Kalimantan forest     tropical land      0.4599%    0.1111%
+#:     Sebangau peat         tropical land      0.0000%    0.0000%
+#:     Rajasthan desert      arid land          0.0000%    0.0000%
+#:     Center City           no water           0.0000%    0.0000%
+#:
+#: Open water is untouched and the ambiguous forest classifications fall four
+#: times over. The rule errs towards publishing water rather than deleting
+#: land, which is the cheaper of the two mistakes for a land product.
+WATER_SHARE_THRESHOLD = 0.90
 
 #: Usable clear observations a pixel needs before the share means anything.
 #:
@@ -185,7 +208,9 @@ MIN_WATER_OBSERVATIONS = MIN_TOTAL_OBSERVATIONS
 #: Water has a ceiling that asphalt does not, and the thermal band is the
 #: better evidence about which surface this is.
 #:
-#: Calibrated against two sets with known truth, at a share of 0.75:
+#: Calibrated against two sets with known truth. The share was 0.75 when this
+#: sweep ran, which is the harder test: at 0.90 the share rule alone already
+#: rejects some of what the bound had to catch.
 #:
 #:     bound    Center City masked    Delaware Bay kept    Chesapeake kept
 #:     40 C                 1.33%              100.00%             93.07%
@@ -198,12 +223,14 @@ MIN_WATER_OBSERVATIONS = MIN_TOTAL_OBSERVATIONS
 #: starts. It takes 0.01% of the Chesapeake block and nothing from Delaware
 #: Bay, against 32 C, which takes 0.15%.
 #:
-#: The calibration is temperate water: the Delaware and the Chesapeake run at a
-#: P95 of 27 C to 29 C. Shallow tropical or desert water can sit hotter than
-#: this bound, and such a pixel keeps its temperature rather than being called
-#: water. That is the conservative direction on purpose. A warm pond published
-#: as land is a smaller error than a warm roof deleted as water, and no block
-#: measured here holds warm shallow water to test the other side.
+#: The calibration is temperate water, and the tropics have since been probed
+#: against it. MEASURED on `N00E110`: the Barito estuary classifies at a median
+#: of 33.18 C and the Kahayan river at 33.92 C, both under the bound, so the
+#: warm-water fear it was written against is smaller than expected. The Kahayan
+#: upper quartile of 34.74 C does cross it, and that slice of river keeps its
+#: temperature rather than being called water. That is the conservative
+#: direction on purpose. A warm pond published as land is a smaller error than
+#: a warm roof deleted as water.
 WATER_MAX_C = 34.0
 
 
