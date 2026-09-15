@@ -124,6 +124,12 @@ observations collected from 2000 through 2008. [USGS documents persistent
 Landsat temperature gaps where ASTER GED lacks mean
 emissivity](https://www.usgs.gov/landsat-missions/landsat-collection-2-surface-temperature-data-gaps-due-missing-aster-ged).
 
+![Global ASTER GED emissivity coverage. Blue shows available data; white shows gaps.](docs/images/aster-ged-coverage-usgs.jpg)
+
+*Blue shows available ASTER GED data; white shows gaps. This public-domain
+[USGS map](https://www.usgs.gov/media/images/aster-ged-emissivity-coverage)
+covers global land. The measurements below cover urban land only.*
+
 An earlier analysis intersected ASTER GED observation counts with GHS-SMOD
 R2023A urban land. MEASURED in that analysis, zero-observation cells cover
 80,397 km2 of urban land. That equals 2.66% of the 3,027,063 km2 total.
