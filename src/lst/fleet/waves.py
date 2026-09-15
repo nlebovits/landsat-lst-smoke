@@ -64,13 +64,84 @@ WAVE_TIMEOUT_MINUTES = 85
 #: How often the driver asks object storage where a wave has got to.
 POLL_SECONDS = 60.0
 
-#: Terminal states from `watch.classify`. `hung` is not one: a tile with no
+#: Terminal failures from `watch.classify`. `hung` is not one: a tile with no
 #: heartbeat for five minutes may still recover, and only the wave timeout
 #: decides it never will.
-TERMINAL = ("finished", "failed", "gone")
+TERMINAL_BAD = ("failed", "gone")
+
+#: The phase `watch.classify` gives a tile whose `_MANIFEST.json` says the
+#: upload finished. It is the only phase this driver accepts as done.
+#:
+#: `classify` also calls a tile `finished` on the `all_done` marker alone, with
+#: the detail `waiting on upload`. That is right for a watcher, which only
+#: reports. It is wrong for a driver, which terminates the instance next.
+#: MEASURED on 2026-09-15: `N00W045` was torn down in that state and lost its
+#: `_MANIFEST.json`. Its rasters had landed seconds earlier, so the loss was
+#: one marker file. A tile whose 500 MB `qa_count.tif` was still going up would
+#: have lost the raster.
+#:
+#: `fleet/README.md` states the rule this restores: `_MANIFEST.json` with
+#: `complete: true` is the only proof an upload finished.
+UPLOADED_PHASE = "uploaded"
+
+#: How long a tile may sit at `all_done` without its manifest appearing.
+#:
+#: The uploader polls every 30 s, and one pass after `all_done` it writes the
+#: manifest. A tile still waiting well past that is not uploading. Its instance
+#: hit the deadline, or the uploader died, and either way the wave should stop
+#: holding 19 other machines for it.
+UPLOAD_GRACE_MINUTES = 12.0
 
 #: States that send a tile back to the queue.
-RETRYABLE = ("failed", "gone", "hung", "timeout", "not-driven")
+RETRYABLE = ("failed", "gone", "hung", "timeout", "not-driven", "upload-lost")
+
+
+def is_done(state) -> bool:
+    """Whether a wave may stop waiting on one tile.
+
+    Success needs the manifest, not the marker. See `UPLOADED_PHASE`.
+    """
+    if state.status in TERMINAL_BAD:
+        return True
+    return state.status == "finished" and state.phase == UPLOADED_PHASE
+
+
+def settle_uploads(
+    statuses: dict[str, str],
+    phases: dict[str, str],
+    waiting_since: dict[str, float],
+    now: float,
+    *,
+    grace_minutes: float = UPLOAD_GRACE_MINUTES,
+) -> dict[str, str]:
+    """Re-label a tile stuck at `all_done` whose manifest never arrived.
+
+    A tile that reaches `all_done` and never publishes a manifest produced no
+    proof that its rasters are whole, so it reads `upload-lost` and goes back
+    to the queue rather than counting as finished.
+    """
+    settled = dict(statuses)
+    for tile, status in statuses.items():
+        if status != "finished" or phases.get(tile) == UPLOADED_PHASE:
+            waiting_since.pop(tile, None)
+            continue
+        started = waiting_since.setdefault(tile, now)
+        if (now - started) > grace_minutes * 60:
+            settled[tile] = "upload-lost"
+    return settled
+
+
+def say_now(*args) -> None:
+    """Print and flush.
+
+    A driver redirected to a file writes nothing for an hour otherwise. Python
+    buffers stdout when it is not a terminal, and this module's own progress
+    lines are the only view anyone has of a running wave. MEASURED on
+    2026-09-15: an adopted 20-tile wave ran for minutes with an empty log,
+    because the launch path happens to call `print(flush=True)` and the adopt
+    path calls nothing that flushes.
+    """
+    print(*args, flush=True)
 
 
 def load_tiles(path: Path | str) -> list[str]:
@@ -177,7 +248,7 @@ def run_wave(
     user_data: Path,
     poll_seconds: float,
     timeout_minutes: float,
-    say=print,
+    say=say_now,
 ) -> tuple[dict[str, str], int, Path]:
     """One wave: launch, drive, watch, tear down.
 
@@ -256,7 +327,7 @@ def _await_wave(
     *,
     poll_seconds: float,
     timeout_minutes: float,
-    say=print,
+    say=say_now,
 ) -> dict[str, str]:
     """Poll until every tile is terminal or the wave runs out of time."""
     import boto3
@@ -269,29 +340,80 @@ def _await_wave(
     )
 
     deadline = time.monotonic() + timeout_minutes * 60
+    waiting_since: dict[str, float] = {}
     statuses: dict[str, str] = {}
     while True:
         run = json.loads(manifest_path.read_text())
         states = poll_states(run, s3, ec2)
-        statuses = {s.tile: s.status for s in states}
+        now = time.monotonic()
+        statuses = settle_uploads(
+            {s.tile: s.status for s in states},
+            {s.tile: s.phase for s in states},
+            waiting_since,
+            now,
+        )
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
         tally = {
-            k: sum(1 for s in states if s.status == k)
-            for k in sorted(statuses.values())
+            k: sum(1 for v in statuses.values() if v == k)
+            for k in sorted(set(statuses.values()))
         }
         say(f"{stamp}  " + "  ".join(f"{k}={v}" for k, v in tally.items()))
         for s in states:
-            if s.status != "running":
-                say(f"           {s.tile:9} {s.status:9} {s.phase:16} {s.detail}")
-        if all(s.status in TERMINAL for s in states):
+            if statuses[s.tile] != "running":
+                say(
+                    f"           {s.tile:9} {statuses[s.tile]:11} "
+                    f"{s.phase:16} {s.detail}"
+                )
+        # A tile at `all_done` without its manifest is still uploading. Waiting
+        # costs the wave a minute. Terminating costs the tile its rasters.
+        if all(is_done(s) or statuses[s.tile] == "upload-lost" for s in states):
             return statuses
-        if time.monotonic() > deadline:
+        if now > deadline:
             say(f"\nwave ran past {timeout_minutes:.0f} minutes, giving up on it")
+            done = {s.tile for s in states if is_done(s)}
             return {
-                tile: (status if status in TERMINAL else "timeout")
+                tile: (status if tile in done or status == "upload-lost" else "timeout")
                 for tile, status in statuses.items()
             }
         time.sleep(poll_seconds)
+
+
+def adopt(
+    manifest_path: Path,
+    *,
+    poll_seconds: float = POLL_SECONDS,
+    timeout_minutes: float = WAVE_TIMEOUT_MINUTES,
+    say=say_now,
+) -> dict[str, str]:
+    """Finish a wave whose driver is gone, then tear it down.
+
+    A driver that dies leaves its instances running and billing to the 75
+    minute deadline, with nothing watching them and no cost report. This
+    happened on 2026-09-15: the driver had to be killed mid-wave to stop it
+    terminating instances on the marker instead of the manifest, and 20
+    machines were left with no owner.
+
+    The manifest on disk holds everything needed to take the wave over. It
+    names the instances, their tiles, and the bucket the uploader writes to.
+
+    Returns:
+        The final status of each tile.
+    """
+    run = json.loads(manifest_path.read_text())
+    cfg = run["config"]
+    tiles = [e["tile"] for e in run["instances"]]
+    say(f"adopting {len(tiles)} tile(s) from {manifest_path}")
+    try:
+        return _await_wave(
+            manifest_path,
+            cfg,
+            poll_seconds=poll_seconds,
+            timeout_minutes=timeout_minutes,
+            say=say,
+        )
+    finally:
+        say("\ntearing down the adopted wave")
+        teardown(manifest_path)
 
 
 def sort_wave(
@@ -300,7 +422,7 @@ def sort_wave(
     *,
     attempts: dict[str, int],
     retries: int,
-    say=print,
+    say=say_now,
 ) -> tuple[dict[str, str], list[str]]:
     """Split one wave's results into settled tiles and tiles to run again.
 
@@ -332,7 +454,7 @@ def drain(
     cfg: dict,
     commit: str,
     user_data: Path,
-    say=print,
+    say=say_now,
 ) -> tuple[dict[str, str], list[str], int, list[Path]]:
     """Run waves until the queue empties or `--max-waves` stops it.
 
@@ -387,9 +509,16 @@ def drain(
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(
+        "--adopt",
+        type=Path,
+        metavar="MANIFEST",
+        help="take over an existing wave whose driver is gone: watch it to "
+        "the upload manifest, then tear it down and price it",
+    )
     p.add_argument("--tiles-file", type=Path, help="tile ids, one per line")
     p.add_argument("--tiles", nargs="+", help="tile ids, in place of --tiles-file")
-    p.add_argument("--commit", required=True, help="full 40-character SHA")
+    p.add_argument("--commit", help="full 40-character SHA. Required to launch")
     p.add_argument("--width", type=int, default=20, help="instances per wave")
     p.add_argument(
         "--max-waves",
@@ -417,12 +546,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     a = p.parse_args(argv)
 
+    if a.adopt:
+        if a.tiles_file or a.tiles:
+            p.error("--adopt takes over one wave and launches nothing")
+        statuses = adopt(
+            a.adopt,
+            poll_seconds=a.poll_seconds,
+            timeout_minutes=a.timeout_minutes,
+        )
+        bad = sorted(t for t, s in statuses.items() if s != "finished")
+        print(f"\n{len(statuses) - len(bad)} finished, {len(bad)} not")
+        for tile in bad:
+            print(f"  {tile:9} {statuses[tile]}")
+        return 0 if not bad else 1
+
     if bool(a.tiles_file) == bool(a.tiles):
         p.error("pass exactly one of --tiles-file or --tiles")
     tiles = load_tiles(a.tiles_file) if a.tiles_file else parse_tiles(a.tiles)
     if a.width < 1:
         p.error("--width must be at least 1")
 
+    if not a.commit:
+        p.error("--commit is required to launch")
     cfg = load_config(a.config, a.fleet_dir)
     commit = resolve_commit(a.commit, repo=Path.cwd())
     instance = cfg["instance"]["type"]

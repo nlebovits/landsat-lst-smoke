@@ -454,3 +454,88 @@ class TestTheWatcherFallsBackToTheCli:
             lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "\n"})(),
         )
         assert watch.running_via_cli(["i-aaa"], "p", "us-west-2") == set()
+
+
+class TestADriverWaitsForTheUploadManifest:
+    """`all_done` is the pipeline finishing. The manifest is the upload finishing.
+
+    MEASURED on 2026-09-15: `N00W045` was torn down at `all_done` and lost its
+    `_MANIFEST.json`. Its rasters had landed seconds earlier. A tile still
+    pushing a 500 MB `qa_count.tif` would have lost the raster.
+    """
+
+    def _state(self, phase, status, detail=""):
+        from lst.fleet.watch import State
+
+        return State("S30W065", phase, status, detail)
+
+    def test_the_marker_alone_is_not_done(self):
+        assert not waves.is_done(
+            self._state("all_done", "finished", "waiting on upload")
+        )
+
+    def test_the_manifest_is_done(self):
+        assert waves.is_done(self._state("uploaded", "finished", "manifest complete"))
+
+    def test_a_failure_is_done(self):
+        assert waves.is_done(self._state("prep", "failed", "rc=1"))
+        assert waves.is_done(self._state("prep", "gone", "instance ended"))
+
+    def test_a_running_tile_is_not_done(self):
+        assert not waves.is_done(self._state("prep", "running", "3s since beat"))
+
+
+class TestAnUploadThatNeverArrives:
+    """Waiting forever on a dead uploader holds 19 other machines."""
+
+    def test_inside_the_grace_the_tile_still_counts_as_finished(self):
+        waiting: dict[str, float] = {}
+        out = waves.settle_uploads(
+            {"A": "finished"}, {"A": "all_done"}, waiting, 0.0, grace_minutes=12.0
+        )
+        assert out["A"] == "finished"
+
+    def test_past_the_grace_it_becomes_upload_lost(self):
+        waiting: dict[str, float] = {}
+        waves.settle_uploads(
+            {"A": "finished"}, {"A": "all_done"}, waiting, 0.0, grace_minutes=12.0
+        )
+        out = waves.settle_uploads(
+            {"A": "finished"}, {"A": "all_done"}, waiting, 800.0, grace_minutes=12.0
+        )
+        assert out["A"] == "upload-lost"
+
+    def test_upload_lost_goes_back_to_the_queue(self):
+        assert "upload-lost" in waves.RETRYABLE
+
+    def test_a_manifest_that_arrives_clears_the_clock(self):
+        waiting: dict[str, float] = {}
+        waves.settle_uploads(
+            {"A": "finished"}, {"A": "all_done"}, waiting, 0.0, grace_minutes=12.0
+        )
+        assert "A" in waiting
+        out = waves.settle_uploads(
+            {"A": "finished"}, {"A": "uploaded"}, waiting, 800.0, grace_minutes=12.0
+        )
+        assert out["A"] == "finished"
+        assert "A" not in waiting
+
+
+class TestAnOrphanedWaveCanBeAdopted:
+    """A driver that dies leaves instances billing to their 75 minute deadline."""
+
+    def test_adopt_tears_the_wave_down_even_when_watching_raises(
+        self, tmp_path, monkeypatch, cfg
+    ):
+        torn = []
+        monkeypatch.setattr(waves, "teardown", lambda path, **k: torn.append(path) or 0)
+
+        def boom(*a, **k):
+            raise RuntimeError("object storage is down")
+
+        monkeypatch.setattr(waves, "_await_wave", boom)
+        path = tmp_path / "run.json"
+        path.write_text(json.dumps({"config": cfg, "instances": [{"tile": "S30W065"}]}))
+        with pytest.raises(RuntimeError):
+            waves.adopt(path, say=lambda *a: None)
+        assert torn == [path]
