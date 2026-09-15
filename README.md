@@ -99,7 +99,7 @@ whole tile. Use `items.parquet` when you need metadata for many tiles at once.
 
 ### Nodata does not identify one cause
 
-Several conditions write a nodata temperature:
+Several conditions cause the pipeline to write a nodata temperature:
 
 | Condition | What happened |
 |---|---|
@@ -260,8 +260,7 @@ measurements. Read `src/lst/__init__.py` before changing those boundaries.
 
 ## License
 
-The source code uses the [Apache License 2.0](LICENSE).
-
-The generated STAC collection declares `CC0-1.0` for Landsat-derived data.
-Landsat Collection 2 products carry no use restrictions, and USGS asks users to
-cite the source.
+| Material | License |
+|---|---|
+| Code | [Apache License 2.0](LICENSE) |
+| Data | `CC0-1.0`, based on USGS terms for Landsat Collection 2 products |

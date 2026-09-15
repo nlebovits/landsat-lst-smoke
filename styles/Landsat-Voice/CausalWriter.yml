@@ -1,0 +1,6 @@
+extends: existence
+message: "A condition, rule, or threshold cannot write output. Name the component, or state the causal relationship."
+level: error
+ignorecase: true
+tokens:
+  - '\b(?:conditions?|rules?|thresholds?) (?:write|writes|wrote|emit|emits|publish|publishes)\b'

@@ -46,6 +46,10 @@ CASES = {
         "I hope this helps.",
         "The command prints the result.",
     ),
+    "Landsat-Voice.CausalWriter": (
+        "Several conditions write a nodata temperature.",
+        "Several conditions cause the pipeline to write a nodata temperature.",
+    ),
     "Landsat-Voice.ClosingTail": (
         "In conclusion, publish the files.",
         "Publish the files.",
