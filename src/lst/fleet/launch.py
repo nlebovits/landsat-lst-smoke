@@ -52,6 +52,37 @@ DEFAULT_FLEET_DIR = Path("fleet")
 #: The one AWS error a launch may answer by moving to another zone.
 CAPACITY_ERROR = "InsufficientInstanceCapacity"
 
+#: The errors that mean the account is already running as much as it may, not
+#: that this zone is full. They are account-and-region facts, so trying another
+#: zone cannot help and the launch stops at the first one.
+#:
+#: `servicequotas:GetServiceQuota` is denied for this role, so the concurrent
+#: vCPU ceiling cannot be read before a launch. Meeting one of these is the
+#: only way to discover it. A caller placing a wave catches `QuotaExhausted`,
+#: keeps the instances it did place, and learns its own width from where the
+#: refusal landed.
+QUOTA_ERRORS = (
+    "VcpuLimitExceeded",
+    "InstanceLimitExceeded",
+    "MaxSpotInstanceCountExceeded",
+)
+
+
+class QuotaExhausted(RuntimeError):
+    """The account may not run another instance right now.
+
+    Carries the AWS error code and message. Distinct from `SystemExit` because
+    it is recoverable: the instances already placed are fine, and the caller
+    decides whether to wait, run a narrower wave, or stop.
+    """
+
+    def __init__(self, tile: str, code: str, detail: str):
+        super().__init__(f"{tile}: {code}: {detail}")
+        self.tile = tile
+        self.code = code
+        self.detail = detail
+
+
 #: The error code out of an AWS CLI failure. Matched at the position the CLI
 #: prints it, not anywhere in the text: a message that merely mentions capacity
 #: is not a capacity failure, and treating one as such would retry a malformed
@@ -377,7 +408,11 @@ def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -
                 "capacity_refusals": refusals,
             }
         detail = stderr or stdout
-        if error_code(detail) != CAPACITY_ERROR:
+        found = error_code(detail)
+        if found in QUOTA_ERRORS:
+            # Account-wide, so the next zone would refuse it too.
+            raise QuotaExhausted(tile, found, detail)
+        if found != CAPACITY_ERROR:
             raise fail(argv, code, detail)
         refusals.append(zone)
         say(
@@ -418,11 +453,46 @@ class RunManifest:
         self.write()
         return entry
 
+    def remove(self, entry: dict) -> None:
+        """Drop an entry that never became an instance, and flush.
+
+        A key pair reaches the manifest before `run-instances` is called, so a
+        quota refusal leaves an entry naming a key and no instance. `watch.py`
+        would report it `gone` forever and `teardown.py` would skip it, so the
+        entry is removed once its key is deleted.
+        """
+        self.instances = [e for e in self.instances if e is not entry]
+        self.write()
+
     def write(self) -> None:
         payload = dict(self.header) | {"instances": self.instances}
         tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(json.dumps(payload, indent=1))
         os.replace(tmp, self.path)
+
+
+def delete_key_pair(cfg: dict, name: str) -> bool:
+    """Remove one key pair from EC2. Returns whether the call succeeded.
+
+    Never raises. A key pair that outlives its instance costs nothing and
+    blocks nothing, so failing to delete one must not fail the caller that was
+    cleaning up after something that matters.
+    """
+    a = cfg["aws"]
+    code, _, _ = aws_try(
+        [
+            "aws",
+            "ec2",
+            "delete-key-pair",
+            "--profile",
+            a["profile"],
+            "--region",
+            a["region"],
+            "--key-name",
+            name,
+        ]
+    )
+    return code == 0
 
 
 def launch_one(
@@ -481,7 +551,16 @@ def launch_one(
     if manifest is not None:
         manifest.add(entry)
 
-    placed = run_instances(cfg, name, tile, user_data)
+    try:
+        placed = run_instances(cfg, name, tile, user_data)
+    except QuotaExhausted:
+        # The key opens nothing. Leaving it behind accumulates one dead key
+        # pair per refusal, in EC2 and in ~/.ssh, across every wave.
+        delete_key_pair(cfg, name)
+        pem.unlink(missing_ok=True)
+        if manifest is not None:
+            manifest.remove(entry)
+        raise
     entry |= {
         "instance_id": placed["instance_id"],
         "zone": placed["zone"],

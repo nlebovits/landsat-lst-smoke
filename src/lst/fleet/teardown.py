@@ -23,6 +23,34 @@ import subprocess
 import sys
 from pathlib import Path
 
+from lst.fleet.launch import delete_key_pair
+
+
+def sweep_keys(cfg: dict, run: dict, *, remove_files: bool = True) -> tuple[int, int]:
+    """Delete the key pair of every instance in the manifest.
+
+    `launch.py` creates one key pair per instance, named for the tile and the
+    run. Nothing deleted them until now, so a 100-tile run left 100 key pairs
+    in EC2 and 100 private keys in `~/.ssh`. The account limit is 5,000, which
+    a few continent-scale runs reach.
+
+    This runs only after termination succeeds. The key is the single way into a
+    running instance, because `ec2-instance-connect`, `ssm`, and the serial
+    console are all denied for this role. Deleting it while the instance lives
+    would strand a box that is still billing.
+
+    Returns:
+        `(deleted, attempted)`.
+    """
+    deleted = 0
+    entries = [e for e in run["instances"] if e.get("name")]
+    for entry in entries:
+        if delete_key_pair(cfg, entry["name"]):
+            deleted += 1
+        if remove_files and entry.get("pem"):
+            Path(entry["pem"]).expanduser().unlink(missing_ok=True)
+    return deleted, len(entries)
+
 
 def terminate_argv(cfg: dict, ids: list[str]) -> list[str]:
     a = cfg["aws"]
@@ -43,6 +71,13 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--manifest", type=Path, required=True)
     p.add_argument("--skip-cost", action="store_true")
+    p.add_argument(
+        "--keep-keys",
+        action="store_true",
+        help="leave the key pairs in place. Without it, terminating also "
+        "deletes the key pair and the private key of every instance in the "
+        "manifest, which is safe only because they are already terminated",
+    )
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
 
@@ -73,13 +108,12 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    if a.skip_cost:
-        return 0 if terminated else 1
-
     if terminated:
-        # `StateTransitionReason` carries the timestamp the report prices
-        # against, and it is not set the instant the call returns.
-        print("waiting for the instances to stop, so the report can price them")
+        # One wait serves both of the steps below. `StateTransitionReason`
+        # carries the timestamp the report prices against and is not set the
+        # instant the call returns, and a key may only be deleted once its
+        # instance is gone.
+        print("waiting for the instances to stop")
         subprocess.run(
             [
                 "aws",
@@ -96,6 +130,14 @@ def main() -> int:
             capture_output=True,
             text=True,
         )
+        if not a.keep_keys:
+            # After termination, never before. The key is the only way into a
+            # live instance for this role.
+            deleted, attempted = sweep_keys(cfg, run)
+            print(f"deleted {deleted} of {attempted} key pair(s)")
+
+    if a.skip_cost:
+        return 0 if terminated else 1
 
     report = a.manifest.with_suffix(".cost.txt")
     # Still a subprocess, and still `-m`: the cost report has to survive this
