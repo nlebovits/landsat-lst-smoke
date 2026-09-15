@@ -76,9 +76,11 @@ jobs:
       # --extra-search-path puts the repository root on the module path.
       # measure_s3_requests.py imports shard_lst_p95 after a sys.path insert.
       # tests/ goes on it too, because pytest puts it there and the test
-      # modules import their shared fixtures from conftest by name.
+      # modules import their shared fixtures from conftest by name. fleet/
+      # holds the launch scripts, which tests/test_fleet_launch.py imports the
+      # same way.
       - name: ty
-        run: uv run ty check --extra-search-path . --extra-search-path tests
+        run: uv run ty check --extra-search-path . --extra-search-path tests --extra-search-path fleet
 
   test:
     name: Unit tests

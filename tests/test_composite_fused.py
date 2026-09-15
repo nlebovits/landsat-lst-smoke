@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 import composite  # noqa: E402
 import destripe  # noqa: E402
+from lst_qa import LST_NODATA_DN, MIN_TOTAL_OBSERVATIONS  # noqa: E402
 from masks import transform_for  # noqa: E402
 
 #: A window wide enough that the 7 x 7 rehearsal walk leaves part of it
@@ -269,8 +270,6 @@ def fused_run(
     `kernel_prep` is what the tasks are handed, which the driver sets to None
     under `--no-feather` while the vectors still come from the real artifact.
     """
-    from masks import gap_hot_dn
-
     kernel_prep = prep if kernel_prep is ... else kernel_prep
     rule = dict(rule or {})
     plan = composite.build_block_plan(items, boxes, tile_geobox(), CHUNK)
@@ -282,17 +281,7 @@ def fused_run(
         crs="EPSG:4326",
         emit_pooled=emit_pooled,
     )
-    keep_mask = rule.get("keep_mask")
-    outputs = composite.BlockOutputs(
-        targets=targets,
-        keep=keep_mask,
-        gap=rule.get("gap_mask"),
-        hot_dn=(
-            rule.get("hot_dn")
-            if keep_mask is None or rule.get("hot_dn") is not None
-            else gap_hot_dn()
-        ),
-    )
+    outputs = composite.BlockOutputs(targets=targets, keep=rule.get("keep_mask"))
     results = [
         composite.fused_block(
             block,
@@ -392,9 +381,7 @@ class TestFusedBlock:
         height, width = composite.raster_shape(BBOX, PPD)
         keep = np.ones((height, width), dtype=bool)
         keep[-CHUNK:, :] = False  # the bottom block row is sea
-        gap = np.zeros((height, width), dtype=bool)
-        gap[:CHUNK, :] = True  # the top block row is inside the ASTER gap
-        rule = {"keep_mask": keep, "gap_mask": gap, "hot_dn": 5_000}
+        rule = {"keep_mask": keep}
         want_scalars, want_paths, _ = graph_run(tmp_path / "graph", items, rule=rule)
         got_scalars, got_paths, _, _ = fused_run(
             tmp_path / "fused", items, boxes, rule=rule
@@ -402,7 +389,32 @@ class TestFusedBlock:
         assert_same_files(got_paths, want_paths)
         assert got_scalars == want_scalars
         assert got_scalars["removed_water"] > 0
-        assert got_scalars["removed_hot"] > 0
+
+    def test_the_validity_rule_lands_on_the_same_pixels(self, tmp_path, scenes):
+        """The two engines agree about what `supported_output` removed.
+
+        The rule runs in `reduce_block`, which both engines call, so the only
+        way they could disagree is a block reaching one kernel at a different
+        depth than the other. MEASURED on this fixture, the full 20 scenes
+        leave every pixel with 9 or more observations and exercise nothing, so
+        the first 8 are used: they leave 5.2% of the window below the floor and
+        the rest above it.
+        """
+        items, boxes = scenes
+        items, boxes = items[:8], boxes[:8]
+        want_scalars, want_paths, _ = graph_run(tmp_path / "graph", items)
+        got_scalars, got_paths, _, _ = fused_run(tmp_path / "fused", items, boxes)
+        assert_same_files(got_paths, want_paths)
+        assert got_scalars == want_scalars
+        with rasterio.open(got_paths["lst_p95"]) as src:
+            lst = src.read(1)
+        with rasterio.open(got_paths["qa_count"]) as src:
+            total = src.read().sum(axis=0, dtype="uint16")
+        sparse = total < MIN_TOTAL_OBSERVATIONS
+        assert sparse.any(), "the fixture no longer exercises the floor"
+        assert (lst[sparse] == LST_NODATA_DN).all()
+        # The evidence reaches the file even where the temperature did not.
+        assert (total[sparse] > 0).any()
 
     def test_a_block_no_scene_reaches_still_writes_its_nodata(self, tmp_path, scenes):
         """An empty plan entry owns its window and has to fill it."""

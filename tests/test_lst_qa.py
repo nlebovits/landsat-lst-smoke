@@ -26,18 +26,22 @@ from lst_qa import (  # noqa: E402
     LST_MIN_TRUSTED_DN,
     LST_NODATA_DN,
     LST_OFFSET,
+    LST_OUTPUT_MAX_C,
+    LST_OUTPUT_MIN_C,
     LST_SCALE,
     LST_VALID_MAX_C,
     LST_VALID_MIN_C,
     LWIR_FILL_DN,
     LWIR_OFFSET_C,
     LWIR_SCALE,
+    MIN_TOTAL_OBSERVATIONS,
     QA_EXCLUDED_BIT_NUMBERS,
     QA_EXCLUDED_BITS,
     encode_celsius,
     in_trusted_range,
     masked_celsius,
     qa_clear,
+    supported_output,
     to_celsius,
 )
 
@@ -362,3 +366,93 @@ class TestThePredicatesTakeDataArrays:
         lazy_qa = xr.DataArray(qa, dims=("time", "y", "x"))
         lazy = valid_observation(lazy_dn, lazy_qa, to_celsius(lazy_dn))
         np.testing.assert_array_equal(eager, lazy.values)
+
+
+class TestTheOutputSupportRule:
+    """What `supported_output` publishes, and what it will not.
+
+    The rule bounds the composite rather than an observation, so it asks two
+    questions the per-observation rules cannot. Is there enough evidence behind
+    this percentile, and is the number it produced a temperature. Both bounds
+    are inclusive, and the nine cases below fix every edge.
+
+    Why a second range check exists at all: `destripe.subtract_offsets` moves a
+    decoded value after `in_trusted_range` has passed it, so the per-observation
+    ceiling does not survive to the output. MEASURED on N30E075, 207 published
+    pixels reach 80 C or hotter.
+    """
+
+    @staticmethod
+    def ask(celsius, observations):
+        """One pixel, as a bool."""
+        return bool(
+            np.asarray(
+                supported_output(
+                    np.array([celsius], dtype="float32"),
+                    np.array([observations], dtype="uint16"),
+                )
+            )[0]
+        )
+
+    def test_the_floor_is_five_observations(self):
+        assert MIN_TOTAL_OBSERVATIONS == 5
+
+    def test_four_observations_are_not_enough(self):
+        assert self.ask(28.4, 4) is False
+
+    def test_five_observations_are_enough(self):
+        assert self.ask(28.4, 5) is True
+
+    def test_no_observation_at_all_is_not_enough(self):
+        assert self.ask(28.4, 0) is False
+
+    def test_a_step_below_the_cold_bound_is_refused(self):
+        assert self.ask(LST_OUTPUT_MIN_C - LST_SCALE, 140) is False
+
+    def test_the_cold_bound_is_inclusive(self):
+        assert self.ask(LST_OUTPUT_MIN_C, 140) is True
+
+    def test_a_step_above_the_hot_bound_is_refused(self):
+        assert self.ask(LST_OUTPUT_MAX_C + LST_SCALE, 140) is False
+
+    def test_the_hot_bound_is_inclusive(self):
+        assert self.ask(LST_OUTPUT_MAX_C, 140) is True
+
+    def test_an_ordinary_well_supported_pixel_survives(self):
+        # The median tile carries between 56 and 160 observations, and a
+        # hot-season p95 over land sits far inside both bounds.
+        assert self.ask(28.4, 140) is True
+
+    def test_nan_is_refused_however_many_observations_back_it(self):
+        assert self.ask(np.nan, 3000) is False
+
+    def test_the_two_halves_are_independent(self):
+        # Evidence does not excuse an impossible value, and a possible value
+        # does not excuse missing evidence.
+        assert self.ask(120.0, 3000) is False
+        assert self.ask(28.4, 1) is False
+
+    def test_the_output_bounds_are_not_the_observation_bounds(self):
+        # A guard against the two pairs being read as one. The cold bounds
+        # differ by 30 C, and a per-observation value at -45 C is usable while
+        # a composite at -45 C is not.
+        assert LST_OUTPUT_MIN_C > LST_VALID_MIN_C
+        assert self.ask(-45.0, 140) is False
+        assert bool(np.asarray(in_trusted_range(np.float32(-45.0))))
+
+    def test_it_is_elementwise(self):
+        celsius = np.array([28.4, 28.4, -25.0, 95.0], dtype="float32")
+        obs = np.array([140, 4, 140, 140], dtype="uint16")
+        assert list(np.asarray(supported_output(celsius, obs))) == [
+            True,
+            False,
+            False,
+            False,
+        ]
+
+    def test_it_answers_a_dataarray_too(self):
+        celsius = xr.DataArray(
+            np.array([[28.4, 28.4]], dtype="float32"), dims=("y", "x")
+        )
+        obs = xr.DataArray(np.array([[140, 4]], dtype="uint16"), dims=("y", "x"))
+        assert list(np.asarray(supported_output(celsius, obs)).ravel()) == [True, False]

@@ -548,16 +548,12 @@ class TestTheBlockOutputs:
         plan = composite.build_block_plan(items, boxes, geobox_for(TILE_BBOX), 6_000)
         keep = np.zeros((18_000, 18_000), dtype=bool)
         keep[6_100, 12_050] = True
-        outputs = composite.BlockOutputs(
-            targets={}, keep=keep, gap=np.ones((18_000, 18_000), dtype=bool), hot_dn=7
-        )
+        outputs = composite.BlockOutputs(targets={}, keep=keep)
         assert outputs.masked
         cut = outputs.for_block(plan[1 * 3 + 2])
-        assert cut.keep.shape == cut.gap.shape == (6_000, 6_000)
+        assert cut.keep.shape == (6_000, 6_000)
         assert cut.keep[100, 50]
         assert cut.keep.sum() == 1
-        assert cut.gap.all()
-        assert cut.hot_dn == 7
         assert cut.targets is outputs.targets
 
     def test_an_unmasked_run_carries_no_planes(self):
@@ -589,6 +585,61 @@ class TestTheBlockOutputs:
         assert all(
             call["args"][4].keep.shape == (6_000, 6_000) for call in client.calls
         )
+
+    def test_cutting_a_cut_window_again_returns_it_unchanged(self):
+        """The driver cuts and the worker cuts, and one window has to survive.
+
+        `submit_blocks` cuts before it submits and `fused_block` cuts again on
+        the worker. A block's slices are absolute, so the second cut would
+        index the tile's offset into a 6,000 px window and hand
+        `finalize_block` an empty array.
+        """
+        items, boxes = walk_items(6, TILE_BBOX)
+        plan = composite.build_block_plan(items, boxes, geobox_for(TILE_BBOX), 6_000)
+        block = plan[1 * 3 + 2]
+        keep = np.zeros((18_000, 18_000), dtype=bool)
+        keep[6_100, 12_050] = True
+        outputs = composite.BlockOutputs(targets={}, keep=keep)
+
+        once = outputs.for_block(block)
+        twice = once.for_block(block)
+
+        assert twice is once
+        assert twice.keep.shape == (6_000, 6_000)
+        assert twice.keep.sum() == 1
+
+    def test_the_window_a_submitted_task_cuts_is_the_block_not_an_empty_array(self):
+        """The production pair, driver cut then worker cut, on a masked run.
+
+        `counting_stub` never touches `out`, so the suite proved nothing about
+        this pair until the 12-scene rehearsal raised on it.
+        """
+        items, vectors, plan = plan_and_vectors(chunk=6_000)
+        keep = np.zeros((18_000, 18_000), dtype=bool)
+        keep[:6_000] = True
+        outputs = composite.BlockOutputs(targets={}, keep=keep)
+        shapes = []
+
+        def cuts_the_way_fused_block_does(
+            block, _items, _vectors, _prep, out, *, emit_pooled=False
+        ):
+            if hasattr(out, "for_block"):
+                out = out.for_block(block)
+            shapes.append(out.keep.shape)
+            return {"valid": int(out.keep.sum())}
+
+        totals = composite.submit_blocks(
+            FakeClient(),
+            FakeCluster(),
+            plan,
+            cuts_the_way_fused_block_does,
+            items=items,
+            vectors=vectors,
+            out=outputs,
+        )
+
+        assert shapes and all(shape == (6_000, 6_000) for shape in shapes)
+        assert totals["valid"] == int(keep.sum())
 
 
 # --------------------------------------------------------------------------
@@ -673,7 +724,6 @@ class TestTheDriverBranch:
             "item_bboxes": boxes,
             "prep": None,
             "keep_mask": None,
-            "gap_mask": None,
             "marks": {},
             "say": lambda _line="": None,
         } | overrides
@@ -721,7 +771,7 @@ class TestTheDriverBranch:
         )
         outs = [call["args"][4] for call in client.calls]
         assert all(out.keep.shape == (40, 40) for out in outs)
-        assert all(out.hot_dn is not None for out in outs)
+        assert all(out.cut for out in outs)
 
     def test_the_engine_flag_defaults_to_the_graph(self):
         import shard_lst_p95
@@ -731,3 +781,76 @@ class TestTheDriverBranch:
             shard_lst_p95.parse_args(["--tile", "S30W065", "--engine", "fused"]).engine
             == "fused"
         )
+
+
+# --------------------------------------------------------------------------
+# The block memory model, and which engine pays the tile's time axis
+# --------------------------------------------------------------------------
+
+
+class TestTheMemoryModel:
+    """The loaded term is the block's depth on one engine and the tile on the
+    other, and the guard refuses on whichever the run will actually pay.
+
+    MEASURED over five whole tiles at 48 fused slots: 58.01 to 64.70 GiB. The
+    fused model puts them at 90.7 to 92.6 GiB. Charging the time axis put them
+    at 152.6 to 184.6 GiB and made the prediction a function of the tile, which
+    is what these tests pin.
+    """
+
+    def depths(self):
+        items, boxes = walk_items(400, TILE_BBOX)
+        return composite.block_depths(TILE_BBOX, PPD, 360, boxes), len(items)
+
+    def test_the_fused_demand_ignores_the_tiles_scene_count(self):
+        depths, n = self.depths()
+        near = composite.memory_demand(360, n, depths, 48, fused=True)
+        far = composite.memory_demand(360, n * 10, depths, 48, fused=True)
+        assert near == far
+
+    def test_the_graph_demand_scales_with_the_tiles_scene_count(self):
+        """And by exactly the loaded term, which is what `open_stack` holds."""
+        depths, n = self.depths()
+        near = composite.memory_demand(360, n, depths, 48)
+        far = composite.memory_demand(360, n * 2, depths, 48)
+        extra = 48 * 360 * 360 * n * composite.LOADED_BYTES_PER_PIXEL_SCENE
+        assert far - near == pytest.approx(extra / composite.GIB)
+
+    def test_fused_never_demands_more_than_graph(self):
+        depths, n = self.depths()
+        fused = composite.memory_demand(360, n, depths, 48, fused=True)
+        graph = composite.memory_demand(360, n, depths, 48)
+        assert fused < graph
+        # The fused engine reads only the block's own scenes, so the loaded
+        # term collapses from the time axis to the depth.
+        assert fused == pytest.approx(
+            sum(
+                composite.block_bytes(360, d, d)
+                for d in sorted(depths.ravel().tolist(), reverse=True)[:48]
+            )
+        )
+
+    def test_the_guard_refuses_on_the_engine_it_was_given(self):
+        depths, n = self.depths()
+        fused = composite.memory_demand(360, n, depths, 48, fused=True)
+        machine = int((fused + 1) * 1024**3)
+
+        assert composite.memory_guard(
+            360, n, depths, 48, total_bytes=machine, fused=True
+        ) == pytest.approx(fused)
+        with pytest.raises(SystemExit):
+            composite.memory_guard(360, n, depths, 48, total_bytes=machine)
+
+    def test_a_block_pays_its_own_depth_twice_under_fusion(self):
+        chunk, depth = 360, 800
+        got = composite.block_bytes(chunk, depth, depth)
+        want = (
+            chunk
+            * chunk
+            * depth
+            * (
+                composite.LOADED_BYTES_PER_PIXEL_SCENE
+                + composite.PRESENT_BYTES_PER_PIXEL_SCENE
+            )
+        ) / composite.GIB + composite.FIXED_GIB
+        assert got == pytest.approx(want)

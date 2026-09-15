@@ -39,6 +39,7 @@ from pathlib import Path
 import aster_ged
 import composite
 import destripe
+import lst_qa
 import masks
 import observe
 import staging
@@ -689,7 +690,9 @@ def mask_rule(args, counts, ged_provenance=None) -> dict | None:
         return None
     rule: dict = {
         "gap_buffer_cells": counts.get("gap_buffer_cells"),
-        "gap_hot_threshold_c": counts.get("gap_hot_threshold_c"),
+        "min_total_observations": lst_qa.MIN_TOTAL_OBSERVATIONS,
+        "lst_output_min_c": lst_qa.LST_OUTPUT_MIN_C,
+        "lst_output_max_c": lst_qa.LST_OUTPUT_MAX_C,
         "land_geometry_sha256": masks.geometry_checksum(args.land_geometry_uri),
     }
     if ged_provenance:
@@ -804,7 +807,46 @@ def correction_rule(args, prep) -> dict | None:
     }
 
 
-def run_meta(args, bbox, height, width, mask_rule_value, correction_rule_value) -> dict:
+def coverage(mask_counts, lst_statistics) -> dict | None:
+    """How much of the tile's land carries a temperature, and how much cloud
+    took. None under `--no-output-mask`, which leaves no land to divide by.
+
+    Every number here is already computed. `masks.apply_output_mask` returns
+    the land count and `composite.finish_staging` returns the valid count, so
+    this costs one division and puts both on the published item. Without it a
+    reader has to fetch a 350 to 640 MB `qa_count` to learn that a tile is
+    half empty.
+
+    `empty_land_pixels` is land the five-year window never saw clear. MEASURED
+    over five tiles it runs from 27,915 on N30E075 to 105,608,892 on N00E110,
+    which is 45.2% of that tile's land, and no compositing rule recovers any of
+    it.
+    """
+    if not mask_counts:
+        return None
+    land = int(mask_counts.get("pixels_kept") or 0)
+    if not land:
+        return None
+    valid = int(lst_statistics[0]["kept"])
+    gap_on_land = int(mask_counts.get("pixels_emissivity_gap_on_land") or 0)
+    return {
+        "land_pixels": land,
+        "valid_pixels": valid,
+        "empty_land_pixels": land - valid,
+        "valid_fraction": valid / land,
+        "ged_gap_fraction": gap_on_land / land,
+    }
+
+
+def run_meta(
+    args,
+    bbox,
+    height,
+    width,
+    mask_rule_value,
+    correction_rule_value,
+    coverage_value=None,
+) -> dict:
     """What the catalog needs to describe this tile. The former part-meta."""
     return {
         "raster": [height, width],
@@ -813,6 +855,7 @@ def run_meta(args, bbox, height, width, mask_rule_value, correction_rule_value) 
         "pixels_per_degree": args.pixels_per_degree,
         "chunk_px": args.chunk,
         "mask_rule": mask_rule_value,
+        "coverage": coverage_value,
         "correction_rule": correction_rule_value,
         "start": args.start,
         "end": args.end,
@@ -831,18 +874,29 @@ def _dry_run(args, bbox, height, width, say) -> int:
     cols = -(-width // chunk)
     say(f"blocks        {rows * cols}  of {chunk}x{chunk} px ({rows} x {cols})")
     slots = args.workers * args.threads_per_worker
-    say(f"\nnaive budget across {slots} slots, DERIVED from the block model:")
+    fused = args.engine == "fused"
+    say(
+        f"\nnaive budget across {slots} slots, DERIVED from the block model, "
+        f"engine {args.engine}:"
+    )
     for n, present in ((711, 200), (1765, 400), (4776, 820)):
-        per = composite.block_bytes(chunk, n, present)
+        per = composite.block_bytes(chunk, present if fused else n, present)
         total = per * slots
         verdict = ""
         if args.target_memory_gib:
             over = total - args.target_memory_gib
             verdict = f"   OVER by {over:.1f} GiB" if over > 0 else "   fits"
+        # The fused engine reads only a block's own scenes, so the tile's time
+        # axis prices nothing and printing it beside the depth would imply it
+        # does.
+        where = (
+            f"  at {present:>3} scenes per block:                 "
+            if fused
+            else f"  at {n:>5} scenes, {present:>3} present per block: "
+        )
         say(
-            f"  at {n:>5} scenes, {present:>3} present per block: "
-            f"{per:5.2f} GiB per block, {total:6.1f} GiB across {slots} slots"
-            f"{verdict}"
+            f"{where}{per:5.2f} GiB per block, "
+            f"{total:6.1f} GiB across {slots} slots{verdict}"
         )
     (args.out_dir / "blocks.json").write_text(
         json.dumps(
@@ -864,7 +918,6 @@ def run_fused(
     item_bboxes,
     prep,
     keep_mask,
-    gap_mask,
     marks,
     say,
 ):
@@ -886,7 +939,7 @@ def run_fused(
     """
     from odc.geo.geobox import GeoBox
 
-    from masks import gap_hot_dn, transform_for
+    from masks import transform_for
 
     fused_block = getattr(composite, "fused_block", None)
     if fused_block is None:
@@ -920,12 +973,7 @@ def run_fused(
         f"scenes per block on average against {len(item_dicts)} on the tile's "
         f"time axis, planned in {marks['plan_s']:.2f}s"
     )
-    outputs = composite.BlockOutputs(
-        targets=targets,
-        keep=keep_mask,
-        gap=gap_mask,
-        hot_dn=None if keep_mask is None else gap_hot_dn(),
-    )
+    outputs = composite.BlockOutputs(targets=targets, keep=keep_mask)
     scalars = composite.submit_blocks(
         client,
         cluster,
@@ -984,10 +1032,11 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
     # the tile's bbox and on two artifacts, and on nothing this run computes,
     # so a tile it empties can be recorded without staging a single object.
     ged_provenance = check_mask_inputs(args, say)
-    keep = gap = mask_counts = None
+    keep = mask_counts = None
     if ged_provenance is not None:
         with observe.phase("masks", marks=marks):
-            keep, gap, mask_counts = masks.output_mask(
+            # The gap region is reported in `mask_counts` and removes nothing.
+            keep, _gap, mask_counts = masks.output_mask(
                 bbox,
                 args.pixels_per_degree,
                 numobs_uri=args.numobs_uri,
@@ -1099,11 +1148,15 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
     memory_demand_gib = None
     if not args.rehearse and not args.force:
         memory_demand_gib = composite.memory_guard(
-            args.chunk, len(item_dicts), depths, slots
+            args.chunk,
+            len(item_dicts),
+            depths,
+            slots,
+            fused=args.engine == "fused",
         )
         say(
             f"memory        {memory_demand_gib:.1f} GiB demanded across "
-            f"{slots} slots (DERIVED), fits"
+            f"{slots} slots ({args.engine}, DERIVED), fits"
         )
 
     sampler = MemorySampler(args.out_dir / "memory.csv", args.sample_interval)
@@ -1149,7 +1202,6 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
                 item_bboxes=item_bboxes,
                 prep=prep,
                 keep_mask=keep,
-                gap_mask=gap,
                 marks=marks,
                 say=say,
             )
@@ -1181,7 +1233,6 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
                     crs=args.crs,
                     dims=(ydim, xdim),
                     keep_mask=keep,
-                    gap_mask=gap,
                 )
                 n_tasks = len(dict(counts.__dask_graph__()))
             n_rejected = out.attrs["n_rejected"]
@@ -1218,15 +1269,13 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
         mask_counts |= {
             "scope": "tile",
             "valid_removed_by_water": int(scalars.get("removed_water", 0)),
-            "valid_removed_by_emissivity": int(scalars.get("removed_hot", 0)),
-            "valid_removed_by_mask": int(scalars.get("removed_water", 0))
-            + int(scalars.get("removed_hot", 0)),
+            "valid_removed_by_mask": int(scalars.get("removed_water", 0)),
             "qa_count_pixels_zeroed": int(scalars.get("qa_zeroed", 0)),
         }
         say(
             f"masked        {mask_counts['valid_removed_by_water']:,} px sea, "
-            f"{mask_counts['valid_removed_by_emissivity']:,} px hot inside the "
-            f"ASTER gap region"
+            f"{mask_counts['pixels_emissivity_gap']:,} px inside the ASTER gap "
+            f"region, which the mask reports and does not remove"
         )
 
     # The header fields the workers could not write: scale, offset, band
@@ -1253,6 +1302,7 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
             width,
             mask_rule(args, mask_counts, ged_provenance),
             correction_rule(args, prep),
+            coverage(mask_counts, lst_statistics),
         )
         catalog_root = None
         if args.no_catalog:

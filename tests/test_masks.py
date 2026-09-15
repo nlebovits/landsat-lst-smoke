@@ -1,4 +1,4 @@
-"""Which pixels the product describes, and the two rules that decide.
+"""Which pixels the product describes, and the rule that decides.
 
 `land_tiles.py` opens with the contract this module completes: one geometry
 answers both "which tiles does the fleet run" and "which pixels carry a
@@ -20,14 +20,15 @@ The gap region standing in for the damage. USGS does not leave a gap cell
 empty. It interpolates emissivity from the neighbours and retrieves a
 temperature, and 89.53% of gap pixels carry one. Removing the region removes
 701,839 valid pixels of S30W065 to remove 4,588 bad ones, and 524 of its 605
-gap cells hold nothing bad at all. So the rule is the pair, and
-`TestTheEmissivityRuleIsAPair` is the truth table that says neither half acts
-alone.
+gap cells hold nothing bad at all. An earlier build paired the region with a
+70 C threshold instead; five tiles then showed the halves do not coincide, and
+`TestTheEmissivityRegionRemovesNothing` holds that retirement in place.
 
 `lst_p95` and `qa_count` disagreeing. A `qa_count` above zero beside a nodata
 temperature says the pixel had observations and lost them to the reduction.
-That is what happened under the emissivity rule, so it leaves the count alone.
-Over water the pixel was never this product's subject, so both bands go.
+That is what the evidence rule in `lst_qa.supported_output` wants to say, so it
+leaves the count alone. Over water the pixel was never this product's subject,
+so both bands go.
 """
 
 from __future__ import annotations
@@ -313,7 +314,7 @@ class TestTheEmissivityRule:
         )
         assert counts["pixels_kept"] == counts["pixels_total"]
 
-    def test_the_counts_name_the_rule_that_will_run(self, gapped, land_geometry):
+    def test_the_counts_name_the_region_they_report(self, gapped, land_geometry):
         _, _, counts = masks.output_mask(
             tile_bounds("S30W065"),
             COARSE_PPD,
@@ -321,7 +322,9 @@ class TestTheEmissivityRule:
             land_geometry_uri=land_geometry,
         )
         assert counts["gap_buffer_cells"] == masks.GAP_BUFFER_CELLS
-        assert counts["gap_hot_threshold_c"] == masks.GAP_HOT_THRESHOLD_C
+        # The withdrawn pair rule's threshold is gone from the counts, because
+        # nothing applies it. `lst_qa.LST_OUTPUT_MAX_C` replaced it.
+        assert "gap_hot_threshold_c" not in counts
 
     def test_land_with_no_granule_is_kept_and_counted(self, tmp_path, land_geometry):
         """A gap the artifact cannot demonstrate is not a gap.
@@ -445,98 +448,60 @@ class TestApplyOutputMask:
         assert counts["scope"] == "shards[0:64]"
 
 
-class TestTheEmissivityRuleIsAPair:
-    """Neither half of the rule removes a pixel on its own.
+class TestTheEmissivityRegionRemovesNothing:
+    """The gap region is reported and never masked.
 
-    The gap region alone removes 701,839 valid pixels of S30W065 and 87% of
-    the cells it removes carry nothing wrong. The threshold alone would delete
-    ordinary hot ground. `nlebovits/landsat-lst` shipped the geometry alone,
-    measured 2,799,286 pixels removed for 2,582 artifacts, and replaced it with
-    this pair.
+    An earlier build paired it with a 70 C threshold and removed the pixels
+    where both held. MEASURED across five tiles, the halves do not coincide: on
+    N30E075 all 207 pixels at or above 80 C fall outside the region and its
+    one-cell buffer, so the pair reached none of them. The ceiling that
+    replaced it is `lst_qa.LST_OUTPUT_MAX_C`, applied in `reduce_block` to every
+    pixel wherever it sits. These tests hold the retirement in place.
     """
 
-    HOT = masks.gap_hot_dn()
+    #: The DN the withdrawn rule screened at, 70 C on the output encoding.
+    HOT = 12_000
 
     @pytest.fixture
     def tile(self):
         # Four quadrants of a 2 by 2 tile: hot-in-gap, hot-outside, cool-in-gap
-        # and cool-outside, so one call covers the whole truth table.
+        # and cool-outside, the truth table the pair rule used to split.
         lst = np.array([[self.HOT, self.HOT], [4000, 4000]], dtype="uint16")
         qa = np.full((12, 2, 2), 3, dtype="uint8")
         keep = np.ones((2, 2), dtype=bool)
-        gap = np.array([[True, False], [True, False]])
-        return lst, qa, keep, gap
+        return lst, qa, keep
 
-    def test_only_hot_inside_the_gap_is_removed(self, tile):
-        lst, qa, keep, gap = tile
-        masks.apply_output_mask(lst, qa, keep, gap)
-        assert lst[0, 0] == LST_NODATA_DN
-        assert lst[0, 1] == self.HOT
-        assert lst[1, 0] == 4000
-        assert lst[1, 1] == 4000
+    def test_the_mask_takes_no_gap_plane(self):
+        import inspect
 
-    def test_the_threshold_is_inclusive(self, tile):
-        lst, qa, keep, gap = tile
-        lst[0, 0] = self.HOT
-        masks.apply_output_mask(lst, qa, keep, gap)
-        assert lst[0, 0] == LST_NODATA_DN
+        names = inspect.signature(masks.apply_output_mask).parameters
+        assert "gap" not in names
+        assert "hot_dn" not in names
 
-    def test_a_pixel_a_step_below_the_threshold_survives(self, tile):
-        lst, qa, keep, gap = tile
-        lst[0, 0] = self.HOT - 1
-        masks.apply_output_mask(lst, qa, keep, gap)
-        assert lst[0, 0] == self.HOT - 1
+    def test_a_hot_pixel_over_land_survives(self, tile):
+        lst, qa, keep = tile
+        masks.apply_output_mask(lst, qa, keep)
+        assert (lst == np.array([[self.HOT, self.HOT], [4000, 4000]])).all()
 
-    def test_the_gap_alone_removes_nothing(self, tile):
-        lst, qa, keep, gap = tile
-        lst[:] = 4000
-        counts = masks.apply_output_mask(lst, qa, keep, gap)
-        assert (lst == 4000).all()
-        assert counts["valid_removed_by_emissivity"] == 0
+    def test_the_module_no_longer_owns_a_hot_threshold(self):
+        assert not hasattr(masks, "GAP_HOT_THRESHOLD_C")
+        assert not hasattr(masks, "MIN_GAP_HOT_THRESHOLD_C")
+        assert not hasattr(masks, "gap_hot_dn")
 
-    def test_the_threshold_alone_removes_nothing(self, tile):
-        lst, qa, keep, _ = tile
-        lst[:] = self.HOT
-        counts = masks.apply_output_mask(lst, qa, keep, np.zeros((2, 2), dtype=bool))
-        assert (lst == self.HOT).all()
-        assert counts["valid_removed_by_emissivity"] == 0
-
-    def test_nodata_passes_through(self, tile):
-        # Nodata is 0, which is below every legal threshold, so a missing pixel
-        # can never be read as a failed retrieval.
-        lst, qa, keep, gap = tile
-        lst[:] = LST_NODATA_DN
-        counts = masks.apply_output_mask(lst, qa, keep, gap)
-        assert counts["valid_removed_by_mask"] == 0
-
-    def test_the_count_layer_survives_the_emissivity_rule(self, tile):
-        # Zero observations is data. The count is the evidence behind the p95,
-        # and it stays true whatever the retrieval did with the observations.
-        lst, qa, keep, gap = tile
-        masks.apply_output_mask(lst, qa, keep, gap)
-        assert (qa == 3).all()
-
-    def test_the_count_layer_does_not_survive_the_water_rule(self, tile):
+    def test_the_water_rule_still_zeroes_the_count_layer(self, tile):
         # A qa_count above zero beside a nodata temperature would say the pixel
         # had observations and lost them to the reduction. Over sea it had
         # none of this product's subject at all.
-        lst, qa, keep, gap = tile
+        lst, qa, keep = tile
         keep[0, :] = False
-        masks.apply_output_mask(lst, qa, keep, gap)
+        counts = masks.apply_output_mask(lst, qa, keep)
         assert (qa[:, 0, :] == 0).all()
         assert (qa[:, 1, :] == 3).all()
-
-    def test_the_two_rules_are_counted_apart(self, tile):
-        lst, qa, keep, gap = tile
-        keep[1, :] = False
-        counts = masks.apply_output_mask(lst, qa, keep, gap)
         assert counts["valid_removed_by_water"] == 2
-        assert counts["valid_removed_by_emissivity"] == 1
-        assert counts["valid_removed_by_mask"] == 3
+        assert counts["valid_removed_by_mask"] == 2
 
-    def test_a_threshold_below_the_floor_is_refused(self):
-        with pytest.raises(masks.MaskError, match="below 50.0 C"):
-            masks.gap_hot_dn(25.0)
-
-    def test_the_floor_itself_is_allowed(self):
-        assert masks.gap_hot_dn(masks.MIN_GAP_HOT_THRESHOLD_C) > 0
+    def test_nodata_passes_through(self, tile):
+        lst, qa, keep = tile
+        lst[:] = LST_NODATA_DN
+        counts = masks.apply_output_mask(lst, qa, keep)
+        assert counts["valid_removed_by_mask"] == 0

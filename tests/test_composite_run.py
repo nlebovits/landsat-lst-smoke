@@ -27,14 +27,27 @@ sys.path.insert(0, str(ROOT))
 import composite  # noqa: E402
 import shard_lst_p95  # noqa: E402
 from cog_catalog import read_cog_encoding  # noqa: E402
-from lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE  # noqa: E402
+from lst_qa import (  # noqa: E402
+    LST_NODATA_DN,
+    LST_OFFSET,
+    LST_SCALE,
+    MIN_TOTAL_OBSERVATIONS,
+)
 
 pytestmark = pytest.mark.timeout(600)
 
 TILE = "S30W065"
 PPD = 120
 CHUNK = 100
-N_SCENES = 12
+
+#: How many synthetic scenes a rehearsal walks over the tile.
+#:
+#: Deep enough that `lst_qa.MIN_TOTAL_OBSERVATIONS` leaves a composite behind
+#: rather than a mostly empty raster. MEASURED on this fixture: 12 scenes leave
+#: 4.3% of the tile above the floor and 40 leave 33.2%, while 97.4% of the tile
+#: carries at least one observation. So the run still exercises both sides of
+#: the floor, and the raster it writes is still a composite.
+N_SCENES = 40
 
 
 class NetworkBlocked(AssertionError):
@@ -136,10 +149,34 @@ class TestEndToEnd:
         assert 0.1 < valid.mean() < 0.9, valid.mean()
         celsius = lst[valid].astype("float64") * LST_SCALE + LST_OFFSET
         assert 20.0 < celsius.mean() < 70.0
-        # A pixel with a temperature has observations, and one without has
-        # none: the invariant the writer must not break.
-        np.testing.assert_array_equal(valid, qa.sum(axis=0) > 0)
+        # A pixel with a temperature has enough observations behind it, and
+        # every pixel without one either has none or has too few: the invariant
+        # the writer must not break. The two bands were equal before the
+        # observation floor existed, and the floor is the whole difference.
+        total = qa.sum(axis=0)
+        np.testing.assert_array_equal(valid, total >= MIN_TOTAL_OBSERVATIONS)
+        assert (total[~valid] < MIN_TOTAL_OBSERVATIONS).all()
+        # The evidence survives the temperature. A count of 1 to 4 beside a
+        # nodata pixel is what tells a consumer the floor removed it.
+        screened = (total > 0) & ~valid
+        assert screened.any(), "the fixture no longer exercises the floor"
         assert summary["valid_fraction"] == pytest.approx(float(valid.mean()), abs=1e-6)
+
+    def test_the_validity_rule_runs_under_no_output_mask(self, run):
+        """`--no-output-mask` turns off the water rule and nothing else.
+
+        The rule lives in `reduce_block` rather than in `masks.apply_output_mask`
+        because it describes the estimate rather than where the pixel is. This
+        rehearsal passes `--no-output-mask`, so the assertion above about the
+        floor is also the assertion that the flag does not reach it.
+        """
+        _, summary, out, _ = run
+        assert summary["mask"] is None
+        with rasterio.open(out / "qa_count.tif") as src:
+            total = src.read().sum(axis=0)
+        with rasterio.open(out / "lst_p95.tif") as src:
+            lst = src.read(1)
+        assert ((total < MIN_TOTAL_OBSERVATIONS) == (lst == LST_NODATA_DN)).all()
 
     def test_nothing_but_the_cogs_and_the_record_is_left(self, run):
         _, _, out, _ = run
@@ -318,5 +355,11 @@ class TestPooledBaseline:
             rasterio.open(out / "lst_p95_pooled.tif") as a,
             rasterio.open(out / "lst_p95.tif") as b,
         ):
-            # No prep artifact in a rehearsal, so the baseline is the product.
-            np.testing.assert_array_equal(a.read(1), b.read(1))
+            pooled_dn, lst = a.read(1), b.read(1)
+        # No prep artifact in a rehearsal, so the baseline is the product
+        # wherever the product exists. The pooled band is a diagnostic and the
+        # output validity rule does not touch it, because filtering the band
+        # that exists to be compared would hide the comparison.
+        kept = lst != LST_NODATA_DN
+        np.testing.assert_array_equal(pooled_dn[kept], lst[kept])
+        assert (pooled_dn[~kept] != LST_NODATA_DN).any()

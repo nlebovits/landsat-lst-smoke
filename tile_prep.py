@@ -541,6 +541,16 @@ def parse_args(argv=None):
     p.add_argument("--max-blocks", type=int, default=None, help="cap, for smoke runs")
     p.add_argument("--stage-dir", type=Path, default=DEFAULT_STAGE_DIR)
     p.add_argument(
+        "--stage-threads",
+        type=int,
+        default=None,
+        help="objects in flight while staging. Defaults to min(64, 4 x cores), "
+        "which is what every measured run used. MEASURED by stage_bench.py on "
+        "an m6id.16xlarge over 200 objects: 64 threads 233 MB/s, 128 threads "
+        "321 MB/s, 192 threads 293, 256 threads 277. Staging is about 45% of a "
+        "tile, so this is the largest single knob on the fleet's wall clock",
+    )
+    p.add_argument(
         "--target-memory-gib",
         type=float,
         default=None,
@@ -756,7 +766,10 @@ def main(argv=None) -> int:  # noqa: C901
     configure_read_env(args.source)
     with span("stage"):
         report = staging.stage_scenes(
-            items, sorted({i for _, idx in work for i in idx}), args.stage_dir
+            items,
+            sorted({i for _, idx in work for i in idx}),
+            args.stage_dir,
+            threads=args.stage_threads,
         )
         reused = report.get("reused", 0)
         already = f", {reused:,} already staged" if reused else ""
@@ -765,6 +778,7 @@ def main(argv=None) -> int:  # noqa: C901
             f"{report['bytes'] / GIB:.1f} GiB, "
             f"{report['get_requests']:,} billable GETs{already}"
         )
+        print(f"              {report['settings']['threads']} fetch threads")
 
     hist = np.zeros((len(items), destripe.N_ANOMALY_BINS), dtype="uint32")
     n_valid = np.zeros(len(items), dtype="int64")
@@ -861,6 +875,7 @@ def main(argv=None) -> int:  # noqa: C901
                 "read_threads": args.read_threads,
                 "cpu_count": os.cpu_count(),
             },
+            "staging": {"threads": args.stage_threads},
             "frisky": frisky_report,
             "inventory": run_provenance,
             "window": window,

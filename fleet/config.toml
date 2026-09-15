@@ -1,0 +1,94 @@
+# Everything a launch needs that is not in the code.
+#
+# Until 2026-09-14 these values lived in one laptop's shell history and in
+# `~/.landsat-lst-run/launch.sh`, untracked. A later session searched the
+# repository, found nothing, and nearly rebuilt a launcher that already
+# existed. That is what this file prevents.
+
+[aws]
+region = "us-west-2"
+profile = "radiant-earth"
+
+# The SSO role that owns the instances. It cannot call `iam:PassRole`,
+# `ec2-instance-connect`, `ssm`, or the serial console, which has two
+# consequences the whole design turns on: an instance gets no instance profile
+# and must be handed credentials, and a box whose SSH key is lost is
+# unrecoverable.
+
+[instance]
+# Ubuntu, us-west-2. Every published tile ran on this image. Replacing it means
+# re-checking that `user-data.sh` still finds the instance store and that `uv`
+# still installs.
+ami = "ami-04678417fc39d7171"
+type = "m6id.16xlarge"
+subnet = "subnet-01c63ebdb73672acd"
+security_group = "sg-09717d989ae0dc8f0"
+
+# The root volume holds the operating system and the checkout, nothing else.
+# A tile stages 222 to 382 GiB and `staging.disk_guard` refuses to start
+# without room, so the staging directory must be the instance store. 150 GB of
+# root was once mistaken for enough and the guard refused the run.
+root_volume_gb = 150
+
+# Minutes before the instance halts itself, with terminate-on-shutdown set.
+# MEASURED tile wall clock is 26 to 43 minutes. The previous value of 120 let
+# a finished instance idle for over an hour, which cost more than the tile's
+# own compute.
+deadline_minutes = 75
+
+[tags]
+# `cost_report.py --tag Key=Value` finds instances by exactly one of these, so
+# the keys are load bearing, not decoration.
+purpose = "lst-benchmark"
+owner = "nissim"
+ephemeral = "true"
+
+[paths]
+# A key under a session scratchpad was cleared by a workstation restart while
+# its instance kept running. With no instance-connect and no serial console
+# there was no way back in, and the run was lost.
+key_dir = "~/.ssh"
+stage_dir = "/mnt/nvme/stage"
+run_dir = "/mnt/nvme/run"
+repo_dir = "/home/ubuntu/landsat-lst-smoke"
+repo_url = "https://github.com/nlebovits/landsat-lst-smoke.git"
+
+[storage]
+bucket = "us-west-2.opendata.source.coop"
+
+# The six input artifacts, about 229 MB, that every instance downloads in
+# region. Pushing them from the laptop instead made four concurrent instances
+# share one uplink and quadrupled setup for no reason.
+artifacts_prefix = "nlebovits/landsat-lst-test/artifacts"
+
+# Where a run pushes its own results while it runs, so a box that dies halfway
+# still leaves its prep, its logs, and its markers behind.
+runs_prefix = "nlebovits/landsat-lst-test/runs"
+
+# The published catalog. `publish_catalog.py` promotes a finished run here.
+published_prefix = "nlebovits/landsat-lst"
+
+# Written by the instance with the `source-coop` credentials, which are a
+# static IAM user and do not expire. The `radiant-earth` SSO credentials do,
+# in about an hour, against a tile that takes most of one.
+upload_profile = "source-coop"
+
+[artifacts]
+# `shard_lst_p95.check_mask_inputs` and `tile_inventory.check_manifest` refuse
+# a run whose artifacts disagree with each other, so all six travel together.
+files = [
+    "tile_scene_inventory.parquet",
+    "land_tiles.parquet",
+    "aster_numobs.tif",
+    "aster_numobs_manifest.json",
+    "land_buffered.gpkg",
+    "land_buffered_sha256.txt",
+]
+
+[upload]
+# What a finished run is. Everything else on the instance is scratch.
+#
+# The previous uploader pushed `qa_count.staging.tif` at 4.08 GB and
+# `lst_p95.staging.tif` at 0.68 GB, intermediates that `composite.cleanup_staging`
+# deletes on the success path. They were about 85% of every run's uploaded bytes.
+exclude = ["*.staging.tif", "*.lock", "stage/*"]

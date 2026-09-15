@@ -146,10 +146,11 @@ class TestAMaskedRun:
             "pixels_kept",
             "valid_removed_by_mask",
             "valid_removed_by_water",
-            "valid_removed_by_emissivity",
             "qa_count_pixels_zeroed",
         ):
             assert field in summary["mask"]
+        # The withdrawn pair rule's count is gone with the rule.
+        assert "valid_removed_by_emissivity" not in summary["mask"]
 
     def test_the_counts_add_up_to_the_raster(self, run):
         _, summary, _ = run
@@ -159,12 +160,12 @@ class TestAMaskedRun:
         assert mask["pixels_kept"] + mask["pixels_water"] == mask["pixels_total"]
 
     def test_the_removals_add_up(self, run):
+        # Water is the only rule the output mask applies, so the two counts
+        # coincide. They stay apart in the summary because the mask is the one
+        # place a second geographic rule would land.
         _, summary, _ = run
         mask = summary["mask"]
-        assert (
-            mask["valid_removed_by_water"] + mask["valid_removed_by_emissivity"]
-            == mask["valid_removed_by_mask"]
-        )
+        assert mask["valid_removed_by_water"] == mask["valid_removed_by_mask"]
 
     def test_it_names_the_artifacts_that_decided(self, run):
         # A masked tile is only reproducible if the two artifacts are named.
@@ -308,14 +309,15 @@ class TestATileOfNothingButGapStillPublishes:
         assert (item_dir(out, INLAND) / "lst_p95.tif").is_file()
         assert (item_dir(out, INLAND) / "qa_count.tif").is_file()
 
-    def test_only_the_hot_pixels_come_out(self, run):
-        # The region covers every pixel of the tile. The rule still removes
-        # almost none of them, because it removes a pixel for its temperature
-        # and not for its cell. Under the old rule this number was the whole
-        # tile.
+    def test_the_gap_region_costs_the_tile_nothing(self, run):
+        # The region covers every pixel of the tile and removes none of them.
+        # Under the first build of this rule the whole tile went; under the
+        # pair that replaced it a thousandth went; now the region is reported
+        # and the temperature rules decide alone.
         _, summary, _ = run
         mask = summary["mask"]
-        assert mask["valid_removed_by_emissivity"] < mask["pixels_total"] / 1000
+        assert mask["pixels_emissivity_gap"] == mask["pixels_total"]
+        assert mask["valid_removed_by_mask"] == 0
         assert mask["valid_removed_by_water"] == 0
 
 
@@ -453,3 +455,46 @@ class TestTheEscapeHatchAndTheGuards:
         )
         assert code == 0
         assert "blocks.json" in capsys.readouterr().out
+
+
+class TestTheCoverageSummary:
+    """`shard_lst_p95.coverage` divides land, not the raster.
+
+    Sea was never this product's subject, so counting it as missing coverage
+    would say `S25E030` is 44% valid when 80% of its land carries a
+    temperature. The denominator is the land the water rule kept.
+    """
+
+    def counts(self, **over):
+        base = {
+            "pixels_total": 1_000,
+            "pixels_water": 400,
+            "pixels_kept": 600,
+            "pixels_emissivity_gap_on_land": 150,
+        }
+        return base | over
+
+    def stats(self, kept):
+        return [{"kept": kept, "total": 1_000}]
+
+    def test_land_is_the_denominator_not_the_raster(self):
+        out = shard_lst_p95.coverage(self.counts(), self.stats(480))
+        assert out is not None
+        assert out["land_pixels"] == 600
+        assert out["valid_fraction"] == pytest.approx(0.8)
+        assert out["empty_land_pixels"] == 120
+
+    def test_the_gap_fraction_is_also_a_share_of_land(self):
+        out = shard_lst_p95.coverage(self.counts(), self.stats(480))
+        assert out is not None
+        assert out["ged_gap_fraction"] == pytest.approx(0.25)
+
+    def test_it_returns_none_when_no_mask_ran(self):
+        """`--no-output-mask` leaves no land count, and a coverage figure
+        without one would divide by the raster and understate every coastal
+        tile."""
+        assert shard_lst_p95.coverage(None, self.stats(480)) is None
+
+    def test_it_returns_none_on_a_tile_with_no_land(self):
+        out = shard_lst_p95.coverage(self.counts(pixels_kept=0), self.stats(0))
+        assert out is None
