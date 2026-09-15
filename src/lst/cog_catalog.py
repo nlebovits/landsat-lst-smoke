@@ -70,6 +70,10 @@ from lst.lst_qa import (
     LST_OUTPUT_MIN_C,
     LST_SCALE,
     MIN_TOTAL_OBSERVATIONS,
+    MIN_WATER_OBSERVATIONS,
+    QA_WATER_BIT,
+    WATER_MAX_C,
+    WATER_SHARE_THRESHOLD,
 )
 from lst.stac_window import DEFAULT_COLLECTION, DEFAULT_PLATFORMS
 
@@ -1314,32 +1318,35 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
         f"{_decode_snippet(f'{item_id}/{LST_FILENAME}')}\n"
         f"DN {LST_NODATA_DN} is nodata. Treat it as absent rather than cold.\n\n"
         "## What a nodata pixel means\n\n"
-        "Five different facts, and the raster separates none of them:\n\n"
+        "Six different facts, and the raster separates none of them:\n\n"
         "| Meaning | Rule | Would a wider window fix it |\n"
         "|---|---|---|\n"
         "| No usable observation | every observation failed the QA or range "
         "rule | yes |\n"
         "| Never imaged | the pixel is off every imaged footprint, whatever "
         "the scene rectangles say | no |\n"
-        "| Water | outside the buffered land geometry | no |\n"
+        "| Outside the land geometry | the pixel sits beyond Natural Earth "
+        "land grown by 25 km | no |\n"
+        f"| Observed water | at least {WATER_SHARE_THRESHOLD:.0%} of its clear "
+        f"observations set QA_PIXEL bit {QA_WATER_BIT}, and it is no hotter "
+        f"than {WATER_MAX_C:.0f} C | no |\n"
         f"| Too little evidence | fewer than {MIN_TOTAL_OBSERVATIONS} clear "
         "observations over the whole window | yes |\n"
         f"| Physically impossible | below {LST_OUTPUT_MIN_C:.0f} C or above "
         f"{LST_OUTPUT_MAX_C:.0f} C | no |\n\n"
-        "Do not read a nodata pixel as missing data over the ocean: the water "
-        "rule zeroes `qa_count` with the temperature, so a count of 0 beside "
-        "a nodata pixel is the signature of sea rather than of cloud. The "
-        "evidence and range rules leave `qa_count` alone, so a nodata pixel "
-        "with a count above 0 was screened rather than never seen, and the "
-        "count itself says which rule reached it. The item's "
-        "`processing:lineage` states every rule and names the artifacts they "
-        "read by checksum.\n\n"
-        "A count of 0 over land does not say which of the first two rows you "
-        "have. Both produce the same zero: a source fill increments nothing "
-        "and a rejected observation increments nothing. Do not call such a "
-        "pixel cloudy. A straight-edged region of them is ground outside "
-        "Landsat's imaged footprint, and the scene rectangles that cover it "
-        "describe files rather than ground.\n\n"
+        "Read `qa_count` beside the pixel, and read it as evidence rather "
+        "than as an answer. A count above 0 narrows the pixel to the last two "
+        "rows, which leave the count standing: 1 to 4 is the evidence rule and "
+        "5 or more is a temperature bound. A count of 0 is the other four "
+        "rows together, and nothing in the raster tells them apart. The two "
+        "water rules zero the count with the temperature, a source fill "
+        "increments nothing, and a rejected observation increments nothing. "
+        "So a zero count is not a signature of sea, and a nodata pixel is not "
+        "a cloudy one. The item's `processing:lineage` states every rule and "
+        "names the artifacts they read by checksum.\n\n"
+        "Shape is the one clue the raster does offer. A straight-edged region "
+        "of zeros is ground outside Landsat's imaged footprint, and the scene "
+        "rectangles that cover it describe files rather than ground.\n\n"
         "## Reading the observation counts\n\n"
         f"`{QA_ASSET_KEY}` has 12 bands, January through December. Band `m` "
         "counts the clear observations that entered the percentile for that "
@@ -1387,6 +1394,41 @@ _POOLED_LINEAGE = (
 )
 
 
+def pooled_fallback_sentence(correction_rule: dict[str, Any]) -> str:
+    """How much of this raster the cross-fade could not describe, and why.
+
+    Every feathered item carries this, zero included. A share stated only when
+    it is non-zero is a share a reader has to guess at, and the guess that
+    silence means zero is the one that fails on the tile where the field was
+    dropped for another reason.
+
+    A swath-less path is named with its scene count. Those scenes reached
+    `qa_count` and the pooled fallback and took no part in the blend, so a
+    reader comparing evidence against temperature can see the gap rather than
+    infer it. The prep run used to refuse such a tile. Stating it here is what
+    replaced the refusal.
+    """
+    percent = 100.0 * float(correction_rule.get("pooled_share") or 0.0)
+    pooled = int(correction_rule.get("n_pooled_fallback_retained") or 0)
+    retained = int(correction_rule.get("retained_pixels") or 0)
+    text = (
+        f"Pooled fallback: {percent:.2f}% of the retained pixels took the "
+        f"pooled percentile rather than the cross-fade, {pooled:,} of "
+        f"{retained:,}. The share counts pixels present in this raster, after "
+        f"the output mask, so it divides by the same count the coverage "
+        f"figures use."
+    )
+    absent = correction_rule.get("paths_without_swath") or {}
+    if not absent:
+        return text
+    named = ", ".join(f"{path} ({count} scenes)" for path, count in absent.items())
+    return (
+        f"{text} No swath was found for WRS path {named}, so those scenes fed "
+        f"qa_count and the pooled fallback and took no part in the per-path "
+        f"blend."
+    )
+
+
 def correction_lineage(correction_rule: dict[str, Any] | None) -> str:
     """What produced each value, for a consumer who cannot see it in the pixels.
 
@@ -1431,6 +1473,7 @@ def correction_lineage(correction_rule: dict[str, Any] | None) -> str:
             "produced a valid observation. A pixel outside every swath takes "
             "the pooled percentile of whatever observed it."
         )
+        sentences.append(pooled_fallback_sentence(correction_rule))
     if not sentences:
         return _POOLED_LINEAGE
 
@@ -1456,8 +1499,9 @@ def strict_land_sentence(digest: str) -> str:
 def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
     """The properties that say which pixels the output mask removed, and why.
 
-    A nodata `lst_p95` pixel carries five meanings: no usable observation,
-    ground no scene imaged, water, too few observations to support a five-year
+    A nodata `lst_p95` pixel carries six meanings: no usable observation,
+    ground no scene imaged, a place the land geometry excludes, a surface the
+    observations call water, too few observations to support a five-year
     percentile, or a value outside the temperatures this product publishes.
     Nothing in the raster separates them, so the item states the rules it was
     masked under and names the artifacts by DOI and checksum.
@@ -1473,11 +1517,24 @@ def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
         f"leave qa_count alone, so the count of clear observations stays "
         f"readable beside the pixel they removed."
     )
+    observed = (
+        f"Observed water: a pixel becomes nodata, and its qa_count becomes 0, "
+        f"when at least {WATER_SHARE_THRESHOLD:.0%} of its usable clear "
+        f"observations set QA_PIXEL bit {QA_WATER_BIT} and its percentile is "
+        f"at or below {WATER_MAX_C:.0f} C. The share is counted over the whole "
+        f"window from unsaturated counters, and a pixel with fewer than "
+        f"{MIN_WATER_OBSERVATIONS} such observations is left alone rather than "
+        f"called water. The temperature bound is there because the flag comes "
+        f"from a reflectance test that fires over a dark roof, and water has a "
+        f"ceiling asphalt does not. This rule reads the record and not a "
+        f"polygon, so it removes a river the land geometry cannot."
+    )
     if not mask_rule:
         return {
             "processing:lineage": (
-                f"{_QA_LINEAGE} No output mask ran, so sea pixels are present "
-                f"in this tile. {validity}"
+                f"{_QA_LINEAGE} No output mask ran, so the buffered land "
+                f"geometry removed nothing from this tile. {observed} "
+                f"{validity}"
             )
         }
     buffer_cells = mask_rule.get("gap_buffer_cells")
@@ -1487,6 +1544,7 @@ def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
         "Water: a pixel outside the buffered land geometry becomes nodata, and "
         "its qa_count becomes 0, so the two bands cannot disagree about a pixel "
         "that was never this product's subject.",
+        observed,
         validity,
         f"ASTER GED coverage is reported rather than masked. A pixel whose GED "
         f"cell reports no clear-sky observation, or lies {buffer_cells} cell "

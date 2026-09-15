@@ -726,6 +726,29 @@ class TestApplyOutputMask:
         assert np.array_equal(qa, after_qa)
         assert second["valid_removed_by_mask"] == 0
 
+    def test_two_masks_in_sequence_remove_their_union(self, tile):
+        """The two water rules reach this function as one `keep`.
+
+        `composite.finalize_block` takes the union before calling, so this is
+        the claim that makes the union safe to build: masking twice with two
+        different planes leaves the same raster as masking once with both.
+        Distinct from `test_it_is_idempotent`, which repeats one plane.
+        """
+        lst, qa, keep = tile
+        observed = np.zeros(keep.shape, dtype=bool)
+        observed[:, :5] = True  # a river the geometry does not know about
+
+        once_lst, once_qa = lst.copy(), qa.copy()
+        masks.apply_output_mask(once_lst, once_qa, keep & ~observed)
+
+        masks.apply_output_mask(lst, qa, keep)
+        masks.apply_output_mask(lst, qa, ~observed)
+
+        assert np.array_equal(lst, once_lst)
+        assert np.array_equal(qa, once_qa)
+        assert (lst[~keep] == LST_NODATA_DN).all()
+        assert (lst[observed] == LST_NODATA_DN).all()
+
     def test_a_mask_that_keeps_everything_changes_nothing(self, tile):
         lst, qa, _ = tile
         before_lst = lst.copy()

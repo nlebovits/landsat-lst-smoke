@@ -452,10 +452,17 @@ def apply_output_mask(lst, qa, keep, *, scope="tile") -> dict:
     observations and lost them to the reduction, which is not what happened
     here.
 
-    This is the only rule left that depends on where the pixel is. The rules
-    that depend on what the composite says are `lst_qa.supported_output`, and
-    `composite.reduce_block` has already applied them by the time a tile
-    reaches this function.
+    Two rules arrive here as one `keep`. The buffered land geometry says where
+    the pixel is. `lst_qa.observed_water` says what the pixel is, from the
+    share of its clear observations that QA_PIXEL bit 7 called water, and
+    `composite.reduce_block` is where that share is counted. They are separate
+    claims with one consequence, so the caller takes their union and this
+    writes it. The rules that describe the estimate rather than the subject are
+    `lst_qa.supported_output`, and `reduce_block` has already applied those by
+    the time a tile reaches this function.
+
+    A caller that credits each rule has to do so before this runs. The union is
+    all that survives it.
 
     The graph applies this rule lazily, block by block, in
     `composite.finalize_block`. This is the eager statement of it, for an array

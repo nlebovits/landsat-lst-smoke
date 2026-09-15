@@ -31,6 +31,7 @@ from lst.lst_qa import (
     LWIR_OFFSET_C,
     LWIR_SCALE,
     MIN_TOTAL_OBSERVATIONS,
+    QA_WATER_BITS,
     encode_celsius,
     masked_celsius,
 )
@@ -630,3 +631,169 @@ class TestTheFinish:
         assert isinstance(counts, xr.DataArray)
         assert counts.dims == ("flag",)
         assert list(counts["flag"].values) == list(composite.FLAGS)
+
+
+class TestObservedWaterThroughTheGraph:
+    """QA_PIXEL bit 7, from the loader to the written COG.
+
+    `tests/test_output_validity.py` proves `reduce_block` classifies the
+    pixel. This proves the plane survives `apply_ufunc`, reaches
+    `finalize_block`, and empties both rasters there, on the path a run takes.
+    """
+
+    #: Pixel (0, 0) is clear in every scene of the fixture, so flagging it
+    #: water gives a share of 1.0 over a denominator the floor clears.
+    WET = (0, 0)
+
+    #: What the flagged pixel reads. `lst_qa.observed_water` vetoes a pixel
+    #: whose percentile is hotter than water can be, and the fixture's land
+    #: ramp ends at 44 C, so a pixel left on it would be rejected by the veto
+    #: rather than classified by the share.
+    WATER_C = 26.0
+
+    @staticmethod
+    def flag_water(dataset, pixel, celsius=26.0):
+        """Set bit 7 on one pixel in every scene, and cool it to match."""
+        qa = dataset["qa_pixel"].values
+        qa[:, pixel[0], pixel[1]] |= QA_WATER_BITS
+        dataset["qa_pixel"].values = qa
+        dn = dataset["lwir11"].values
+        dn[:, pixel[0], pixel[1]] = dn_of(celsius)
+        dataset["lwir11"].values = dn
+        return dataset
+
+    @pytest.fixture
+    def wet_stack(self):
+        dataset, items = build_stack()
+        return self.flag_water(dataset, self.WET, self.WATER_C), items
+
+    @pytest.fixture
+    def fake_wet_load(self, monkeypatch, wet_stack):
+        import odc.stac
+        import pystac
+
+        dataset = wet_stack[0]
+        monkeypatch.setattr(odc.stac, "load", lambda *_a, **_k: with_geobox(dataset))
+        monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
+        return dataset
+
+    def _finish(self, tmp_path, **masks):
+        import rasterio
+
+        out = graph([{} for _ in range(N_TIME)])
+        counts, paths = composite.staging_writes(
+            out, tmp_path, crs="EPSG:4326", dims=("latitude", "longitude"), **masks
+        )
+        with dask.config.set(scheduler="sync"):
+            flags = composite.compute_all(counts)
+        with rasterio.open(paths["lst_p95"]) as src:
+            lst = src.read(1)
+        with rasterio.open(paths["qa_count"]) as src:
+            qa = src.read()
+        return out, flags, lst, qa
+
+    def test_the_graph_carries_the_classification_plane(self, fake_wet_load):
+        out = computed(graph([{} for _ in range(N_TIME)]))
+        water = out["observed_water"].values
+        assert water[self.WET]
+        assert int(water.sum()) == 1
+
+    def test_the_water_pixel_is_nodata_in_both_rasters(self, fake_wet_load, tmp_path):
+        _, flags, lst, qa = self._finish(tmp_path)
+        assert lst[self.WET] == LST_NODATA_DN
+        assert int(qa[:, self.WET[0], self.WET[1]].sum()) == 0
+        assert flags["removed_observed_water"] == 1
+
+    def test_it_runs_with_no_output_mask(self, fake_wet_load, tmp_path):
+        """`--no-output-mask` withdraws the geometry, not the observations.
+
+        The buffered land geometry is a claim about where the pixel is, and a
+        run can decline to make it. What a scene photographed is not a claim
+        the run makes at all, so nothing withdraws it.
+        """
+        _, flags, lst, qa = self._finish(tmp_path)
+        assert flags["removed_water"] == 0, "no geometry was handed to the run"
+        assert flags["removed_observed_water"] == 1
+        assert lst[self.WET] == LST_NODATA_DN
+        assert int(qa[:, self.WET[0], self.WET[1]].sum()) == 0
+
+    def test_the_two_water_rules_never_claim_one_pixel_twice(
+        self, fake_wet_load, tmp_path
+    ):
+        """The mask is their union and the counts are disjoint.
+
+        Row 3 is sea by geometry. Pixel (0, 0) is water by observation. The
+        geometry also covers nothing the observations claim here, so the two
+        counts add to the pixels the raster lost.
+        """
+        keep = np.ones((NY, NX), dtype=bool)
+        keep[3, :] = False
+        _, flags, lst, _qa = self._finish(tmp_path, keep_mask=keep)
+        assert flags["removed_water"] == NX
+        assert flags["removed_observed_water"] == 1
+        assert (lst[3, :] == LST_NODATA_DN).all()
+        assert lst[self.WET] == LST_NODATA_DN
+
+    def test_a_pixel_the_geometry_already_took_is_not_counted_again(
+        self, monkeypatch, tmp_path
+    ):
+        """The overlap case, which is most of a coastline.
+
+        A sea pixel inside the buffered geometry is removed by geometry and
+        would also classify as water. It is credited to geometry alone, so the
+        two counts still add to the union rather than over-counting it.
+        """
+        import odc.stac
+        import pystac
+
+        dataset, _items = build_stack()
+        for col in range(NX):  # row 3 is the row the geometry removes
+            self.flag_water(dataset, (3, col), self.WATER_C)
+        monkeypatch.setattr(odc.stac, "load", lambda *_a, **_k: with_geobox(dataset))
+        monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
+
+        keep = np.ones((NY, NX), dtype=bool)
+        keep[3, :] = False
+        _, flags, lst, _qa = self._finish(tmp_path, keep_mask=keep)
+        assert flags["removed_water"] == NX
+        assert flags["removed_observed_water"] == 0
+        assert (lst[3, :] == LST_NODATA_DN).all()
+
+    def test_every_other_pixel_is_bit_identical_to_the_dry_stack(
+        self, monkeypatch, tmp_path
+    ):
+        """The rule removes a pixel and moves none.
+
+        Two runs of the same graph on the same observations, differing in one
+        bit on one pixel. The control carries the same cold temperature as the
+        flagged run, so bit 7 is the only difference between them and the
+        comparison cannot be explained by the thermal band. Every pixel but
+        that one has to hold the same DN and the same twelve counts.
+        """
+        import odc.stac
+        import pystac
+
+        def load(dataset):
+            monkeypatch.setattr(
+                odc.stac, "load", lambda *_a, **_k: with_geobox(dataset)
+            )
+            monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
+
+        dry_dataset, _ = build_stack()
+        cold = dry_dataset["lwir11"].values
+        cold[:, self.WET[0], self.WET[1]] = dn_of(self.WATER_C)
+        dry_dataset["lwir11"].values = cold
+        load(dry_dataset)
+        _, _, dry_lst, dry_qa = self._finish(tmp_path / "dry")
+
+        wet_dataset, _ = build_stack()
+        self.flag_water(wet_dataset, self.WET, self.WATER_C)
+        load(wet_dataset)
+        _, _, wet_lst, wet_qa = self._finish(tmp_path / "wet")
+
+        elsewhere = np.ones((NY, NX), dtype=bool)
+        elsewhere[self.WET] = False
+        np.testing.assert_array_equal(dry_lst[elsewhere], wet_lst[elsewhere])
+        np.testing.assert_array_equal(dry_qa[:, elsewhere], wet_qa[:, elsewhere])
+        assert dry_lst[self.WET] != LST_NODATA_DN
+        assert wet_lst[self.WET] == LST_NODATA_DN

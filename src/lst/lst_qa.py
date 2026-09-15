@@ -4,7 +4,7 @@
 graph, and nothing else decides validity. The predicates below are that
 definition, and they work on numpy arrays and DataArrays alike.
 
-The rules come from `nlebovits/landsat-lst` (`qa.py`, `encoding.py`, and the
+Most rules come from `nlebovits/landsat-lst` (`qa.py`, `encoding.py`, and the
 composite validation in `pipeline.py`). Four of them matter:
 
 QA_PIXEL bits 1 to 5 are masked: dilated cloud, cirrus, cloud, cloud shadow,
@@ -24,6 +24,14 @@ does with the result afterwards.
 
 An unrepresentable composite becomes nodata, never a clipped DN. Clipping
 -124 C to -49.99 C replaces a visible gap with a believable cold pixel.
+
+A fifth rule is this repository's own. QA_PIXEL bit 7 marks an observation as
+water, and the composite counts how often it fires rather than rejecting it.
+`observed_water` turns that count into one decision per pixel, taken over the
+whole window, and a pixel it calls water leaves the product. The rule exists
+because the buffered land geometry cannot remove a river, and reaches 25 km
+past the coast by design. Neither is a defect in the geometry. The geometry is
+answering a different question.
 
 The composite carries two rules of its own, and `supported_output` is both.
 An observation that passed every rule above can still produce a percentile no
@@ -69,6 +77,12 @@ QA_EXCLUDED_BIT_NUMBERS = (
     QA_SNOW_BIT,
 )
 QA_EXCLUDED_BITS = sum(1 << bit for bit in QA_EXCLUDED_BIT_NUMBERS)  # 0b111110
+
+#: Water, which disqualifies no observation and classifies the pixel instead.
+#: A water observation is a real retrieval of a real surface, so it belongs in
+#: the record the classification reads. `observed_water` is what reads it.
+QA_WATER_BIT = 7
+QA_WATER_BITS = 1 << QA_WATER_BIT  # 0b10000000
 
 # --------------------------------------------------------------------------
 # Physical plausibility, in Celsius. Inclusive at both ends.
@@ -128,6 +142,97 @@ LST_OUTPUT_MIN_C = -20.0
 #: pixels reach the output at or above 80 C.
 LST_OUTPUT_MAX_C = 80.0
 
+# --------------------------------------------------------------------------
+# Water, classified from the record rather than from a polygon. The buffered
+# land geometry in `masks.py` reaches 25 km past the coast on purpose, and it
+# knows nothing about a river. Both leave sea in the output. The stack does
+# know: QA_PIXEL sets bit 7 over water, observation after observation.
+# --------------------------------------------------------------------------
+
+#: The share of a pixel's usable clear observations that must call it water.
+#:
+#: MEASURED over 17 cached 360 px blocks of `N40W080`, 2,199,809 observed
+#: pixels with five-year stacks 569 to 765 scenes deep. The distribution has
+#: two modes: 93.8% of pixels sit below 0.05 and 3.0% sit at or above 0.90.
+#: The published temperature separates them. On the Philadelphia river block,
+#: pixels below 0.05 have a median of 44.82 C and pixels at or above 0.90 have
+#: a median of 28.92 C inside a 1.6 C interquartile band. The bands between run
+#: monotonically down: 43.49 C over [0.25, 0.50), 39.24 C over [0.50, 0.75),
+#: 33.87 C over [0.75, 0.90). A threshold of 0.25 reaches [0.05, 0.25), whose
+#: median of 45.00 C is land, so it would delete ground.
+#:
+#: The temperate blocks would take 0.75, which is their emptiest bin. The
+#: tropics decide otherwise. MEASURED on `N00E110`, a Kalimantan forest block
+#: has no empty bin at all: the share ramps smoothly from 0 to 1 and the band
+#: at [0.75, 0.90) reads 31.60 C against forest at 33.65 C, two degrees rather
+#: than the eleven that separate the temperate river from its bank. Those
+#: pixels are as likely canopy as stream.
+#:
+#: Raising the threshold costs almost nothing and halves that doubt, at a
+#: bound of 34 C:
+#:
+#:     block                 truth             at 0.75    at 0.90
+#:     Delaware Bay          all water        100.0000%  100.0000%
+#:     Chesapeake            mostly water      93.0602%   93.0046%
+#:     Delaware shoreline    mostly water      99.7207%   99.6998%
+#:     Barito estuary        tropical water    12.0725%   12.0725%
+#:     Kahayan river         tropical water     6.3156%    6.3156%
+#:     Kalimantan forest     tropical land      0.4599%    0.1111%
+#:     Sebangau peat         tropical land      0.0000%    0.0000%
+#:     Rajasthan desert      arid land          0.0000%    0.0000%
+#:     Center City           no water           0.0000%    0.0000%
+#:
+#: Open water is untouched and the ambiguous forest classifications fall four
+#: times over. The rule errs towards publishing water rather than deleting
+#: land, which is the cheaper of the two mistakes for a land product.
+WATER_SHARE_THRESHOLD = 0.90
+
+#: Usable clear observations a pixel needs before the share means anything.
+#:
+#: The same number as `MIN_TOTAL_OBSERVATIONS`, and for the same reason: a
+#: pixel below it is already nodata, so a second floor would decide nothing.
+#: It is stated separately because the two rules are separate, and because
+#: without a floor the comparison form of `observed_water` would read `0 >= 0`
+#: at an unobserved pixel and call the whole unobserved world water.
+MIN_WATER_OBSERVATIONS = MIN_TOTAL_OBSERVATIONS
+
+#: The hottest five-year P95 a pixel can hold and still be called water.
+#:
+#: The share rule trusts one QA bit, and over a dark roof that bit is wrong. A
+#: reflectance test sets it, and it matches dark asphalt on almost every scene.
+#: MEASURED in Center City Philadelphia, 6,264 pixels holding no water: 143 of
+#: them read 36 C to 56 C and carry the flag on 86% to 100% of their 80 clear
+#: observations. No threshold on the share excludes those, because their share
+#: is the share of open sea.
+#:
+#: Water has a ceiling that asphalt does not, and the thermal band is the
+#: better evidence about which surface this is.
+#:
+#: Calibrated against two sets with known truth. The share was 0.75 when this
+#: sweep ran, which is the harder test: at 0.90 the share rule alone already
+#: rejects some of what the bound had to catch.
+#:
+#:     bound    Center City masked    Delaware Bay kept    Chesapeake kept
+#:     40 C                 1.33%              100.00%             93.07%
+#:     36 C                 0.70%              100.00%             93.07%
+#:     35 C                 0.26%              100.00%             93.07%
+#:     34 C                 0.00%              100.00%             93.06%
+#:     32 C                 0.00%              100.00%             92.92%
+#:
+#: 34 C is where the false positives end and before the cost to open water
+#: starts. It takes 0.01% of the Chesapeake block and nothing from Delaware
+#: Bay, against 32 C, which takes 0.15%.
+#:
+#: The calibration is temperate water, and the tropics have since been probed
+#: against it. MEASURED on `N00E110`: the Barito estuary classifies at a median
+#: of 33.18 C and the Kahayan river at 33.92 C, both under the bound, so the
+#: warm-water fear it was written against is smaller than expected. The Kahayan
+#: upper quartile of 34.74 C does cross it, and that slice of river keeps its
+#: temperature rather than being called water. That is the conservative
+#: direction on purpose. A warm pond published as land is a smaller error than
+#: a warm roof deleted as water.
+WATER_MAX_C = 34.0
+
 
 # --------------------------------------------------------------------------
 # Predicates. Each one works on a numpy array and on an xarray DataArray,
@@ -138,6 +243,16 @@ LST_OUTPUT_MAX_C = 80.0
 def qa_clear(qa_pixel):
     """True where QA_PIXEL bits 1 to 5 are all clear."""
     return (qa_pixel & QA_EXCLUDED_BITS) == 0
+
+
+def qa_water(qa_pixel):
+    """True where QA_PIXEL bit 7 calls the observation water.
+
+    This rejects nothing. The observation still enters the percentile, and the
+    count of how often it fires is what `observed_water` classifies the pixel
+    on.
+    """
+    return (qa_pixel & QA_WATER_BITS) != 0
 
 
 def not_fill(thermal_dn):
@@ -225,6 +340,63 @@ def supported_output(celsius, total_observations):
         & (celsius >= LST_OUTPUT_MIN_C)
         & (celsius <= LST_OUTPUT_MAX_C)
     )
+
+
+def observed_water(
+    water_observations,
+    clear_observations,
+    celsius=None,
+    *,
+    threshold: float = WATER_SHARE_THRESHOLD,
+    floor: int = MIN_WATER_OBSERVATIONS,
+    max_c: float = WATER_MAX_C,
+):
+    """True where the pixel's own clear record says it is water.
+
+    The rule is `water >= threshold * clear`, which is the share without the
+    division. A pixel sitting exactly on the threshold is then decided by one
+    comparison rather than by a rounded quotient, and the counters stay
+    integers. The threshold is promoted to float64 first, so a uint32 counter
+    cannot wrap on the way.
+
+    A pixel below `floor` is unknown, not water. That is the rule that keeps an
+    unobserved pixel out: with no floor the comparison reads `0 >= 0` and every
+    pixel no scene reached would classify as water.
+
+    `celsius` is the veto, and it is why the share is not the whole rule. The
+    flag is one bit produced by a reflectance test, and over a dark roof or a
+    rail yard that test fires on almost every scene. MEASURED in Center City
+    Philadelphia: 143 pixels reading 36 C to 56 C carry the flag on 86% to
+    100% of their 80 clear observations, so no threshold on the share can
+    reach them. A five-year P95 above `max_c` is not water whatever the flag
+    counted, and the thermal band is the better evidence about which it is.
+
+    A pixel whose percentile is NaN keeps its classification. It carries no
+    temperature to argue with, and it is nodata either way.
+
+    Both counts are the whole window, unsaturated. They are not the published
+    `qa_count`, which clips at 255 a month and carries no water flag, so this
+    classification cannot be recomputed from the product.
+
+    Args:
+        water_observations: usable clear observations with QA_PIXEL bit 7 set.
+        clear_observations: usable clear observations, the denominator.
+        celsius: the composite this pixel would publish, float. Optional, and
+            without it the share alone decides, which no production path does.
+        threshold: the share at which the pixel becomes water, inclusive.
+        floor: observations below which the pixel is unknown.
+        max_c: the hottest percentile that can still be water.
+    """
+    import numpy as np
+
+    clear = np.asarray(clear_observations)
+    water = np.asarray(water_observations)
+    wet = (clear >= floor) & (water >= np.float64(threshold) * clear)
+    if celsius is None:
+        return wet
+    # `> max_c` rather than `<= max_c`, so a NaN percentile keeps its
+    # classification instead of losing it to a comparison NaN always fails.
+    return wet & ~(np.asarray(celsius) > np.float64(max_c))
 
 
 # --------------------------------------------------------------------------

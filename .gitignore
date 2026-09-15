@@ -47,6 +47,11 @@ styles/config/templates/
 artifacts/tile_scene_inventory.parquet
 artifacts/fleet_plan.json
 
+# The coverage screen, one line per land tile. Rebuilt by the same command in
+# a few minutes from the three artifacts above and below, and it describes the
+# inventory window it was built under rather than the code.
+artifacts/fleet_plan.jsonl
+
 # The ASTER GED observation counts: 36,000 x 12,000 uint8 on the 0.01 degree
 # grid, rebuilt from cached granules. `artifacts/aster_numobs_manifest.json`
 # records the granules and the digest, which is what a run needs to quote.

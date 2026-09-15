@@ -981,6 +981,48 @@ def prep_transform(prep: Prep):
     return transform_for(prep.bbox, prep.pixels_per_degree // prep.swath_factor)
 
 
+# Here rather than in `tile_prep`, which is the only module that
+# computes it during a run. `shard_lst_p95` reports the result on the
+# item, and `tile_prep` imports `shard_lst_p95` at module level, so
+# leaving it there made the reporting side reach back through a deferred
+# `import tile_prep`. That is the second time this pair has formed a
+# cycle; `PREP_SCHEMA_VERSION` was the first. Both belong with `Prep`.
+def paths_without_a_swath(item_dicts, paths) -> dict[str, int]:
+    """The WRS paths that reached no swath cell, and how many scenes each holds.
+
+    `feathered_percentile` reduces one subset per path in `paths` and blends
+    them. A scene whose path is missing from that list enters no subset, so it
+    loads, costs a read, and contributes nothing to the blend. The pixels it
+    observed still reach `qa_count`, and where another path covers them the
+    composite is a value fitted without them.
+
+    A path drops out when every one of its quads stayed under
+    `SWATH_QUAD_SHARE` on every cell. That is the swath definition failing to
+    describe the path, not a fact about the ground.
+
+    This used to raise and tell the operator to pass `--no-feather`, which made
+    a whole tile wait on someone noticing a message. The exclusion is narrower
+    than the refusal implied. `DESTRIPE_MIN_PATH_OBSERVATIONS` already drops a
+    thin path from a pixel's blend and renormalises the rest, so a swath-less
+    path is the limiting case of a rule the composite already applies
+    everywhere. What the refusal bought was the operator's attention, and the
+    run records that instead: the count travels in the prep metadata, in
+    `summary.json`, and in the item's `processing:lineage`, where a reader
+    meets it without having read this function.
+
+    Returns:
+        `{path: n_scenes}`, keyed by WRS path, in path order. Empty when every
+        path the items carry reached a swath, which is the ordinary tile.
+    """
+    counts: dict[str, int] = {}
+    known = set(paths)
+    for item in item_dicts:
+        path = path_of(item)
+        if path not in known:
+            counts[path] = counts.get(path, 0) + 1
+    return {path: counts[path] for path in sorted(counts)}
+
+
 def nan_percentile(values, q: float = 95.0):
     """`np.nanpercentile(values, q, axis=0)` with numpy's `linear` rule, vectorised.
 

@@ -709,6 +709,29 @@ def mask_rule(args, counts, ged_provenance=None) -> dict | None:
     return rule
 
 
+def water_rule(scalars) -> dict:
+    """The observed-water rule, and what it took from this tile.
+
+    Never None, unlike `mask_rule`. The buffered land geometry is a claim
+    about geography that `--no-output-mask` withdraws. This is a claim about
+    what a scene photographed, and no flag withdraws it, so a summary that
+    omitted it under `--no-output-mask` would describe a run that did not
+    happen.
+
+    `valid_removed` counts pixels this rule alone took. A sea pixel the
+    geometry had already removed is counted by `valid_removed_by_water` in the
+    mask block and not here, so the two never claim one pixel twice and their
+    sum is the union the raster holds.
+    """
+    return {
+        "water_share_threshold": lst_qa.WATER_SHARE_THRESHOLD,
+        "min_water_observations": lst_qa.MIN_WATER_OBSERVATIONS,
+        "water_max_c": lst_qa.WATER_MAX_C,
+        "qa_water_bit": lst_qa.QA_WATER_BIT,
+        "valid_removed": int(scalars.get("removed_observed_water", 0)),
+    }
+
+
 def load_tile_prep(args, tile_id: str, item_dicts, run_provenance):
     """The prep artifact, checked against the run that is about to use it.
 
@@ -792,15 +815,61 @@ def tile_prep_schema_version() -> int:
     return destripe.PREP_SCHEMA_VERSION
 
 
-def correction_rule(args, prep) -> dict | None:
+def pooled_share_of(scalars, retained_pixels: int) -> float:
+    """How much of the published raster took the pooled percentile.
+
+    One definition, one implementation, one caller. The numerator is
+    `fallback_valid`, the kernel's pooled decision intersected with the pixels
+    that survived the output mask. The denominator is the retained pixel count
+    the same raster reports, which is the `kept` figure behind
+    `valid_fraction`, so the two divide against one base.
+
+    `fallback` itself is the wrong numerator. It counts the decision before the
+    mask ran, so a pooled pixel the water rule removed is in it and is not in
+    the raster, and on a tile that is mostly sea the ratio would exceed 1.
+
+    A tile with nothing retained scores 0.0 rather than raising. There is no
+    pooled share of an empty raster, and 0.0 is what every consumer of this
+    field can divide, sort, and plot.
+    """
+    if retained_pixels <= 0:
+        return 0.0
+    return float(scalars.get("fallback_valid", 0)) / float(retained_pixels)
+
+
+def correction_rule(
+    args,
+    prep,
+    item_dicts=(),
+    *,
+    pooled_share: float = 0.0,
+    n_pooled: int = 0,
+    retained_pixels: int = 0,
+) -> dict | None:
     """The seam correction the tile was built under, for the catalog.
 
     None means the pooled percentile with every scene at its own baseline,
     which is itself a rule the catalog has to state.
+
+    `paths_without_swath` names the WRS paths the prep file's swath definition
+    could not describe, with the scenes behind each. Those scenes load, reach
+    `qa_count`, and feed the pooled fallback, and they take no part in the
+    per-path blend. The prep run used to refuse the tile over this. It now
+    records it, and the number belongs on the item beside the paths that did
+    get a swath.
+
+    The mapping is recomputed from `item_dicts` rather than read from the prep
+    metadata, so a prep file written before that key existed reports the same
+    answer. Passing no items yields an empty mapping, which says the caller did
+    not ask rather than that no path is missing.
     """
     if prep is None:
         return None
     return {
+        "paths_without_swath": destripe.paths_without_a_swath(item_dicts, prep.paths),
+        "pooled_share": pooled_share,
+        "n_pooled_fallback_retained": n_pooled,
+        "retained_pixels": retained_pixels,
         "prep_schema_version": prep.meta.get("schema_version"),
         "prep_scene_digest": prep.digest,
         "prep_window": prep.window,
@@ -1296,6 +1365,12 @@ def main(argv=None) -> int:  # noqa: C901
             f"region, which the mask reports and does not remove"
         )
 
+    say(
+        f"water         {int(scalars.get('removed_observed_water', 0)):,} px "
+        f"the geometry kept and the record called water, at a share of "
+        f"{lst_qa.WATER_SHARE_THRESHOLD:.2f}"
+    )
+
     # The header fields the workers could not write: scale, offset, band
     # names, and the statistics, scanned off the staging file in strips.
     with observe.phase("cog", marks=marks):
@@ -1327,13 +1402,28 @@ def main(argv=None) -> int:  # noqa: C901
                 f"              {valid_counts['land']:,} px carry a value on "
                 f"land, {valid_counts['coast']:,} px in the coastal buffer"
             )
+        # The pooled share is a measured outcome of the correction rule, so it
+        # is settled here, once, and both the item and the summary read the
+        # same number. `finish_staging` has just scanned the raster the
+        # denominator counts.
+        retained_pixels = int(lst_statistics[0]["kept"])
+        pooled_share = pooled_share_of(scalars, retained_pixels)
+        correction = correction_rule(
+            args,
+            prep,
+            item_dicts,
+            pooled_share=pooled_share,
+            n_pooled=int(scalars.get("fallback_valid", 0)),
+            retained_pixels=retained_pixels,
+        )
+        swathless = {} if correction is None else correction["paths_without_swath"]
         meta = run_meta(
             args,
             bbox,
             height,
             width,
             mask_rule(args, mask_counts, ged_provenance),
-            correction_rule(args, prep),
+            correction,
             coverage(
                 mask_counts,
                 lst_statistics,
@@ -1429,7 +1519,17 @@ def main(argv=None) -> int:  # noqa: C901
         "workers_rss_peak_gib": workers_gib,
         "tree_rss_peak_gib": tree_gib,
         "valid_fraction": valid_fraction,
+        # Three figures, one rule. `n_pooled_fallback` is the kernel's
+        # decision before the output mask, kept because every measurement in
+        # FINDINGS.md quotes it against the whole raster.
+        # `n_pooled_fallback_retained` is that decision intersected with what
+        # the raster actually holds, and `pooled_share` divides it by the
+        # retained count. Present on every tile, 0.0 included, so a reader
+        # never has to tell a zero from an absent key.
         "n_pooled_fallback": int(scalars.get("fallback", 0)),
+        "n_pooled_fallback_retained": int(scalars.get("fallback_valid", 0)),
+        "retained_pixels": retained_pixels,
+        "pooled_share": pooled_share,
         "inventory": run_provenance,
         "staging": stage_report,
         "mask": (
@@ -1442,7 +1542,8 @@ def main(argv=None) -> int:  # noqa: C901
                 "aster_ged": ged_provenance,
             }
         ),
-        "correction": correction_rule(args, prep),
+        "correction": correction,
+        "water": water_rule(scalars),
         "catalog": str(catalog_root) if catalog_root else None,
         "frisky": trace_report,
         "dashboard": dash,
@@ -1457,6 +1558,15 @@ def main(argv=None) -> int:  # noqa: C901
             f"\nLST p95       min {summary['min_c']:.1f} C  "
             f"mean {summary['mean_c']:.1f} C  max {summary['max_c']:.1f} C  "
             f"({100 * valid_fraction:.1f}% valid)"
+        )
+    say(
+        f"pooled        {100 * pooled_share:.2f}% of the retained raster "
+        f"({summary['n_pooled_fallback_retained']:,} of {retained_pixels:,} px)"
+    )
+    if swathless:
+        say(
+            "              no swath for WRS path "
+            + ", ".join(f"{p} ({n} scenes)" for p, n in swathless.items())
         )
     qa_mean = {MONTHS[i]: float(qa_statistics[i]["mean"]) for i in range(12)}
     summary["qa_count_per_month"] = qa_mean

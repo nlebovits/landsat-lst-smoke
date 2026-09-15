@@ -71,9 +71,31 @@ at least half its scenes produced a valid observation.
 Half is a threshold, so ground a path sees less often falls outside every swath
 and still carries temperatures. Those pixels take the pooled percentile. The
 cross-fade weights one path's estimate against another, and outside every swath
-there is one estimate to weigh, so the blend is the pooled value already. The
-run summary counts them as `n_pooled_fallback`. A nodata pixel keeps the meaning
-it had. No scene imaged that ground.
+there is one estimate to weigh, so the blend is the pooled value already. A
+nodata pixel keeps the meaning it had. No scene imaged that ground.
+
+Every run states how much of its raster went that way. `pooled_share` in
+`summary.json` is `n_pooled_fallback_retained / retained_pixels`, and the item's
+`processing:lineage` carries the same figure in words. The numerator counts
+pooled pixels present in the published raster, after the output mask, so it
+divides by the count the coverage figures already use. `n_pooled_fallback` is
+the kernel's decision before that mask and stays in the summary because the
+measurements in `FINDINGS.md` quote it. Both appear on every tile, zero
+included.
+
+A whole WRS path can stay under the threshold everywhere on one tile. Its
+scenes still load and still reach `qa_count`. They feed the pooled fallback and
+take no part in the blend. The prep run used to refuse such a tile and name
+`--no-feather` as the way past it. A tile then waited on an operator reading
+that message.
+
+The run records the path instead. Its name and its scene count reach three
+places: the prep output, `summary.json` under
+`correction.paths_without_swath`, and the item lineage. The exclusion is
+narrower than the refusal implied.
+`DESTRIPE_MIN_PATH_OBSERVATIONS` already drops a thin path from one pixel's
+blend and renormalises the rest. A swath-less path is the limiting case of a
+rule the composite applies everywhere.
 
 Both corrections run inside the block the graph has already loaded, so neither
 adds a read and neither adds a pass. The prep file is the extra traversal,
@@ -119,16 +141,131 @@ describes the place.
 |---|---|---|
 | Evidence | 5 clear observations over the window | too few scenes to estimate a percentile |
 | Plausibility | -20 C to 80 C, inclusive | the retrieval failed |
-| Water | outside the buffered land geometry | never this product's subject |
+| Land geometry | outside the buffered land geometry | never this product's subject |
+| Observed water | 90% of clear observations set QA_PIXEL bit 7, and the percentile is at or below 34 C | the surface is water |
 
-The water rule zeroes `qa_count` with the temperature, so a count of 0 beside a
-nodata pixel is the signature of sea. The other two leave `qa_count` standing.
-A count of 1 to 4 beside a nodata pixel is the evidence rule. A count above 5
-beside one is a value outside the bounds. Sum the 12 bands to read it.
+Read `qa_count` beside a nodata pixel as evidence, not as an answer. The two
+water rules zero the count with the temperature. The other two leave the count
+standing, so a count of 1 to 4 is the evidence rule and a count of 5 or more is
+a temperature bound. Sum the 12 bands to read it.
 
-The water rule reads land grown by 25 km. That growth stops the mask cutting a
-coastal scene at the waterline, and it reaches open sea. So the geometry decides
-pixels and does not define land.
+A count of 0 identifies nothing on its own. No scene covered the pixel. Or
+scenes covered it and every observation failed the QA or range rule. Or the
+land geometry removed it. Or the observed-water rule removed it. An earlier
+version of this section called a zero count the signature of sea. It never was,
+even before the water rule existed.
+
+The land geometry reads land grown by 25 km. That growth stops the mask cutting
+a coastal scene at the waterline, and it reaches open sea. So the geometry
+decides pixels and does not define land.
+
+### The water a scene photographed
+
+The buffered geometry leaves sea inside the buffer and cannot see a river at
+all. The observations can. QA_PIXEL sets bit 7 over water, and
+`lst_qa.observed_water` asks what share of a pixel's usable clear observations
+did so over the whole five years. At or above 90%, the pixel leaves the product.
+
+One bit is not enough on its own. A reflectance test sets that flag, and it
+matches a dark roof or a rail yard on almost every scene. MEASURED in Center
+City Philadelphia: 143 pixels reading 36 C to 56 C carried the flag on 86% to
+100% of their 80 clear observations. No threshold on the share excludes them,
+because their share is the share of open sea.
+
+Water has a ceiling that asphalt does not. So a pixel whose percentile exceeds
+`WATER_MAX_C`, 34 C, keeps its temperature whatever the flag counted. Two
+blocks with known truth set that bound. The Center City box excludes both
+rivers, and the Delaware Bay block lies offshore of either bank.
+
+| bound | Center City masked | Delaware Bay kept | Chesapeake kept |
+|---|---|---|---|
+| 40 C | 1.33% | 100.00% | 93.07% |
+| 36 C | 0.70% | 100.00% | 93.07% |
+| 35 C | 0.26% | 100.00% | 93.07% |
+| 34 C | 0.00% | 100.00% | 93.06% |
+| 32 C | 0.00% | 100.00% | 92.92% |
+
+34 C is where the false positives end and before the cost to open water starts.
+It removes every false positive in that box and takes 0.01% of the Chesapeake.
+
+Temperate water set the bound, and a later probe tested it against Kalimantan.
+The warm-water fear turned out smaller than expected. The Barito estuary
+classifies at a median of 33.18 C and the Kahayan river at 33.92 C, both under
+the bound. The Kahayan upper quartile of 34.74 C does cross it, so that slice
+of river keeps its temperature and the product publishes it as land. The rule
+errs that way deliberately. A warm pond published as land costs less than a
+warm roof deleted as water.
+
+One thermal alternative lost on the numbers. Water holds steady across
+observations where asphalt swings: the per-pixel spread runs 8.30 C over
+Delaware Bay against 12.42 C over Center City. A spread bound at 9.5 C also
+reaches 0.00%, costs the Chesapeake 0.24% against 0.01%, and needs a third
+accumulator in the kernel.
+
+`composite.reduce_block` counts the share from two unsaturated counters, and
+`composite.finalize_block` applies it beside the geometry. The rule drops no
+observation before the percentile runs, so a retained pixel is bit-identical to
+what the same run produced without it. `tile_prep.py` fits the destripe offsets
+and the feather weights and freezes them before the composite starts, so a mask
+applied after the percentile cannot move them.
+
+MEASURED 2026-09-15 on four blocks rebuilt from their scenes, each 360 px square
+with its whole five-year stack:
+
+| block | scenes | clear observations, median | classified water | published p95 |
+|---|---|---|---|---|
+| Chesapeake open water | 756 | 322 | 93.06% | 28.69 C |
+| Delaware Bay | 190 | 110 | 100.00% | 27.42 C |
+| Delaware shoreline | 569 | 99 | 99.72% | 28.41 C |
+| Rajasthan desert | 809 | 280 | 0.00% | 55.73 C |
+
+The desert block is the false-positive test, and it classifies no pixel as
+water. Bright sand at 55.73 C is what a cloud-and-water classifier confuses, and
+this one does not.
+
+The threshold comes from the distribution rather than from convention. MEASURED
+over 17 cached blocks of `N40W080`, 2,199,809 observed pixels: 93.8% sit below a
+share of 0.05 and 3.0% sit at or above 0.90. The published temperature agrees.
+On the Philadelphia river block, pixels below 0.05 have a median of 44.82 C and
+pixels above 0.90 have a median of 28.92 C inside a 1.6 C interquartile band.
+The bands between run down monotonically: 43.49 C, 39.24 C, 33.87 C. A
+threshold of 0.25 would reach a band whose median is 45.00 C, which is land.
+
+### The tropics set the threshold, not the temperate blocks
+
+Left to `N40W080` alone the answer would be 0.75, its emptiest bin. Kalimantan
+disagrees. MEASURED on a forest block of `N00E110`, the share ramps smoothly
+from 0 to 1 with no empty bin anywhere, and the band at [0.75, 0.90) reads
+31.60 C against forest at 33.65 C. Two degrees, where the temperate river sits
+eleven below its bank. Those pixels are as likely canopy as stream.
+
+Raising the threshold buys that doubt back for almost nothing, at a bound of
+34 C:
+
+| block | truth | at 0.75 | at 0.90 |
+|---|---|---|---|
+| Delaware Bay | all water | 100.0000% | 100.0000% |
+| Chesapeake | mostly water | 93.0602% | 93.0046% |
+| Delaware shoreline | mostly water | 99.7207% | 99.6998% |
+| Barito estuary | tropical water | 12.0725% | 12.0725% |
+| Kahayan river | tropical water | 6.3156% | 6.3156% |
+| Kalimantan forest | tropical land | 0.4599% | 0.1111% |
+| Sebangau peat | tropical land | 0.0000% | 0.0000% |
+| Rajasthan desert | arid land | 0.0000% | 0.0000% |
+| Center City | no water | 0.0000% | 0.0000% |
+
+Delaware Bay loses nothing, the Chesapeake loses 0.056%, and the ambiguous
+forest classifications fall four times over. Both rules now err the same way.
+A pixel of water published as land costs this product less than a pixel of land
+deleted as water.
+
+Much of the tropical water is already absent before any rule runs. 69% of the
+Barito block and 80% of the Kahayan block carry no usable clear observation.
+Landsat retrieves no surface temperature over water, and cloud accounts for
+most of the rest.
+
+The rule keeps flooded peat forest, which is the failure this probe went
+looking for. Sebangau classifies 3 pixels of 22,515.
 
 Until 2026-09-15 every published share of land divided by it. MEASURED at 3600
 pixels per degree, `S40W065` holds 73,254,945 pixels of processing mask and

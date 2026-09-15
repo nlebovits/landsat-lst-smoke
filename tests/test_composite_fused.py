@@ -54,6 +54,18 @@ def scenes(tmp_path_factory):
     return composite.rehearsal_items(BBOX, N_SCENES, directory / "scenes")
 
 
+#: A box inside the window that every scene of `wet_scenes` marks as water. It
+#: sits away from the edges, so the rehearsal walk covers it in several scenes.
+WATER = (-59.9, -33.9, -59.6, -33.6)
+
+
+@pytest.fixture(scope="module")
+def wet_scenes(tmp_path_factory):
+    """The same walk, with QA_PIXEL bit 7 set over `WATER` in every scene."""
+    directory = tmp_path_factory.mktemp("wet-scenes")
+    return composite.rehearsal_items(BBOX, N_SCENES, directory / "scenes", water=WATER)
+
+
 @pytest.fixture(scope="module")
 def loaded(scenes):
     """The graph engine's own stack over the same window, computed once."""
@@ -424,3 +436,139 @@ class TestFusedBlock:
             assert (src.read(1) == 0).all()
         with rasterio.open(paths["qa_count"]) as src:
             assert (src.read() == 0).all()
+
+
+class TestObservedWaterInBothEngines:
+    """The water rule on the fused path, against the graph on one fixture.
+
+    The shared `scenes` fixture writes a constant clear `qa_pixel`, so nothing
+    in it ever sets bit 7. Comparing two engines on that fixture would prove
+    they agree about a rule neither of them ran, which is why this class builds
+    its own scenes with water in them.
+    """
+
+    def test_the_fixture_reaches_the_rule(self, tmp_path, wet_scenes):
+        # Without this, every assertion below would pass on a tile that held
+        # no water at all.
+        items, _boxes = wet_scenes
+        scalars, _paths, _attrs = graph_run(tmp_path / "graph", items)
+        assert scalars["removed_observed_water"] > 0
+
+    def test_the_two_engines_remove_the_same_pixels(self, tmp_path, wet_scenes):
+        items, boxes = wet_scenes
+        prep = prep_for()
+        want_scalars, want_paths, _ = graph_run(tmp_path / "graph", items, prep=prep)
+        got_scalars, got_paths, _, _ = fused_run(
+            tmp_path / "fused", items, boxes, prep=prep
+        )
+        assert_same_files(got_paths, want_paths)
+        assert got_scalars == want_scalars
+        assert got_scalars["removed_observed_water"] > 0
+
+    def test_the_rule_runs_with_no_output_mask(self, tmp_path, wet_scenes):
+        items, boxes = wet_scenes
+        got_scalars, got_paths, _, _ = fused_run(tmp_path / "fused", items, boxes)
+        assert got_scalars["removed_water"] == 0
+        assert got_scalars["removed_observed_water"] > 0
+        with rasterio.open(got_paths["lst_p95"]) as src:
+            lst = src.read(1)
+        with rasterio.open(got_paths["qa_count"]) as src:
+            qa = src.read()
+        # The rule zeroes both bands together, so a pixel it took carries no
+        # count either.
+        removed = lst == LST_NODATA_DN
+        assert (qa[:, removed].sum(axis=0) == 0).any()
+
+    def test_the_water_and_the_geometry_do_not_double_count(self, tmp_path, wet_scenes):
+        """Each rule is credited with the pixels it alone took.
+
+        The geometry here removes the bottom block row, which the water box
+        does not reach, so the two counts describe disjoint sets.
+        """
+        items, boxes = wet_scenes
+        height, width = composite.raster_shape(BBOX, PPD)
+        keep = np.ones((height, width), dtype=bool)
+        keep[-CHUNK:, :] = False
+        rule = {"keep_mask": keep}
+        want_scalars, want_paths, _ = graph_run(tmp_path / "graph", items, rule=rule)
+        got_scalars, got_paths, _, _ = fused_run(
+            tmp_path / "fused", items, boxes, rule=rule
+        )
+        assert_same_files(got_paths, want_paths)
+        assert got_scalars == want_scalars
+        assert got_scalars["removed_water"] > 0
+        assert got_scalars["removed_observed_water"] > 0
+
+    def test_a_dry_tile_loses_nothing_to_the_rule(self, tmp_path, scenes):
+        """The shared fixture has no water, so the rule must take no pixel.
+
+        A rule that fired on a clear QA band would empty every tile on earth.
+        """
+        items, _boxes = scenes
+        scalars, _paths, _ = graph_run(tmp_path / "graph", items)
+        assert scalars["removed_observed_water"] == 0
+
+
+class TestATileTheRuleEmpties:
+    """An all-sea tile, which `S35W055` is and the geometry cannot catch.
+
+    `shard_lst_p95` has an early exit for a tile the buffered geometry leaves
+    with no pixel, at `no_unmasked_pixels`. It cannot fire for this: it tests
+    `pixels_kept`, which the driver computes from the geometry before it reads
+    a scene, and observed water is unknown until the stack is reduced.
+    `S35W055` holds 588,696 processing-mask pixels and no strict land, so it
+    has never taken that exit and still will not.
+
+    What has to hold instead is that the empty result travels. A tile where
+    every pixel is nodata reaches the statistics scan, the header write, and
+    the renders block, and none of them may divide by the pixels that are not
+    there.
+    """
+
+    #: Wider than the tile on every side. A box drawn on the tile's own edges
+    #: leaves its border pixels dry: the scenes are 1/60 degree and the run
+    #: grid is 1/360, so an edge pixel resamples from a scene cell whose
+    #: centre falls outside the box.
+    SEA = (BBOX[0] - 0.5, BBOX[1] - 0.5, BBOX[2] + 0.5, BBOX[3] + 0.5)
+
+    @pytest.fixture(scope="class")
+    def all_sea_scenes(self, tmp_path_factory):
+        directory = tmp_path_factory.mktemp("sea-scenes")
+        return composite.rehearsal_items(
+            BBOX, N_SCENES, directory / "scenes", water=self.SEA
+        )
+
+    def test_the_tile_comes_out_empty(self, tmp_path, all_sea_scenes):
+        items, boxes = all_sea_scenes
+        scalars, paths, _, _ = fused_run(tmp_path / "fused", items, boxes)
+        with rasterio.open(paths["lst_p95"]) as src:
+            lst = src.read(1)
+        with rasterio.open(paths["qa_count"]) as src:
+            qa = src.read()
+        assert (lst == LST_NODATA_DN).all()
+        assert (qa == 0).all()
+        assert scalars["valid"] == 0
+        assert scalars["removed_observed_water"] > 0
+
+    def test_the_statistics_scan_survives_a_tile_with_no_values(
+        self, tmp_path, all_sea_scenes
+    ):
+        """`file_statistics` reports a kept count of 0 rather than raising.
+
+        The mean and the standard deviation divide by the kept count, and the
+        minimum and maximum start at infinity. An empty band has to leave that
+        branch without touching any of them.
+        """
+        items, boxes = all_sea_scenes
+        _scalars, paths, _, _ = fused_run(tmp_path / "fused", items, boxes)
+        stats = composite.finish_staging(
+            paths["lst_p95"],
+            scale=0.01,
+            offset=-50.0,
+            descriptions=("95th percentile LST",),
+            nodata=LST_NODATA_DN,
+        )
+        assert stats[0]["kept"] == 0
+        assert stats[0]["total"] > 0
+        assert stats[0]["min"] == stats[0]["max"] == 0.0
+        assert stats[0]["std"] == 0.0

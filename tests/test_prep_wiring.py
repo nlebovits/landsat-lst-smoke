@@ -65,6 +65,9 @@ def write_prep(directory: Path, item_dicts, **overrides) -> Path:
     """A prep artifact for `item_dicts`, with any field overridden."""
     scene_ids = [destripe.scene_id_of(d) for d in item_dicts]
     window = overrides.pop("window", WINDOW)
+    # Popped before the meta merge so a test can write a prep file that names
+    # fewer paths than its items carry, which is the swath-less case.
+    paths = overrides.pop("paths", [WEST, EAST])
     meta = {
         "schema_version": destripe.PREP_SCHEMA_VERSION,
         "scene_digest": destripe.scene_digest(scene_ids, window),
@@ -86,9 +89,9 @@ def write_prep(directory: Path, item_dicts, **overrides) -> Path:
         "scene_ids": np.array(scene_ids),
         "offset": overrides.pop("offset", np.zeros(len(scene_ids))),
         "n_valid": overrides.pop("n_valid", np.full(len(scene_ids), 9_000)),
-        "paths": np.array([WEST, EAST]),
-        "weight": np.zeros((2, 8, 8), dtype="float32"),
-        "inside": np.ones((2, 8, 8), dtype=bool),
+        "paths": np.array(paths),
+        "weight": np.zeros((max(len(paths), 1), 8, 8), dtype="float32"),
+        "inside": np.ones((max(len(paths), 1), 8, 8), dtype=bool),
     }
     tile_prep.write_artifact(directory, payload, meta)
     return directory
@@ -267,6 +270,103 @@ class TestTheCorrectionRule:
         rule = shard_lst_p95.correction_rule(run_args(tmp_path, no_destripe=True), prep)
         assert rule is not None
         assert rule["max_offset_c"] is None
+
+
+class TestTheRuleNamesTheSwathlessPaths:
+    """The refusal became a record. The record has to reach the item.
+
+    `destripe.paths_without_a_swath` decides the mapping and
+    `tests/test_tile_prep.py` pins it. This is the wiring: a rule built from a
+    prep file that names fewer paths than its scenes carry has to say so, with
+    the scene counts, so a reader of the published item can weigh the gap.
+    """
+
+    def test_an_ordinary_tile_names_none(self, tmp_path):
+        write_prep(tmp_path, items())
+        prep = destripe.load_prep(tmp_path)
+        rule = shard_lst_p95.correction_rule(run_args(tmp_path), prep, items())
+        assert rule is not None
+        assert rule["paths_without_swath"] == {}
+
+    def test_one_swathless_path_reaches_the_rule_with_its_count(self, tmp_path):
+        write_prep(tmp_path, items(6), paths=[WEST])
+        prep = destripe.load_prep(tmp_path)
+        rule = shard_lst_p95.correction_rule(run_args(tmp_path), prep, items(6))
+        assert rule is not None
+        assert rule["paths_without_swath"] == {EAST: 3}
+
+    def test_a_tile_with_no_swath_anywhere_names_every_path(self, tmp_path):
+        """The second row of the ticket's table. Nothing refuses it either."""
+        write_prep(tmp_path, items(6), paths=[])
+        prep = destripe.load_prep(tmp_path)
+        rule = shard_lst_p95.correction_rule(run_args(tmp_path), prep, items(6))
+        assert rule is not None
+        assert rule["paths_without_swath"] == {WEST: 3, EAST: 3}
+
+    def test_passing_no_items_reports_nothing_rather_than_everything(self, tmp_path):
+        """A caller that did not ask is not a tile with no swath."""
+        write_prep(tmp_path, items(6), paths=[WEST])
+        prep = destripe.load_prep(tmp_path)
+        rule = shard_lst_p95.correction_rule(run_args(tmp_path), prep)
+        assert rule is not None
+        assert rule["paths_without_swath"] == {}
+
+    def test_the_measured_share_travels_with_the_rule(self, tmp_path):
+        write_prep(tmp_path, items())
+        prep = destripe.load_prep(tmp_path)
+        rule = shard_lst_p95.correction_rule(
+            run_args(tmp_path),
+            prep,
+            items(),
+            pooled_share=0.25,
+            n_pooled=50,
+            retained_pixels=200,
+        )
+        assert rule is not None
+        assert rule["pooled_share"] == 0.25
+        assert rule["n_pooled_fallback_retained"] == 50
+        assert rule["retained_pixels"] == 200
+
+
+class TestThePooledShare:
+    """One definition, in one function, used by the item and the summary.
+
+    The numerator is `fallback_valid` and not `fallback`. The kernel decides
+    the fallback before the output mask runs, so a pooled pixel the water rule
+    then removes is in `fallback` and is not in the raster the share describes.
+    """
+
+    def test_it_divides_the_retained_fallback_by_the_retained_pixels(self):
+        scalars = {"fallback": 900, "fallback_valid": 25}
+        assert shard_lst_p95.pooled_share_of(scalars, 100) == 0.25
+
+    def test_it_ignores_the_unmasked_count(self):
+        """`fallback` counts pixels the water rule later removed."""
+        loose = {"fallback": 10_000, "fallback_valid": 1}
+        tight = {"fallback": 1, "fallback_valid": 1}
+        assert shard_lst_p95.pooled_share_of(loose, 4) == shard_lst_p95.pooled_share_of(
+            tight, 4
+        )
+
+    def test_a_fully_feathered_tile_scores_zero(self):
+        assert shard_lst_p95.pooled_share_of({"fallback_valid": 0}, 500) == 0.0
+
+    def test_a_fully_pooled_tile_scores_one(self):
+        assert shard_lst_p95.pooled_share_of({"fallback_valid": 500}, 500) == 1.0
+
+    def test_an_empty_raster_scores_zero_rather_than_raising(self):
+        """There is no pooled share of nothing, and 0.0 is what a reader can
+        divide, sort, and plot without a special case."""
+        assert shard_lst_p95.pooled_share_of({"fallback_valid": 0}, 0) == 0.0
+
+    def test_a_missing_scalar_is_zero_not_an_error(self):
+        assert shard_lst_p95.pooled_share_of({}, 100) == 0.0
+
+    def test_the_share_never_exceeds_one(self):
+        """The bug the numerator choice prevents. `fallback` alone would give
+        9.0 here, on a tile whose pooled pixels are mostly sea."""
+        scalars = {"fallback": 900, "fallback_valid": 100}
+        assert shard_lst_p95.pooled_share_of(scalars, 100) == 1.0
 
 
 class TestEveryRejectedScene:

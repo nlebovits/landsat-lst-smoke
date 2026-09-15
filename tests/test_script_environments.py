@@ -291,6 +291,71 @@ class TestTheFleetPlannerResolves:
         assert "ModuleNotFoundError" not in proc.stderr
         assert "tiles         3 to launch" in proc.stdout
 
+    def test_the_default_plan_needs_no_unbuffered_geometry(self, tmp_path):
+        """`fleet/config.toml` ships six artifacts to an instance and
+        `land_strict.gpkg` is not one of them, so an instance and this checkout
+        both plan without it. The coverage screen once ran by default and made
+        the planner exit 1 here, on a run whose plan had already been written.
+        """
+        work = fresh_checkout(tmp_path, with_mask=True)
+        assert not (work / "artifacts" / "land_strict.gpkg").exists()
+        proc = run_script(
+            work,
+            "lst-fleet-plan",
+            "--inventory-uri",
+            "artifacts/inventory_slice.parquet",
+            "--out",
+            str(tmp_path / "plan.json"),
+        )
+        assert proc.returncode == 0, proc.stdout[-2000:]
+        assert not (work / "artifacts" / "fleet_plan.jsonl").exists()
+        assert "coverage" not in proc.stdout
+
+    def test_the_screen_runs_on_the_inline_block_alone(self, tmp_path):
+        """And on the same dependencies. The screen rasterises two geometries
+        rather than one, so it is the import a new dependency arrives through.
+        """
+        import json
+
+        from conftest import STRICT_LAND_GEOMETRY
+
+        work = fresh_checkout(tmp_path, with_mask=True)
+        shutil.copy2(STRICT_LAND_GEOMETRY, work / "artifacts" / "land_strict.gpkg")
+        proc = run_script(
+            work,
+            "lst-fleet-plan",
+            "--coverage",
+            "--inventory-uri",
+            "artifacts/inventory_slice.parquet",
+            "--out",
+            str(tmp_path / "plan.json"),
+            "--out-coverage",
+            str(tmp_path / "screen.jsonl"),
+        )
+        assert proc.returncode == 0, f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        assert "ModuleNotFoundError" not in proc.stderr
+        lines = (tmp_path / "screen.jsonl").read_text().splitlines()
+        assert len(lines) == 895
+        assert json.loads(lines[0])["tile_id"]
+
+    def test_asking_for_the_screen_without_the_geometry_says_which_command(
+        self, tmp_path
+    ):
+        """Opt-in, and loud when the person opted in. The silent skip is the
+        other failure this pair guards."""
+        work = fresh_checkout(tmp_path, with_mask=True)
+        proc = run_script(
+            work,
+            "lst-fleet-plan",
+            "--coverage",
+            "--inventory-uri",
+            "artifacts/inventory_slice.parquet",
+            "--out",
+            str(tmp_path / "plan.json"),
+        )
+        assert proc.returncode == 1
+        assert "--write-strict-geometry" in proc.stdout
+
 
 class TestTheCostReportResolves:
     """`lst.fleet.cost_report` prices the run after it ends.

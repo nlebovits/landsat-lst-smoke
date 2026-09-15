@@ -88,8 +88,15 @@ from lst.lst_qa import (
     LST_NODATA_DN,
     encode_celsius,
     masked_celsius,
+    observed_water,
+    qa_water,
     supported_output,
 )
+
+#: What `rehearsal_items` writes inside its water box, in Celsius. Well under
+#: `lst_qa.WATER_MAX_C`, because a rehearsal whose water reads as hot as its
+#: land would exercise the veto rather than the share rule.
+REHEARSAL_WATER_C = 26.0
 
 #: Block edge in pixels. 360 divides an 18,000 px tile into 50 x 50 blocks
 #: with no ragged edge. See the module docstring for the memory that sets it.
@@ -708,9 +715,16 @@ def reduce_block(
     over the raster. And it is a statement about the estimate rather than about
     where the pixel is, so it holds under `--no-output-mask` too.
 
+    The water classification is taken here and applied nowhere near here.
+    `observed_water` needs the whole window, which only this kernel holds, but
+    what it decides is the pixel's subject rather than its estimate. So the
+    plane comes back with the bands and `finalize_block` writes it in beside
+    the geometric rule, through the one implementation both share.
+
     Returns:
         `lst_p95` uint16 `(y, x)`, `qa_count` uint8 `(y, x, 12)`, `fallback`
-        bool `(y, x)`, and with `emit_pooled` a fourth uint16 `(y, x)`.
+        bool `(y, x)`, `observed_water` bool `(y, x)`, and with `emit_pooled` a
+        fifth output, uint16 `(y, x)`.
     """
     t0 = time.perf_counter_ns()
     lwir = np.moveaxis(lwir, -1, 0)
@@ -730,6 +744,15 @@ def reduce_block(
     month_p = np.asarray(month)[present]
 
     celsius, valid = masked_celsius(lwir_p, qa_p)
+
+    # The two counters the water classification reads, over the whole window
+    # and unsaturated. `counts` below is neither: it clips at 255 a month and
+    # carries no water flag, so the share cannot be recovered from it. The
+    # `valid & qa_water` term holds one bool copy of the stack, about 99 MB at
+    # 765 x 360 x 360, beside the float32 copy `celsius` already is.
+    clear_obs = valid.sum(axis=0, dtype="uint32")
+    water_obs = (valid & qa_water(qa_p)).sum(axis=0, dtype="uint32")
+
     destripe.subtract_offsets(celsius, offset_p)
 
     ny, nx = lwir.shape[1:]
@@ -765,8 +788,11 @@ def reduce_block(
     # `counts` is left alone. A nodata temperature beside a count of 4 says the
     # pixel was screened rather than never seen, and that count is the only
     # evidence a consumer has for which of the two rules reached it.
+    # `p95`, not `dn`: the veto is a temperature, and the encoder has already
+    # turned everything it could not represent into nodata by this point.
+    water = observed_water(water_obs, clear_obs, p95)
     _record_block_span(t0, int(present.sum()), int(unsupported.sum()))
-    outputs = (dn, np.moveaxis(counts, 0, -1), fallback)
+    outputs = (dn, np.moveaxis(counts, 0, -1), fallback, water)
     return (*outputs, pooled) if emit_pooled else outputs
 
 
@@ -839,8 +865,10 @@ def build_graph(
         xr.DataArray(v, dims=("time",), coords={"time": data["time"]})
         for v in (offset, keep, path_code, month)
     ]
-    output_core_dims = [[], ["month"], []] + ([[]] if emit_pooled else [])
-    output_dtypes = [np.uint16, np.uint8, bool] + ([np.uint16] if emit_pooled else [])
+    output_core_dims = [[], ["month"], [], []] + ([[]] if emit_pooled else [])
+    output_dtypes = [np.uint16, np.uint8, bool, bool] + (
+        [np.uint16] if emit_pooled else []
+    )
     outputs = xr.apply_ufunc(
         reduce_block,
         data["lwir11"],
@@ -866,14 +894,21 @@ def build_graph(
             "emit_pooled": emit_pooled,
         },
     )
-    lst, counts, fallback = outputs[:3]
+    lst, counts, fallback, water = outputs[:4]
     counts = counts.transpose("month", ydim, xdim)
     lst = lst.astype("uint16")
     counts = counts.astype("uint8")
 
-    out = xr.Dataset({"lst_p95": lst, "qa_count": counts, "fallback": fallback})
+    out = xr.Dataset(
+        {
+            "lst_p95": lst,
+            "qa_count": counts,
+            "fallback": fallback,
+            "observed_water": water,
+        }
+    )
     if emit_pooled:
-        out["lst_p95_pooled"] = outputs[3].astype("uint16")
+        out["lst_p95_pooled"] = outputs[4].astype("uint16")
 
     out.attrs["n_rejected"] = int((~keep).sum())
     out.attrs["n_scenes"] = int(len(times))
@@ -907,7 +942,29 @@ def build_graph(
 #: pixels are already nodata and no flag can tell them from a pixel the
 #: percentile never had. Their evidence is the published `qa_count`, which the
 #: rule leaves standing.
-FLAGS = ("fallback", "removed_water", "qa_zeroed", "valid")
+#:
+#: `removed_water` and `removed_observed_water` are disjoint by construction.
+#: The mask both feed is the union of the two rules, but each count names only
+#: the pixels its own rule took, so a sea pixel the buffered geometry had
+#: already removed is attributed once. Add them to get the union.
+#:
+#: Append to this tuple, never insert. `compute_all` zips it against the
+#: summed flag axis and `fused_block` enumerates it, so a new entry in the
+#: middle silently renames every count after it.
+#: `fallback` counts the kernel's decision, before the output mask. A pooled
+#: pixel the water rule then removes is counted there and is absent from the
+#: published raster, so `fallback / valid` is not a share of anything and can
+#: exceed 1 on a tile that is mostly sea. `fallback_valid` is the same decision
+#: intersected with what survived, which is the numerator of the `pooled_share`
+#: the summary and the item lineage report.
+FLAGS = (
+    "fallback",
+    "removed_water",
+    "qa_zeroed",
+    "valid",
+    "removed_observed_water",
+    "fallback_valid",
+)
 
 
 class FileLock:
@@ -1094,6 +1151,7 @@ def finalize_block(
     lst,
     qa,
     fallback,
+    observed,
     keep,
     rows,
     cols,
@@ -1108,9 +1166,17 @@ def finalize_block(
     unmasked. `rows` and `cols` are the block's pixel indices, broadcast to its
     shape, so the window is read off their corners.
 
-    The mask is `masks.apply_output_mask`, the one implementation of the water
-    rule, applied to the block in place. The per-pixel flags are read off its
-    effect: what was valid before and is nodata after.
+    Two rules remove a pixel here and the mask is their union. `keep` is the
+    buffered land geometry, which answers where the pixel is. `observed` is
+    `lst_qa.observed_water` as `reduce_block` decided it, which answers what
+    the pixel is. The second runs whether or not the first did, because
+    `--no-output-mask` withdraws a claim about geography and not a claim about
+    the water a scene photographed.
+
+    The mask is `masks.apply_output_mask`, the one implementation of the rule,
+    applied to the block in place. The per-pixel flags are read off its effect:
+    what was valid before and is nodata after. Each rule is credited only with
+    the pixels it alone took, so the two counts never claim one pixel twice.
 
     Returns `(y, x, flag)` uint8 in the order of `FLAGS`.
     """
@@ -1124,12 +1190,14 @@ def finalize_block(
 
     valid_before = lst != LST_NODATA_DN
     qa_before = qa.any(axis=0)
-    if masked:
-        keep = np.broadcast_to(np.asarray(keep, dtype=bool), lst.shape)
-        apply_output_mask(lst, qa, keep)
-    else:
-        keep = np.ones(lst.shape, dtype=bool)
-    water = ~keep
+    observed = np.broadcast_to(np.asarray(observed, dtype=bool), lst.shape)
+    keep = (
+        np.broadcast_to(np.asarray(keep, dtype=bool), lst.shape)
+        if masked
+        else np.ones(lst.shape, dtype=bool)
+    )
+    water = ~keep | observed
+    apply_output_mask(lst, qa, ~water)
 
     path, lock = targets["lst_p95"]
     _write_window(path, lock, lst[None], y0, x0)
@@ -1142,10 +1210,13 @@ def finalize_block(
         _write_window(path, lock, pooled_dn[None], y0, x0)
 
     flags = np.zeros((height, width, len(FLAGS)), dtype="uint8")
+    retained = lst != LST_NODATA_DN
     flags[..., 0] = fallback
-    flags[..., 1] = valid_before & water
+    flags[..., 1] = valid_before & ~keep
     flags[..., 2] = qa_before & water
-    flags[..., 3] = lst != LST_NODATA_DN
+    flags[..., 3] = retained
+    flags[..., 4] = valid_before & keep & observed
+    flags[..., 5] = fallback & retained
     return flags
 
 
@@ -1213,11 +1284,12 @@ def staging_writes(
         out["lst_p95"],
         out["qa_count"],
         out["fallback"],
+        out["observed_water"],
         keep,
         rows,
         cols,
         *extra,
-        input_core_dims=[[], ["month"], [], [], [], []] + [[] for _ in extra],
+        input_core_dims=[[], ["month"], [], [], [], [], []] + [[] for _ in extra],
         output_core_dims=[["flag"]],
         dask="parallelized",
         output_dtypes=[np.uint8],
@@ -1569,10 +1641,11 @@ def fused_block(
         outputs[0],
         outputs[1],
         outputs[2],
+        outputs[3],
         True if out.keep is None else out.keep,
         np.array([block.yslice.start]),
         np.array([block.xslice.start]),
-        *outputs[3:],
+        *outputs[4:],
         masked=out.masked,
         targets=out.targets,
     )
@@ -1689,7 +1762,7 @@ def item_for_files(scene_id: str, bands: dict, *, datetime: str, path: str, row:
     }
 
 
-def rehearsal_items(bbox, n: int, directory: Path, *, seed: int = 0):
+def rehearsal_items(bbox, n: int, directory: Path, *, seed: int = 0, water=None):
     """`n` synthetic scenes over `bbox`, as files and the items that name them.
 
     Each scene is a 1.7 degree square at 1/60 degree, placed on a 7 x 7 walk
@@ -1697,13 +1770,25 @@ def rehearsal_items(bbox, n: int, directory: Path, *, seed: int = 0):
     grid is coarse so a full tile rehearses in seconds; `odc.stac` resamples it
     onto the run's grid the way it would a real scene.
 
+    Args:
+        bbox: the window the walk covers.
+        n: how many scenes to write.
+        directory: where the GeoTIFFs go.
+        seed: fixes the warm field.
+        water: a geographic `(west, south, east, north)` box that every scene
+            marks as water, or None for a tile with no water in it. The rule
+            in `lst_qa.observed_water` reads QA_PIXEL bit 7, so a rehearsal
+            whose QA band is a constant can never reach it, and a test that
+            only compared two engines on such a fixture would prove they agree
+            about a rule neither ran.
+
     Returns:
         `(items, item_bboxes)`.
     """
     import rasterio
     from rasterio.transform import from_origin
 
-    from lst.lst_qa import LWIR_OFFSET_C, LWIR_SCALE
+    from lst.lst_qa import LWIR_OFFSET_C, LWIR_SCALE, QA_WATER_BITS
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -1719,6 +1804,23 @@ def rehearsal_items(bbox, n: int, directory: Path, *, seed: int = 0):
         celsius = rng.normal(45.0, 6.0, (px, px)).astype("float32")
         dn = np.rint((celsius - LWIR_OFFSET_C) / LWIR_SCALE).astype("uint16")
         qa = np.full((px, px), 0b1000000, dtype="uint16")
+        if water is not None:
+            # The scene's own grid, north-up from (west, north) at `res`.
+            rows = north - (np.arange(px) + 0.5) * res
+            cols = west + (np.arange(px) + 0.5) * res
+            wet = ((cols >= water[0]) & (cols <= water[2]))[None, :] & (
+                (rows >= water[1]) & (rows <= water[3])
+            )[:, None]
+            qa[wet] |= QA_WATER_BITS
+            # Water reads cold, and `lst_qa.observed_water` vetoes a pixel
+            # whose percentile is too hot to be water however the flag counted.
+            # A water box left at the land field would carry the flag and the
+            # land temperature together, which is the one combination the rule
+            # exists to reject.
+            dn[wet] = np.rint(
+                (rng.normal(REHEARSAL_WATER_C, 1.0, int(wet.sum())) - LWIR_OFFSET_C)
+                / LWIR_SCALE
+            ).astype("uint16")
         paths = {}
         for band, values in (("lwir11", dn), ("qa_pixel", qa)):
             path = directory / f"scene{i:04d}_{band}.tif"

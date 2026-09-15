@@ -58,6 +58,9 @@ from lst.lst_qa import (
     LST_VALID_MAX_C,
     LST_VALID_MIN_C,
     MIN_TOTAL_OBSERVATIONS,
+    MIN_WATER_OBSERVATIONS,
+    QA_WATER_BIT,
+    WATER_SHARE_THRESHOLD,
     encode_celsius,
 )
 
@@ -446,12 +449,13 @@ MASK_RULE: dict[str, Any] = {
 
 
 class TestTheMaskExplainsItself:
-    """A nodata pixel means one of four things, and the raster says which.
+    """A nodata pixel means one of five things, and the raster says which.
 
-    Water, too little evidence, an impossible temperature, and no usable
-    observation all read as DN 0. The item states the rules instead, and names
-    the artifacts they read by checksum rather than by a path on the machine
-    that ran the mask.
+    A place outside the land geometry, a surface the observations call water,
+    too little evidence, an impossible temperature, and no usable observation
+    all read as DN 0. The item states the rules instead, and names the
+    artifacts they read by checksum rather than by a path on the machine that
+    ran the mask.
     """
 
     def test_the_lineage_names_every_output_rule(self):
@@ -471,12 +475,36 @@ class TestTheMaskExplainsItself:
         assert "70.0 C or hotter" not in lineage
 
     def test_an_unmasked_run_still_states_the_validity_rules(self):
-        # `--no-output-mask` turns off the water rule. The rules that describe
-        # the estimate run in `reduce_block` and are unaffected, so the lineage
-        # of an unmasked tile has to say so.
+        # `--no-output-mask` withdraws the land geometry. The rules that
+        # describe the estimate, and the one that reads the observations, all
+        # run anyway, so the lineage of an unmasked tile has to say so.
         lineage = mask_lineage(None)["processing:lineage"]
         assert "No output mask ran" in lineage
         assert f"fewer than {MIN_TOTAL_OBSERVATIONS} clear observations" in lineage
+
+    def test_both_branches_state_the_observed_water_rule(self):
+        """The rule runs whatever `--no-output-mask` says, so both say it.
+
+        An unmasked tile used to be described as one where "sea pixels are
+        present". That was true when the buffered geometry was the only water
+        rule. It is not true now, and a lineage that still said it would
+        promise a consumer sea this product no longer publishes.
+        """
+        for rule in (MASK_RULE, None):
+            lineage = mask_lineage(rule)["processing:lineage"]
+            assert "Observed water:" in lineage
+            assert f"QA_PIXEL bit {QA_WATER_BIT}" in lineage
+            assert f"{WATER_SHARE_THRESHOLD:.0%}" in lineage
+            assert f"fewer than {MIN_WATER_OBSERVATIONS}" in lineage
+        assert "sea pixels are present" not in mask_lineage(None)["processing:lineage"]
+
+    def test_the_two_water_rules_are_stated_apart(self):
+        # One reads a polygon and one reads the record. A lineage that merged
+        # them would leave a consumer unable to tell which removed a river.
+        lineage = mask_lineage(MASK_RULE)["processing:lineage"]
+        assert "Water: a pixel outside the buffered land geometry" in lineage
+        assert "Observed water:" in lineage
+        assert "removes a river the land geometry cannot" in lineage
 
     def test_the_lineage_names_the_artifacts_by_checksum(self):
         lineage = mask_lineage(MASK_RULE)["processing:lineage"]
@@ -539,6 +567,10 @@ CORRECTION_RULE: dict[str, Any] = {
     "destripe": True,
     "feather": True,
     "paths": ["228", "229"],
+    "paths_without_swath": {},
+    "pooled_share": 0.0,
+    "n_pooled_fallback_retained": 0,
+    "retained_pixels": 1_000_000,
 }
 
 
@@ -587,6 +619,53 @@ class TestTheCorrectionExplainsItself:
         feather_only = correction_lineage(CORRECTION_RULE | {"destripe": False})
         assert "Per-path percentiles:" in feather_only
         assert "Scene offsets:" not in feather_only
+
+    def test_every_feathered_tile_states_its_pooled_share(self):
+        """Zero included. A share stated only when non-zero is one a reader has
+        to guess at, and the guess that silence means zero fails on the tile
+        where the field went missing for another reason."""
+        lineage = correction_lineage(CORRECTION_RULE)
+        assert "Pooled fallback: 0.00% of the retained pixels" in lineage
+        assert "0 of 1,000,000" in lineage
+
+    def test_the_share_is_stated_against_the_retained_count(self):
+        rule = CORRECTION_RULE | {
+            "pooled_share": 0.125,
+            "n_pooled_fallback_retained": 125,
+            "retained_pixels": 1000,
+        }
+        lineage = correction_lineage(rule)
+        assert "12.50% of the retained pixels" in lineage
+        assert "125 of 1,000" in lineage
+        assert "after the output mask" in lineage
+
+    def test_a_swathless_path_is_named_with_its_scene_count(self):
+        rule = CORRECTION_RULE | {"paths_without_swath": {"230": 47}}
+        lineage = correction_lineage(rule)
+        assert "No swath was found for WRS path 230 (47 scenes)" in lineage
+        assert "took no part in the per-path blend" in lineage
+
+    def test_every_swathless_path_is_named(self):
+        rule = CORRECTION_RULE | {"paths_without_swath": {"230": 47, "231": 12}}
+        lineage = correction_lineage(rule)
+        assert "230 (47 scenes), 231 (12 scenes)" in lineage
+
+    def test_an_ordinary_tile_says_nothing_about_swathless_paths(self):
+        lineage = correction_lineage(CORRECTION_RULE)
+        assert "No swath was found" not in lineage
+
+    def test_a_pooled_tile_states_no_share_because_it_has_no_cross_fade(self):
+        """`--no-feather` and an absent prep both read as the pooled paragraph,
+        which already says every pixel is pooled. A share of 100% beside it
+        would be a second way of saying one thing."""
+        rule = CORRECTION_RULE | {"feather": False, "destripe": False}
+        assert "Pooled fallback:" not in correction_lineage(rule)
+
+    def test_an_item_written_before_the_share_existed_still_reads(self):
+        rule = {k: v for k, v in CORRECTION_RULE.items() if "pooled" not in k}
+        rule.pop("retained_pixels")
+        rule.pop("paths_without_swath")
+        assert "Pooled fallback: 0.00%" in correction_lineage(rule)
 
     def test_the_item_carries_it_beside_the_mask_lineage(self, tmp_path):
         _lst = encode_celsius(np.full((SIZE, SIZE), 30.0, dtype="float32"))

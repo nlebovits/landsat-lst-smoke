@@ -99,6 +99,7 @@ lst-measure-land-defects = "lst.measure.land_defects:main"
 lst-measure-s3-requests = "lst.measure.s3_requests:main"
 lst-measure-scene-centre = "lst.measure.scene_centre:main"
 lst-measure-tile-seam = "lst.measure.tile_seam:main"
+lst-measure-water-share = "lst.measure.water_share:main"
 lst-stage-bench = "lst.measure.stage_bench:main"
 
 [dependency-groups]
