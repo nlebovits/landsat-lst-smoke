@@ -229,3 +229,35 @@ of `N00E110`'s land sits in one against the 45.2% that came back empty.
 So `artifacts/aster_numobs.tif`, a static 43 MB global raster this repository
 already builds, bounds how much of a tile can exist before any scene is
 read.
+
+### A scene's footprint is its file, not the ground it photographed
+
+Sharp-edged rectangles of nodata appear inside fully observed farmland, a few
+hundred pixels across, with `qa_count` at zero in all twelve months while the
+ground on every side has 125 to 200 observations. They are neither cloud
+nor a pipeline defect.
+
+A Landsat scene is a rotated parallelogram written into an axis-aligned
+GeoTIFF, and the corners of that file are fill. The USGS bulk metadata describes
+that file: its `corner_*` columns are the product bounding rectangle, which
+exceeds the imaged area by about 46%. So the stated footprint of hundreds of scenes can cover a pixel that none of
+them photographed.
+
+MEASURED at 26.49 S 61.64 W on `S25W065` and 30.08 S 58.73 W on `S30W060`. The
+inventory reports 295 and 212 scenes under 20% cloud whose footprint contains
+the point. Reading 30 source pixels at each, across three WRS rows: **60 of 60
+are source fill.** None was imaged, none was clear, and the QA mask rejected
+nothing, because there was nothing to reject.
+
+The rectangles run 320 by 673, 752 by 641, and 631 by 817 pixels, and their
+edges fall nowhere near the 360 pixel block grid the composite writes on. They
+cost 0.78% of `S25W065`'s land and 0.53% of `S30W060`'s.
+
+The published rasters are right. `qa_count` reads zero because zero
+observations exist, and no compositing rule invents a value from none. The
+account the product gives of itself is what misleads: `lst:empty_land_pixels`
+counts ground
+Landsat never photographed alongside ground it photographed through cloud, and
+only the second would improve with a wider window. The imaged footprint is
+derivable from `qa_count`, so separating the two costs nothing at composite
+time.
