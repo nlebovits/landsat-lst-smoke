@@ -516,7 +516,13 @@ def drain(
     queue = list(tiles)
     attempts: dict[str, int] = dict.fromkeys(tiles, 0)
     done: dict[str, str] = {}
-    width = a.width
+    # Every wave asks for the full width again. An earlier version kept the
+    # narrower number a refusal produced, which is wrong whenever the account
+    # was busy for a reason that later goes away: another wave of this
+    # operator's own still draining, or somebody else's instances. It would
+    # have run a continent at a width discovered during one overlap. A refusal
+    # costs three API calls and the key it made is deleted, so asking again is
+    # cheaper than guessing low for four hours.
     wave_no = 0
     manifests: list[Path] = []
 
@@ -526,7 +532,7 @@ def drain(
             say(f"\nstopping after {a.max_waves} wave(s), {len(queue)} tile(s) left")
             wave_no -= 1
             break
-        batch, queue = queue[:width], queue[width:]
+        batch, queue = queue[: a.width], queue[a.width :]
         say(f"\n=== wave {wave_no}: {len(batch)} tile(s) === {' '.join(batch)}")
 
         statuses, placed, manifest_path = run_wave(
@@ -543,11 +549,10 @@ def drain(
         manifests.append(manifest_path)
 
         if 0 < placed < len(batch):
-            # The account said no. That number is the real ceiling, so every
-            # later wave uses it rather than asking again and paying another
-            # round of refusals.
-            width = placed
-            say(f"width is now {width}, discovered from the quota refusal")
+            say(
+                f"quota allowed {placed} of {len(batch)} this wave. "
+                f"The next wave asks for {a.width} again."
+            )
 
         settled, requeued = sort_wave(
             batch, statuses, attempts=attempts, retries=a.retries, say=say

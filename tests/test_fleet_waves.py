@@ -181,7 +181,12 @@ class TestTheWidthSurvivesTheWave:
         )
         return argparse.Namespace(**(base | over))
 
-    def test_a_narrowed_wave_narrows_every_later_wave(self, tmp_path, monkeypatch):
+    def test_a_refusal_does_not_narrow_the_next_wave(self, tmp_path, monkeypatch):
+        """The account may be busy for a reason that goes away.
+
+        An earlier version kept the narrower number, which would have run a
+        continent at a width discovered during one overlap with another wave.
+        """
         widths = []
 
         def fake_wave(batch, **kwargs):
@@ -192,18 +197,22 @@ class TestTheWidthSurvivesTheWave:
             return statuses, placed, tmp_path / f"run-{len(widths)}.json"
 
         monkeypatch.setattr(waves, "run_wave", fake_wave)
+        # retries=1 so the two refused tiles come back and the second wave has
+        # a full queue to draw from. Otherwise a short second wave would look
+        # like a narrowed one.
         done, leftover, wave_no, _ = waves.drain(
-            ["A", "B", "C", "D", "E", "F"],
-            self._args(tmp_path),
+            ["A", "B", "C", "D", "E", "F", "G", "H"],
+            self._args(tmp_path, retries=1),
             cfg={},
             commit=SHA,
             user_data=tmp_path / "ud.sh",
             say=lambda *a: None,
         )
-        # 4 asked for, 2 placed; every later wave asks for 2.
+        # Wave 1 asks 4 and places 2. Wave 2 asks 4 again, not 2.
         assert widths[0] == 4
-        assert set(widths[1:]) == {2}
+        assert widths[1] == 4
         assert leftover == []
+        assert done == dict.fromkeys("ABCDEFGH", "finished")
 
     def test_max_waves_stops_and_reports_the_leftover(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
