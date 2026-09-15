@@ -43,7 +43,8 @@ bucket, _, prefix = uri.removeprefix("s3://").partition("/")
 s3 = boto3.client("s3", region_name="us-west-2", config=Config(signature_version=UNSIGNED))
 for name in ["tile_scene_inventory.parquet", "land_tiles.parquet",
              "aster_numobs.tif", "aster_numobs_manifest.json",
-             "land_buffered.gpkg", "land_buffered_sha256.txt"]:
+             "land_buffered.gpkg", "land_buffered_sha256.txt",
+             "land_strict.gpkg", "land_strict_sha256.txt"]:
     out = dest / name
     s3.download_file(bucket, f"{prefix}/{name}", str(out))
     print("got", name, out.stat().st_size, flush=True)

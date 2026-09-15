@@ -226,9 +226,15 @@ class TestTheConfigCarriesTheKnowledge:
         ):
             assert section in cfg
 
-    def test_the_six_artifacts_travel_together(self, cfg):
+    def test_the_artifacts_travel_together(self, cfg):
         """`check_mask_inputs` and `check_manifest` refuse a run whose
-        artifacts disagree, so a partial set is worse than none."""
+        artifacts disagree, so a partial set is worse than none.
+
+        The unbuffered geometry and its digest are the two most recent. Without
+        them a run still succeeds and publishes an item stating no land share,
+        which is the quietest of the failures this set exists to prevent: the
+        tile looks finished and the field a reader wants is absent.
+        """
         assert set(cfg["artifacts"]["files"]) == {
             "tile_scene_inventory.parquet",
             "land_tiles.parquet",
@@ -236,7 +242,20 @@ class TestTheConfigCarriesTheKnowledge:
             "aster_numobs_manifest.json",
             "land_buffered.gpkg",
             "land_buffered_sha256.txt",
+            "land_strict.gpkg",
+            "land_strict_sha256.txt",
         }
+
+    def test_run_sh_downloads_every_artifact_the_config_names(self, cfg):
+        """The two lists are written separately and neither reads the other.
+
+        `fleet/run.sh` carries its own literal list inside a heredoc, so a file
+        added to the config alone is never fetched, and the instance fails
+        several minutes into billing rather than here.
+        """
+        script = (ROOT / "fleet" / "run.sh").read_text()
+        for name in cfg["artifacts"]["files"]:
+            assert name in script, f"run.sh never downloads {name}"
 
     def test_the_deadline_clears_the_measured_wall_clock(self, cfg):
         """MEASURED tile wall clock is 26 to 43 minutes. Too tight kills a slow
