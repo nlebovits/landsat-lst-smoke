@@ -714,6 +714,29 @@ def mask_rule(args, counts, ged_provenance=None) -> dict | None:
     return rule
 
 
+def water_rule(scalars) -> dict:
+    """The observed-water rule, and what it took from this tile.
+
+    Never None, unlike `mask_rule`. The buffered land geometry is a claim
+    about geography that `--no-output-mask` withdraws. This is a claim about
+    what a scene photographed, and no flag withdraws it, so a summary that
+    omitted it under `--no-output-mask` would describe a run that did not
+    happen.
+
+    `valid_removed` counts pixels this rule alone took. A sea pixel the
+    geometry had already removed is counted by `valid_removed_by_water` in the
+    mask block and not here, so the two never claim one pixel twice and their
+    sum is the union the raster holds.
+    """
+    return {
+        "water_share_threshold": lst_qa.WATER_SHARE_THRESHOLD,
+        "min_water_observations": lst_qa.MIN_WATER_OBSERVATIONS,
+        "water_max_c": lst_qa.WATER_MAX_C,
+        "qa_water_bit": lst_qa.QA_WATER_BIT,
+        "valid_removed": int(scalars.get("removed_observed_water", 0)),
+    }
+
+
 def load_tile_prep(args, tile_id: str, item_dicts, run_provenance):
     """The prep artifact, checked against the run that is about to use it.
 
@@ -1298,6 +1321,12 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
             f"region, which the mask reports and does not remove"
         )
 
+    say(
+        f"water         {int(scalars.get('removed_observed_water', 0)):,} px "
+        f"the geometry kept and the record called water, at a share of "
+        f"{lst_qa.WATER_SHARE_THRESHOLD:.2f}"
+    )
+
     # The header fields the workers could not write: scale, offset, band
     # names, and the statistics, scanned off the staging file in strips.
     with observe.phase("cog", marks=marks):
@@ -1445,6 +1474,7 @@ def main(argv=None) -> int:  # noqa: C901, PLR0912, PLR0915
             }
         ),
         "correction": correction_rule(args, prep),
+        "water": water_rule(scalars),
         "catalog": str(catalog_root) if catalog_root else None,
         "frisky": trace_report,
         "dashboard": dash,

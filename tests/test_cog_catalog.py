@@ -61,6 +61,9 @@ from lst_qa import (  # noqa: E402
     LST_VALID_MAX_C,
     LST_VALID_MIN_C,
     MIN_TOTAL_OBSERVATIONS,
+    MIN_WATER_OBSERVATIONS,
+    QA_WATER_BIT,
+    WATER_SHARE_THRESHOLD,
     encode_celsius,
 )
 
@@ -449,12 +452,13 @@ MASK_RULE: dict[str, Any] = {
 
 
 class TestTheMaskExplainsItself:
-    """A nodata pixel means one of four things, and the raster says which.
+    """A nodata pixel means one of five things, and the raster says which.
 
-    Water, too little evidence, an impossible temperature, and no usable
-    observation all read as DN 0. The item states the rules instead, and names
-    the artifacts they read by checksum rather than by a path on the machine
-    that ran the mask.
+    A place outside the land geometry, a surface the observations call water,
+    too little evidence, an impossible temperature, and no usable observation
+    all read as DN 0. The item states the rules instead, and names the
+    artifacts they read by checksum rather than by a path on the machine that
+    ran the mask.
     """
 
     def test_the_lineage_names_every_output_rule(self):
@@ -474,12 +478,36 @@ class TestTheMaskExplainsItself:
         assert "70.0 C or hotter" not in lineage
 
     def test_an_unmasked_run_still_states_the_validity_rules(self):
-        # `--no-output-mask` turns off the water rule. The rules that describe
-        # the estimate run in `reduce_block` and are unaffected, so the lineage
-        # of an unmasked tile has to say so.
+        # `--no-output-mask` withdraws the land geometry. The rules that
+        # describe the estimate, and the one that reads the observations, all
+        # run anyway, so the lineage of an unmasked tile has to say so.
         lineage = mask_lineage(None)["processing:lineage"]
         assert "No output mask ran" in lineage
         assert f"fewer than {MIN_TOTAL_OBSERVATIONS} clear observations" in lineage
+
+    def test_both_branches_state_the_observed_water_rule(self):
+        """The rule runs whatever `--no-output-mask` says, so both say it.
+
+        An unmasked tile used to be described as one where "sea pixels are
+        present". That was true when the buffered geometry was the only water
+        rule. It is not true now, and a lineage that still said it would
+        promise a consumer sea this product no longer publishes.
+        """
+        for rule in (MASK_RULE, None):
+            lineage = mask_lineage(rule)["processing:lineage"]
+            assert "Observed water:" in lineage
+            assert f"QA_PIXEL bit {QA_WATER_BIT}" in lineage
+            assert f"{WATER_SHARE_THRESHOLD:.0%}" in lineage
+            assert f"fewer than {MIN_WATER_OBSERVATIONS}" in lineage
+        assert "sea pixels are present" not in mask_lineage(None)["processing:lineage"]
+
+    def test_the_two_water_rules_are_stated_apart(self):
+        # One reads a polygon and one reads the record. A lineage that merged
+        # them would leave a consumer unable to tell which removed a river.
+        lineage = mask_lineage(MASK_RULE)["processing:lineage"]
+        assert "Water: a pixel outside the buffered land geometry" in lineage
+        assert "Observed water:" in lineage
+        assert "removes a river the land geometry cannot" in lineage
 
     def test_the_lineage_names_the_artifacts_by_checksum(self):
         lineage = mask_lineage(MASK_RULE)["processing:lineage"]

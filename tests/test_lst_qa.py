@@ -35,12 +35,19 @@ from lst_qa import (  # noqa: E402
     LWIR_OFFSET_C,
     LWIR_SCALE,
     MIN_TOTAL_OBSERVATIONS,
+    MIN_WATER_OBSERVATIONS,
     QA_EXCLUDED_BIT_NUMBERS,
     QA_EXCLUDED_BITS,
+    QA_WATER_BIT,
+    QA_WATER_BITS,
+    WATER_MAX_C,
+    WATER_SHARE_THRESHOLD,
     encode_celsius,
     in_trusted_range,
     masked_celsius,
+    observed_water,
     qa_clear,
+    qa_water,
     supported_output,
     to_celsius,
 )
@@ -116,13 +123,187 @@ class TestQaBits:
     @pytest.mark.parametrize("bit", [0, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
     def test_bits_outside_one_to_five_do_not_reject(self, bit):
         # Bit 0 is fill, 6 is clear, 7 is water, and 8 upwards are confidence
-        # pairs. This task masks none of them.
+        # pairs. This task masks none of them. Bit 7 is read by `qa_water` and
+        # still belongs here: the water rule counts the observation, and an
+        # observation it never saw cannot be counted.
         _, valid = one(DN_WARM, 1 << bit)
         assert valid is True
 
     def test_qa_clear_is_elementwise(self):
         qa = np.array([QA_CLEAR, QA_CLEAR | 0b1000, 0, 0b100000], dtype="uint16")
         assert list(np.asarray(qa_clear(qa))) == [True, False, True, False]
+
+
+class TestTheWaterBit:
+    """QA_PIXEL bit 7, which classifies a pixel and disqualifies nothing."""
+
+    def test_the_bit_is_seven(self):
+        assert QA_WATER_BIT == 7
+        assert QA_WATER_BITS == 0b10000000
+        assert QA_WATER_BITS == 128
+
+    def test_the_water_bit_is_not_an_excluded_bit(self):
+        # The two masks must not overlap. A water observation that the clear
+        # rule rejected would be missing from both sides of the share.
+        assert QA_WATER_BIT not in QA_EXCLUDED_BIT_NUMBERS
+        assert QA_WATER_BITS & QA_EXCLUDED_BITS == 0
+
+    def test_it_reads_bit_seven_alone(self):
+        qa = np.array(
+            [QA_CLEAR, QA_CLEAR | QA_WATER_BITS, 0, QA_WATER_BITS], dtype="uint16"
+        )
+        assert list(np.asarray(qa_water(qa))) == [False, True, False, True]
+
+    def test_a_cloudy_water_observation_still_sets_the_bit(self):
+        # The predicate answers one question. Whether the observation counts
+        # is `qa_clear`'s answer, and `reduce_block` takes both.
+        qa = np.array([QA_CLEAR | QA_WATER_BITS | (1 << 3)], dtype="uint16")
+        assert bool(np.asarray(qa_water(qa))[0]) is True
+        assert bool(np.asarray(qa_clear(qa))[0]) is False
+
+    def test_it_answers_a_dataarray(self):
+        # The graph hands `reduce_block` numpy, but the predicates are written
+        # to work on either, like every other rule in this module.
+        qa = xr.DataArray(
+            np.array([QA_CLEAR, QA_CLEAR | QA_WATER_BITS], dtype="uint16"),
+            dims=("time",),
+        )
+        assert list(np.asarray(qa_water(qa))) == [False, True]
+
+
+class TestTheObservedWaterClassification:
+    """`observed_water`, the share rule, at and around its two thresholds."""
+
+    #: Well above the floor, so only the share decides these.
+    DEEP = 100
+
+    def share(self, water, clear=DEEP):
+        return bool(np.asarray(observed_water(np.array([water]), np.array([clear])))[0])
+
+    def test_the_threshold_is_inclusive(self):
+        on = int(np.ceil(WATER_SHARE_THRESHOLD * self.DEEP))
+        assert self.share(on) is True
+        assert self.share(on - 1) is False
+
+    def test_all_water_is_water(self):
+        assert self.share(self.DEEP) is True
+
+    def test_no_water_is_not_water(self):
+        assert self.share(0) is False
+
+    def test_a_zero_denominator_is_unknown_rather_than_water(self):
+        # The rule is a comparison, not a quotient, so `0 >= 0.75 * 0` is true
+        # and only the floor keeps an unobserved pixel out. Without it every
+        # pixel no scene reached would classify as water.
+        assert self.share(0, clear=0) is False
+
+    def test_a_pixel_below_the_floor_is_unknown(self):
+        below = MIN_WATER_OBSERVATIONS - 1
+        assert self.share(below, clear=below) is False
+
+    def test_a_pixel_on_the_floor_is_decided(self):
+        floor = MIN_WATER_OBSERVATIONS
+        assert self.share(floor, clear=floor) is True
+
+    def test_the_floor_matches_the_evidence_rule(self):
+        # A pixel below `MIN_TOTAL_OBSERVATIONS` is already nodata, so a
+        # different floor here would decide nothing and read as a second rule.
+        assert MIN_WATER_OBSERVATIONS == MIN_TOTAL_OBSERVATIONS
+
+    def test_the_threshold_clears_the_land_mode(self):
+        """It has to sit above the land mode and at or below the water one.
+
+        MEASURED over 17 cached blocks of N40W080: 93.8% of pixels sit below a
+        share of 0.05 and 3.0% sit at or above 0.90. A threshold inside the
+        land mode would delete ground, and one above the water mode would
+        classify nothing.
+        """
+        assert 0.05 < WATER_SHARE_THRESHOLD <= 0.90
+
+    def test_the_threshold_is_where_the_tropics_put_it(self):
+        """The temperate blocks alone would take 0.75.
+
+        MEASURED on a Kalimantan forest block, whose share ramps smoothly with
+        no empty bin: 0.75 classifies 0.4599% of it and 0.90 classifies
+        0.1111%, while Delaware Bay stays at 100.0000% and the Chesapeake
+        falls only from 93.0602% to 93.0046%.
+        """
+        assert WATER_SHARE_THRESHOLD == 0.90
+
+    def test_large_counters_do_not_wrap(self):
+        # The counters are uint32 and the threshold is a Python float. Without
+        # the float64 promotion the product is computed in the counter's own
+        # type and a five-year stack of a busy pixel could overflow.
+        clear = np.array([4_000_000_000], dtype="uint32")
+        water = np.array([4_000_000_000], dtype="uint32")
+        assert bool(np.asarray(observed_water(water, clear))[0]) is True
+
+    def test_it_is_elementwise(self):
+        # Written against the constant rather than a literal, so the case
+        # either side of the threshold survives a change to it.
+        on = int(np.ceil(WATER_SHARE_THRESHOLD * 100))
+        water = np.array([0, on - 1, on, 100], dtype="uint32")
+        clear = np.full(4, 100, dtype="uint32")
+        got = list(np.asarray(observed_water(water, clear)))
+        assert got == [False, False, True, True]
+
+    def hot(self, celsius, water=DEEP, clear=DEEP):
+        return bool(
+            np.asarray(
+                observed_water(
+                    np.array([water]), np.array([clear]), np.array([celsius])
+                )
+            )[0]
+        )
+
+    def test_a_percentile_too_hot_to_be_water_is_not_water(self):
+        # The defect this exists for. MEASURED in Center City Philadelphia:
+        # 143 pixels reading 36 C to 56 C carried bit 7 on 86% to 100% of
+        # their observations, so the share rule alone cannot reject them.
+        assert self.share(self.DEEP) is True, "the share alone would classify it"
+        assert self.hot(WATER_MAX_C + 1.0) is False
+
+    def test_a_pixel_on_the_ceiling_is_still_water(self):
+        assert self.hot(WATER_MAX_C) is True
+
+    def test_a_cold_pixel_is_unaffected_by_the_ceiling(self):
+        assert self.hot(WATER_MAX_C - 15.0) is True
+
+    def test_a_nan_percentile_keeps_its_classification(self):
+        # It carries no temperature to argue with, and it is nodata either
+        # way. Written as `> max_c` rather than `<= max_c` for exactly this.
+        assert self.hot(float("nan")) is True
+
+    def test_the_ceiling_clears_open_water_with_room_to_spare(self):
+        """The bound is calibrated against two sets with known truth.
+
+        MEASURED at a share of 0.75: Delaware Bay runs at a P95 of 27.42 C and
+        the Chesapeake at 28.69 C. Dropping the bound from 40 C to 34 C takes
+        0.00% of Delaware Bay and 0.01% of the Chesapeake, and takes the Center
+        City false positives from 1.33% of that box to 0.00%. Below 34 C the
+        cost to open water starts: 32 C takes 0.15% of the Chesapeake.
+
+        So the bound is not "above the hottest water ever seen". It is where
+        the false positives end, and it clears the body of open water by more
+        than 5 C.
+        """
+        assert WATER_MAX_C >= 32.0, "below this the bound starts cutting open water"
+        assert WATER_MAX_C - 28.69 > 5.0, "no headroom over the Chesapeake median"
+
+    def test_the_ceiling_is_below_the_urban_false_positives(self):
+        # MEASURED in Center City: the 143 falsely classified pixels read
+        # 36 C to 56 C. A bound above that range would let all of them back.
+        assert WATER_MAX_C < 36.0
+
+    def test_without_a_percentile_the_share_alone_decides(self):
+        # The signature keeps `celsius` optional so the share rule can be
+        # tested and measured on its own. No production path omits it.
+        assert self.share(self.DEEP) is True
+
+    def test_a_caller_can_ask_a_different_threshold(self):
+        water, clear = np.array([50]), np.array([100])
+        assert bool(np.asarray(observed_water(water, clear, threshold=0.5))[0])
+        assert not bool(np.asarray(observed_water(water, clear, threshold=0.6))[0])
 
 
 class TestTheDecodeIsOneCopy:
