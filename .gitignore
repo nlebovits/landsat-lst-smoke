@@ -10,9 +10,9 @@ trace.json
 
 # Numpy-era full-tile outputs that may still sit in an old checkout. The
 # pipeline no longer writes any of them.
-fulltile/part*/part-000.npz
-fulltile/tile/*.npy
-qa-parity/*.npy
+evidence/fulltile/part*/part-000.npz
+evidence/fulltile/tile/*.npy
+evidence/qa-parity/*.npy
 
 # What a composite run writes. The staging GeoTIFFs are the workers' window
 # targets and are removed on success; the COGs and the STAC catalog are

@@ -130,7 +130,7 @@ uv run measure_land_defects.py --out artifacts/land_defects.json
 
 # the ASTER GED mask against a composite built before it existed
 uv run measure_ged_registration.py \
-    --raster fulltile/tile/lst_p95_dn.npy --tile S30W065 \
+    --raster evidence/fulltile/tile/lst_p95_dn.npy --tile S30W065 \
     --out artifacts/ged_registration.json
 
 # how far the computed scene centre sits from the published one
@@ -2007,7 +2007,7 @@ both: min -2.28 C, P50 +0.14 C, P95 +0.63 C, P99 +0.92 C, max +2.15 C, mean
 +0.20 C. The composite warms, which is what removing cool cloud contamination
 from a ninety-fifth percentile does.
 
-`qa-parity/qa_difference.png` holds the two rasters and their difference. This
+`evidence/qa-parity/qa_difference.png` holds the two rasters and their difference. This
 shard sits inside a WRS footprint, so it shows field-shaped differences and no
 scene boundary. A shard chosen on a footprint edge would show the boundary
 case. The image is diagnostic. The table is the measurement.
@@ -3028,7 +3028,7 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `stac_reference.py` | Earth Search, kept only as a parity oracle |
 | `artifacts/` | `land_tiles.parquet`, the inventory, the buffered geometry, the ASTER GED counts, their manifests, and the committed slices of the three that `.gitignore` excludes |
 | `compare_qa_masks.py` | one shard, run under both masks, in one process |
-| `qa-parity/` | that comparison, with both rasters and the difference image |
+| `evidence/qa-parity/` | that comparison, with both rasters and the difference image |
 | `sweep_throughput.py` | configuration sweep driver |
 | `cost_report.py` | the labelled, deterministic cost report |
 | `staging.py` | fetches each scene object once, beside compute, and the L2SR filter |
@@ -3037,9 +3037,9 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `measure_shard_memory.py` | what a shard costs in memory, and shard size in compute |
 | `measure_s3_requests.py` | counts the S3 GET requests one shard issues |
 | `measure_submit_cost.py` | what one `client.submit` costs, against its payload |
-| `s3-requests/` | the request measurement: both shard sizes, and the priced tile |
+| `evidence/s3-requests/` | the request measurement: both shard sizes, and the priced tile |
 | `dryrun/` | local graph-build runs, no cluster and no reads |
-| `ec2-results/` | eight department-scale runs: stages, memory series, frisky reports |
-| `fulltile/` | the full-tile run (part files and merged raster gitignored) |
-| `smoke/`, `smoke2/`, `split/`, `sweep/` | local runs with full frisky spans and traces |
+| `evidence/ec2-results/` | eight department-scale runs: stages, memory series, frisky reports |
+| `evidence/fulltile/` | the full-tile run (part files and merged raster gitignored) |
+| `evidence/smoke/`, `evidence/smoke2/`, `evidence/split/`, `evidence/sweep/` | local runs with full frisky spans and traces |
 | `full/`, `full.log` | the 673-scene local run, ended early by a network change |

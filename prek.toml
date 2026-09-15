@@ -10,8 +10,11 @@
 fail_fast = true
 
 # Measurement artifacts. The whitespace hooks would rewrite committed
-# evidence, and none of it is handwritten.
-exclude = "^(ec2-results/|fulltile/|s3-requests/|shard-run/|smoke/|smoke2/|split/|sweep/|.*\\.log$)"
+# evidence, and none of it is handwritten. One prefix, because the nine
+# directories now live under it: naming them individually gave four configs
+# four different lists, and three of those listed directories that had never
+# existed here.
+exclude = "^(evidence/|.*\\.log$)"
 
 # =============================================================================
 # Built-in hooks (native Rust, no network fetch required)
@@ -41,7 +44,7 @@ hooks = [
     # sample over an 18.6 min run. It is the evidence behind the memory
     # findings and no summary replaces it. Excluded by exact path, so the
     # 500 KB ceiling still catches a COG or a parquet committed by accident.
-    exclude = { glob = ["ec2-results/quartertile/qt-v2/memory.csv"] },
+    exclude = { glob = ["evidence/ec2-results/quartertile/qt-v2/memory.csv"] },
   },
 ]
 

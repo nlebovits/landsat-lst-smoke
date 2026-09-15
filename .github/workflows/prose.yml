@@ -65,25 +65,24 @@ jobs:
       - name: Test repository-owned rules
         run: uv run pytest -q -p no:randomly tests/test_prose_styles.py
 
-      # AGENTS.md is generated context, and the measurement directories hold
-      # retained evidence. .vale.ini already gives all of them an empty
+      # AGENTS.md is generated context, and `evidence/` holds retained
+      # measurement output. .vale.ini already gives both an empty
       # BasedOnStyles, but proselint has no per-path config, so the exclusions
-      # live in the file list here as well. Keep the two lists the same.
+      # live in the file list here as well.
+      #
+      # One prefix rather than a list of directories. This file repeated the
+      # list three times and .vale.ini held two more copies, all five
+      # disagreeing: three named `dryrun/`, `docs/evidence/` and `results/`,
+      # which do not exist, and none named `qa-parity/`, `s3-requests/` or
+      # `shard-run/`, which did. A list repeated five times is a list that
+      # drifts five ways.
       - name: Report every Vale finding
         run: |
           mapfile -d '' files < <(
             git ls-files -z -- '*.md' '*.mdx' \
               ':(exclude)AGENTS.md' \
               ':(exclude).claude/**' \
-              ':(exclude)docs/evidence/**' \
-              ':(exclude)results/**' \
-              ':(exclude)ec2-results/**' \
-              ':(exclude)fulltile/**' \
-              ':(exclude)smoke/**' \
-              ':(exclude)smoke2/**' \
-              ':(exclude)split/**' \
-              ':(exclude)sweep/**' \
-              ':(exclude)dryrun/**'
+              ':(exclude)evidence/**'
           )
           if ((${#files[@]})); then
             vale --minAlertLevel=suggestion --output=line "${files[@]}" || true
@@ -95,15 +94,7 @@ jobs:
             git ls-files -z -- '*.md' '*.mdx' \
               ':(exclude)AGENTS.md' \
               ':(exclude).claude/**' \
-              ':(exclude)docs/evidence/**' \
-              ':(exclude)results/**' \
-              ':(exclude)ec2-results/**' \
-              ':(exclude)fulltile/**' \
-              ':(exclude)smoke/**' \
-              ':(exclude)smoke2/**' \
-              ':(exclude)split/**' \
-              ':(exclude)sweep/**' \
-              ':(exclude)dryrun/**'
+              ':(exclude)evidence/**'
           )
           if ((${#files[@]})); then
             uvx --from proselint==0.16.0 proselint check \
@@ -116,15 +107,7 @@ jobs:
             git ls-files -z -- '*.md' '*.mdx' \
               ':(exclude)AGENTS.md' \
               ':(exclude).claude/**' \
-              ':(exclude)docs/evidence/**' \
-              ':(exclude)results/**' \
-              ':(exclude)ec2-results/**' \
-              ':(exclude)fulltile/**' \
-              ':(exclude)smoke/**' \
-              ':(exclude)smoke2/**' \
-              ':(exclude)split/**' \
-              ':(exclude)sweep/**' \
-              ':(exclude)dryrun/**'
+              ':(exclude)evidence/**'
           )
           if ((${#files[@]})); then
             vale --minAlertLevel=error --output=line "${files[@]}"

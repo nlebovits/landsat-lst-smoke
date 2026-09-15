@@ -148,8 +148,8 @@ hedges, redundant phrases, mixed metaphors, and commercial language.
 stay advisory, because acting on one takes an editorial decision.
 
 The gate covers handwritten Markdown. It skips generated `AGENTS.md` context,
-the `.claude/` directory, the measurement directories such as `ec2-results/`
-and `fulltile/`, and vendored trees.
+the `.claude/` directory, the measurement directories such as `evidence/ec2-results/`
+and `evidence/fulltile/`, and vendored trees.
 
 ## Suppress a false positive
 
