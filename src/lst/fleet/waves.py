@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -378,6 +379,56 @@ def _await_wave(
         time.sleep(poll_seconds)
 
 
+def uploaded_tiles(cfg: dict) -> set[str]:
+    """Every tile with a `_MANIFEST.json` under the runs prefix.
+
+    The question a relaunch has to answer is which tiles are actually done, and
+    the only honest source is the bucket. A driver's own tally dies with the
+    driver, a manifest on disk records what was launched rather than what
+    landed, and a tile that ran twice appears under two run prefixes.
+
+    A run prefix is named `lst-<TILE>-<run id>`, so the tile is read back out of
+    the prefix rather than by opening 100 JSON files.
+    """
+    bucket = cfg["storage"]["bucket"]
+    prefix = cfg["storage"]["runs_prefix"].rstrip("/")
+    out = subprocess.run(
+        ["aws", "s3", "ls", "--recursive", f"s3://{bucket}/{prefix}/"],
+        capture_output=True,
+        text=True,
+        env=os.environ | {"AWS_PROFILE": cfg["storage"].get("upload_profile", "")},
+    )
+    if out.returncode != 0:
+        raise SystemExit(f"cannot list the runs prefix:\n{out.stderr.strip()}")
+    done = set()
+    for line in out.stdout.splitlines():
+        key = line.split()[-1]
+        if not key.endswith("/_MANIFEST.json"):
+            continue
+        name = key.removeprefix(prefix + "/").split("/", 1)[0]
+        parts = name.split("-")
+        if len(parts) >= 2 and parts[0] == "lst":
+            done.add(parts[1])
+    return done
+
+
+def report_remaining(tiles: list[str], cfg: dict) -> int:
+    """Print the tiles with no upload manifest, one per line, and nothing else.
+
+    The count goes to stderr so the tile list on stdout pipes straight into a
+    file or into `--tiles-file`.
+    """
+    done = uploaded_tiles(cfg)
+    left = [t for t in tiles if t not in done]
+    print(
+        f"# {len(tiles)} asked, {len(tiles) - len(left)} uploaded, {len(left)} left",
+        file=sys.stderr,
+    )
+    for tile in left:
+        print(tile)
+    return 0
+
+
 def adopt(
     manifest_path: Path,
     *,
@@ -510,6 +561,12 @@ def drain(
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument(
+        "--remaining",
+        action="store_true",
+        help="with --tiles-file, print the tiles that have no upload manifest "
+        "in the bucket yet, and launch nothing",
+    )
+    p.add_argument(
         "--adopt",
         type=Path,
         metavar="MANIFEST",
@@ -563,6 +620,9 @@ def main(argv: list[str] | None = None) -> int:
     if bool(a.tiles_file) == bool(a.tiles):
         p.error("pass exactly one of --tiles-file or --tiles")
     tiles = load_tiles(a.tiles_file) if a.tiles_file else parse_tiles(a.tiles)
+
+    if a.remaining:
+        return report_remaining(tiles, load_config(a.config, a.fleet_dir))
     if a.width < 1:
         p.error("--width must be at least 1")
 

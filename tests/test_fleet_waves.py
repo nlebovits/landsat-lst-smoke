@@ -539,3 +539,66 @@ class TestAnOrphanedWaveCanBeAdopted:
         with pytest.raises(RuntimeError):
             waves.adopt(path, say=lambda *a: None)
         assert torn == [path]
+
+
+class TestWhatIsLeftComesFromTheBucket:
+    """A driver's tally dies with the driver. The bucket does not."""
+
+    def _cfg(self):
+        return {
+            "storage": {
+                "bucket": "b",
+                "runs_prefix": "nl/lst-test/runs",
+                "upload_profile": "source-coop",
+            }
+        }
+
+    def _listing(self, text):
+        return type("R", (), {"returncode": 0, "stdout": text, "stderr": ""})()
+
+    def test_only_a_manifest_counts_as_uploaded(self, monkeypatch):
+        listing = (
+            "2026-09-15 17:02:36 1544 nl/lst-test/runs/lst-S30W065-20260915-1/"
+            "_MANIFEST.json\n"
+            "2026-09-15 17:01:31 49 nl/lst-test/runs/lst-N00W045-20260915-1/"
+            "tile/catalog/lst-p95-2021-2025/N00W045/lst_p95.tif\n"
+        )
+        monkeypatch.setattr(
+            waves.subprocess, "run", lambda *a, **k: self._listing(listing)
+        )
+        # N00W045 has rasters and no manifest, so it is not done.
+        assert waves.uploaded_tiles(self._cfg()) == {"S30W065"}
+
+    def test_a_tile_that_ran_twice_is_counted_once(self, monkeypatch):
+        listing = (
+            "2026-09-14 1 1 nl/lst-test/runs/lst-S30W065-20260914-1/_MANIFEST.json\n"
+            "2026-09-15 1 1 nl/lst-test/runs/lst-S30W065-20260915-2/_MANIFEST.json\n"
+        )
+        monkeypatch.setattr(
+            waves.subprocess, "run", lambda *a, **k: self._listing(listing)
+        )
+        assert waves.uploaded_tiles(self._cfg()) == {"S30W065"}
+
+    def test_an_old_style_prefix_is_ignored(self, monkeypatch):
+        """`N40W080-lst-N40W080-...` predates the naming rule and is pruned."""
+        listing = (
+            "2026-09-13 1 1 nl/lst-test/runs/N40W080-lst-N40W080-1/_MANIFEST.json\n"
+        )
+        monkeypatch.setattr(
+            waves.subprocess, "run", lambda *a, **k: self._listing(listing)
+        )
+        assert waves.uploaded_tiles(self._cfg()) == set()
+
+    def test_a_failed_listing_stops_rather_than_reporting_nothing_done(
+        self, monkeypatch
+    ):
+        """Reporting an empty set would relaunch all 101 tiles."""
+        monkeypatch.setattr(
+            waves.subprocess,
+            "run",
+            lambda *a, **k: type(
+                "R", (), {"returncode": 1, "stdout": "", "stderr": "AccessDenied"}
+            )(),
+        )
+        with pytest.raises(SystemExit, match="cannot list"):
+            waves.uploaded_tiles(self._cfg())
