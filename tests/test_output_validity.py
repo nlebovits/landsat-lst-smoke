@@ -60,6 +60,7 @@ from lst_qa import (  # noqa: E402
     MIN_TOTAL_OBSERVATIONS,
     MIN_WATER_OBSERVATIONS,
     QA_WATER_BITS,
+    WATER_MAX_C,
     WATER_SHARE_THRESHOLD,
     encode_celsius,
     to_celsius,
@@ -524,6 +525,25 @@ class TestTheObservedWaterRule:
         assert not wet_water.any()
         assert np.array_equal(dry_dn, wet_dn)
         assert np.array_equal(dry_counts, wet_counts)
+
+    def test_a_pixel_too_hot_to_be_water_is_not_classified(self):
+        """The kernel hands the percentile to the rule, not just the counts.
+
+        Every observation here sets bit 7, so the share is 1.0 and the share
+        rule alone would take the pixel. It reads far too hot to be water, and
+        `lst_qa.observed_water` is what refuses it.
+        """
+        lwir, qa = water_stack((self.DEPTH,) * NX, (self.DEPTH,) * NX)
+        lwir[:] = np.where(lwir != 0, raw_dn(WATER_MAX_C + 10.0), 0)
+        _dn, _counts, water = classify(lwir, qa)
+        assert not water.any()
+
+    def test_the_same_pixel_cold_is_classified(self):
+        # The control for the test above: one difference, the temperature.
+        lwir, qa = water_stack((self.DEPTH,) * NX, (self.DEPTH,) * NX)
+        lwir[:] = np.where(lwir != 0, raw_dn(WATER_MAX_C - 15.0), 0)
+        _dn, _counts, water = classify(lwir, qa)
+        assert water.all()
 
     def test_the_kernel_leaves_the_bands_alone(self):
         """A classified pixel still carries its percentile out of here.

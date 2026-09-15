@@ -731,6 +731,7 @@ def water_rule(scalars) -> dict:
     return {
         "water_share_threshold": lst_qa.WATER_SHARE_THRESHOLD,
         "min_water_observations": lst_qa.MIN_WATER_OBSERVATIONS,
+        "water_max_c": lst_qa.WATER_MAX_C,
         "qa_water_bit": lst_qa.QA_WATER_BIT,
         "valid_removed": int(scalars.get("removed_observed_water", 0)),
     }

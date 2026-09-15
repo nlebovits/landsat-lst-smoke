@@ -173,6 +173,39 @@ WATER_SHARE_THRESHOLD = 0.75
 #: at an unobserved pixel and call the whole unobserved world water.
 MIN_WATER_OBSERVATIONS = MIN_TOTAL_OBSERVATIONS
 
+#: The hottest five-year P95 a pixel can hold and still be called water.
+#:
+#: The share rule trusts one QA bit, and over a dark roof that bit is wrong. A
+#: reflectance test sets it, and it matches dark asphalt on almost every scene.
+#: MEASURED in Center City Philadelphia, 6,264 pixels holding no water: 143 of
+#: them read 36 C to 56 C and carry the flag on 86% to 100% of their 80 clear
+#: observations. No threshold on the share excludes those, because their share
+#: is the share of open sea.
+#:
+#: Water has a ceiling that asphalt does not, and the thermal band is the
+#: better evidence about which surface this is.
+#:
+#: Calibrated against two sets with known truth, at a share of 0.75:
+#:
+#:     bound    Center City masked    Delaware Bay kept    Chesapeake kept
+#:     40 C                 1.33%              100.00%             93.07%
+#:     36 C                 0.70%              100.00%             93.07%
+#:     35 C                 0.26%              100.00%             93.07%
+#:     34 C                 0.00%              100.00%             93.06%
+#:     32 C                 0.00%              100.00%             92.92%
+#:
+#: 34 C is where the false positives end and before the cost to open water
+#: starts. It takes 0.01% of the Chesapeake block and nothing from Delaware
+#: Bay, against 32 C, which takes 0.15%.
+#:
+#: The calibration is temperate water: the Delaware and the Chesapeake run at a
+#: P95 of 27 C to 29 C. Shallow tropical or desert water can sit hotter than
+#: this bound, and such a pixel keeps its temperature rather than being called
+#: water. That is the conservative direction on purpose. A warm pond published
+#: as land is a smaller error than a warm roof deleted as water, and no block
+#: measured here holds warm shallow water to test the other side.
+WATER_MAX_C = 34.0
+
 
 # --------------------------------------------------------------------------
 # Predicates. Each one works on a numpy array and on an xarray DataArray,
@@ -285,9 +318,11 @@ def supported_output(celsius, total_observations):
 def observed_water(
     water_observations,
     clear_observations,
+    celsius=None,
     *,
     threshold: float = WATER_SHARE_THRESHOLD,
     floor: int = MIN_WATER_OBSERVATIONS,
+    max_c: float = WATER_MAX_C,
 ):
     """True where the pixel's own clear record says it is water.
 
@@ -301,6 +336,17 @@ def observed_water(
     unobserved pixel out: with no floor the comparison reads `0 >= 0` and every
     pixel no scene reached would classify as water.
 
+    `celsius` is the veto, and it is why the share is not the whole rule. The
+    flag is one bit produced by a reflectance test, and over a dark roof or a
+    rail yard that test fires on almost every scene. MEASURED in Center City
+    Philadelphia: 143 pixels reading 36 C to 56 C carry the flag on 86% to
+    100% of their 80 clear observations, so no threshold on the share can
+    reach them. A five-year P95 above `max_c` is not water whatever the flag
+    counted, and the thermal band is the better evidence about which it is.
+
+    A pixel whose percentile is NaN keeps its classification. It carries no
+    temperature to argue with, and it is nodata either way.
+
     Both counts are the whole window, unsaturated. They are not the published
     `qa_count`, which clips at 255 a month and carries no water flag, so this
     classification cannot be recomputed from the product.
@@ -308,14 +354,22 @@ def observed_water(
     Args:
         water_observations: usable clear observations with QA_PIXEL bit 7 set.
         clear_observations: usable clear observations, the denominator.
+        celsius: the composite this pixel would publish, float. Optional, and
+            without it the share alone decides, which no production path does.
         threshold: the share at which the pixel becomes water, inclusive.
         floor: observations below which the pixel is unknown.
+        max_c: the hottest percentile that can still be water.
     """
     import numpy as np
 
     clear = np.asarray(clear_observations)
     water = np.asarray(water_observations)
-    return (clear >= floor) & (water >= np.float64(threshold) * clear)
+    wet = (clear >= floor) & (water >= np.float64(threshold) * clear)
+    if celsius is None:
+        return wet
+    # `> max_c` rather than `<= max_c`, so a NaN percentile keeps its
+    # classification instead of losing it to a comparison NaN always fails.
+    return wet & ~(np.asarray(celsius) > np.float64(max_c))
 
 
 # --------------------------------------------------------------------------

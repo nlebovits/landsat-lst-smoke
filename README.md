@@ -107,7 +107,7 @@ describes the place.
 | Evidence | 5 clear observations over the window | too few scenes to estimate a percentile |
 | Plausibility | -20 C to 80 C, inclusive | the retrieval failed |
 | Land geometry | outside the buffered land geometry | never this product's subject |
-| Observed water | 75% of clear observations set QA_PIXEL bit 7 | the surface is water |
+| Observed water | 75% of clear observations set QA_PIXEL bit 7, and the percentile is at or below 34 C | the surface is water |
 
 Read `qa_count` beside a nodata pixel as evidence, not as an answer. The two
 water rules zero the count with the temperature. The other two leave the count
@@ -131,6 +131,40 @@ all. The observations can. QA_PIXEL sets bit 7 over water, and
 `lst_qa.observed_water` asks what share of a pixel's usable clear observations
 did so over the whole five years. At or above 75%, the pixel leaves the product.
 
+One bit is not enough on its own. A reflectance test sets that flag, and it
+matches a dark roof or a rail yard on almost every scene. MEASURED in Center
+City Philadelphia: 143 pixels reading 36 C to 56 C carried the flag on 86% to
+100% of their 80 clear observations. No threshold on the share excludes them,
+because their share is the share of open sea.
+
+Water has a ceiling that asphalt does not. So a pixel whose percentile exceeds
+`WATER_MAX_C`, 34 C, keeps its temperature whatever the flag counted. Two
+blocks with known truth set that bound. The Center City box excludes both
+rivers, and the Delaware Bay block lies offshore of either bank.
+
+| bound | Center City masked | Delaware Bay kept | Chesapeake kept |
+|---|---|---|---|
+| 40 C | 1.33% | 100.00% | 93.07% |
+| 36 C | 0.70% | 100.00% | 93.07% |
+| 35 C | 0.26% | 100.00% | 93.07% |
+| 34 C | 0.00% | 100.00% | 93.06% |
+| 32 C | 0.00% | 100.00% | 92.92% |
+
+34 C is where the false positives end and before the cost to open water starts.
+It removes every false positive in that box and takes 0.01% of the Chesapeake.
+
+Read the bound as temperate. The Delaware and the Chesapeake publish a P95 of
+27 C to 29 C. Shallow tropical or desert water can run hotter than 34 C, and
+this rule keeps such a pixel rather than calling it water. The asymmetry is
+the point. A warm pond published as land costs less than a warm roof deleted
+as water, and no block here holds warm shallow water to test the other side.
+
+One thermal alternative lost on the numbers. Water holds steady across
+observations where asphalt swings: the per-pixel spread runs 8.30 C over
+Delaware Bay against 12.42 C over Center City. A spread bound at 9.5 C also
+reaches 0.00%, costs the Chesapeake 0.24% against 0.01%, and needs a third
+accumulator in the kernel.
+
 `composite.reduce_block` counts the share from two unsaturated counters, and
 `composite.finalize_block` applies it beside the geometry. The rule drops no
 observation before the percentile runs, so a retained pixel is bit-identical to
@@ -143,7 +177,7 @@ with its whole five-year stack:
 
 | block | scenes | clear observations, median | classified water | published p95 |
 |---|---|---|---|---|
-| Chesapeake open water | 756 | 322 | 93.07% | 28.69 C |
+| Chesapeake open water | 756 | 322 | 93.06% | 28.69 C |
 | Delaware Bay | 190 | 110 | 100.00% | 27.42 C |
 | Delaware shoreline | 569 | 99 | 99.72% | 28.41 C |
 | Rajasthan desert | 809 | 280 | 0.00% | 55.73 C |

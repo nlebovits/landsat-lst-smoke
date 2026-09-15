@@ -40,6 +40,7 @@ from lst_qa import (  # noqa: E402
     QA_EXCLUDED_BITS,
     QA_WATER_BIT,
     QA_WATER_BITS,
+    WATER_MAX_C,
     WATER_SHARE_THRESHOLD,
     encode_celsius,
     in_trusted_range,
@@ -227,6 +228,59 @@ class TestTheObservedWaterClassification:
         clear = np.array([100, 100, 100, 100], dtype="uint32")
         got = list(np.asarray(observed_water(water, clear)))
         assert got == [False, False, True, True]
+
+    def hot(self, celsius, water=DEEP, clear=DEEP):
+        return bool(
+            np.asarray(
+                observed_water(
+                    np.array([water]), np.array([clear]), np.array([celsius])
+                )
+            )[0]
+        )
+
+    def test_a_percentile_too_hot_to_be_water_is_not_water(self):
+        # The defect this exists for. MEASURED in Center City Philadelphia:
+        # 143 pixels reading 36 C to 56 C carried bit 7 on 86% to 100% of
+        # their observations, so the share rule alone cannot reject them.
+        assert self.share(self.DEEP) is True, "the share alone would classify it"
+        assert self.hot(WATER_MAX_C + 1.0) is False
+
+    def test_a_pixel_on_the_ceiling_is_still_water(self):
+        assert self.hot(WATER_MAX_C) is True
+
+    def test_a_cold_pixel_is_unaffected_by_the_ceiling(self):
+        assert self.hot(WATER_MAX_C - 15.0) is True
+
+    def test_a_nan_percentile_keeps_its_classification(self):
+        # It carries no temperature to argue with, and it is nodata either
+        # way. Written as `> max_c` rather than `<= max_c` for exactly this.
+        assert self.hot(float("nan")) is True
+
+    def test_the_ceiling_clears_open_water_with_room_to_spare(self):
+        """The bound is calibrated against two sets with known truth.
+
+        MEASURED at a share of 0.75: Delaware Bay runs at a P95 of 27.42 C and
+        the Chesapeake at 28.69 C. Dropping the bound from 40 C to 34 C takes
+        0.00% of Delaware Bay and 0.01% of the Chesapeake, and takes the Center
+        City false positives from 1.33% of that box to 0.00%. Below 34 C the
+        cost to open water starts: 32 C takes 0.15% of the Chesapeake.
+
+        So the bound is not "above the hottest water ever seen". It is where
+        the false positives end, and it clears the body of open water by more
+        than 5 C.
+        """
+        assert WATER_MAX_C >= 32.0, "below this the bound starts cutting open water"
+        assert WATER_MAX_C - 28.69 > 5.0, "no headroom over the Chesapeake median"
+
+    def test_the_ceiling_is_below_the_urban_false_positives(self):
+        # MEASURED in Center City: the 143 falsely classified pixels read
+        # 36 C to 56 C. A bound above that range would let all of them back.
+        assert WATER_MAX_C < 36.0
+
+    def test_without_a_percentile_the_share_alone_decides(self):
+        # The signature keeps `celsius` optional so the share rule can be
+        # tested and measured on its own. No production path omits it.
+        assert self.share(self.DEEP) is True
 
     def test_a_caller_can_ask_a_different_threshold(self):
         water, clear = np.array([50]), np.array([100])

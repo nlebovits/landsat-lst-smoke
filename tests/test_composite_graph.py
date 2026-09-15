@@ -647,13 +647,27 @@ class TestObservedWaterThroughTheGraph:
     #: water gives a share of 1.0 over a denominator the floor clears.
     WET = (0, 0)
 
+    #: What the flagged pixel reads. `lst_qa.observed_water` vetoes a pixel
+    #: whose percentile is hotter than water can be, and the fixture's land
+    #: ramp ends at 44 C, so a pixel left on it would be rejected by the veto
+    #: rather than classified by the share.
+    WATER_C = 26.0
+
+    @staticmethod
+    def flag_water(dataset, pixel, celsius=26.0):
+        """Set bit 7 on one pixel in every scene, and cool it to match."""
+        qa = dataset["qa_pixel"].values
+        qa[:, pixel[0], pixel[1]] |= QA_WATER_BITS
+        dataset["qa_pixel"].values = qa
+        dn = dataset["lwir11"].values
+        dn[:, pixel[0], pixel[1]] = dn_of(celsius)
+        dataset["lwir11"].values = dn
+        return dataset
+
     @pytest.fixture
     def wet_stack(self):
         dataset, items = build_stack()
-        qa = dataset["qa_pixel"].values
-        qa[:, self.WET[0], self.WET[1]] |= QA_WATER_BITS
-        dataset["qa_pixel"].values = qa
-        return dataset, items
+        return self.flag_water(dataset, self.WET, self.WATER_C), items
 
     @pytest.fixture
     def fake_wet_load(self, monkeypatch, wet_stack):
@@ -735,9 +749,8 @@ class TestObservedWaterThroughTheGraph:
         import pystac
 
         dataset, _items = build_stack()
-        qa = dataset["qa_pixel"].values
-        qa[:, 3, :] |= QA_WATER_BITS  # the same row the geometry removes
-        dataset["qa_pixel"].values = qa
+        for col in range(NX):  # row 3 is the row the geometry removes
+            self.flag_water(dataset, (3, col), self.WATER_C)
         monkeypatch.setattr(odc.stac, "load", lambda *_a, **_k: with_geobox(dataset))
         monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
 
@@ -753,9 +766,11 @@ class TestObservedWaterThroughTheGraph:
     ):
         """The rule removes a pixel and moves none.
 
-        Two runs of the same graph on the same observations, one with bit 7
-        set on one pixel. Every pixel but that one has to hold the same DN and
-        the same twelve counts.
+        Two runs of the same graph on the same observations, differing in one
+        bit on one pixel. The control carries the same cold temperature as the
+        flagged run, so bit 7 is the only difference between them and the
+        comparison cannot be explained by the thermal band. Every pixel but
+        that one has to hold the same DN and the same twelve counts.
         """
         import odc.stac
         import pystac
@@ -767,13 +782,14 @@ class TestObservedWaterThroughTheGraph:
             monkeypatch.setattr(pystac.Item, "from_dict", staticmethod(lambda d: d))
 
         dry_dataset, _ = build_stack()
+        cold = dry_dataset["lwir11"].values
+        cold[:, self.WET[0], self.WET[1]] = dn_of(self.WATER_C)
+        dry_dataset["lwir11"].values = cold
         load(dry_dataset)
         _, _, dry_lst, dry_qa = self._finish(tmp_path / "dry")
 
         wet_dataset, _ = build_stack()
-        qa = wet_dataset["qa_pixel"].values
-        qa[:, self.WET[0], self.WET[1]] |= QA_WATER_BITS
-        wet_dataset["qa_pixel"].values = qa
+        self.flag_water(wet_dataset, self.WET, self.WATER_C)
         load(wet_dataset)
         _, _, wet_lst, wet_qa = self._finish(tmp_path / "wet")
 

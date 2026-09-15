@@ -86,6 +86,11 @@ from lst_qa import (
     supported_output,
 )
 
+#: What `rehearsal_items` writes inside its water box, in Celsius. Well under
+#: `lst_qa.WATER_MAX_C`, because a rehearsal whose water reads as hot as its
+#: land would exercise the veto rather than the share rule.
+REHEARSAL_WATER_C = 26.0
+
 #: Block edge in pixels. 360 divides an 18,000 px tile into 50 x 50 blocks
 #: with no ragged edge. See the module docstring for the memory that sets it.
 DEFAULT_CHUNK_PX = 360
@@ -776,7 +781,9 @@ def reduce_block(
     # `counts` is left alone. A nodata temperature beside a count of 4 says the
     # pixel was screened rather than never seen, and that count is the only
     # evidence a consumer has for which of the two rules reached it.
-    water = observed_water(water_obs, clear_obs)
+    # `p95`, not `dn`: the veto is a temperature, and the encoder has already
+    # turned everything it could not represent into nodata by this point.
+    water = observed_water(water_obs, clear_obs, p95)
     _record_block_span(t0, int(present.sum()), int(unsupported.sum()))
     outputs = (dn, np.moveaxis(counts, 0, -1), fallback, water)
     return (*outputs, pooled) if emit_pooled else outputs
@@ -1789,6 +1796,15 @@ def rehearsal_items(bbox, n: int, directory: Path, *, seed: int = 0, water=None)
                 (rows >= water[1]) & (rows <= water[3])
             )[:, None]
             qa[wet] |= QA_WATER_BITS
+            # Water reads cold, and `lst_qa.observed_water` vetoes a pixel
+            # whose percentile is too hot to be water however the flag counted.
+            # A water box left at the land field would carry the flag and the
+            # land temperature together, which is the one combination the rule
+            # exists to reject.
+            dn[wet] = np.rint(
+                (rng.normal(REHEARSAL_WATER_C, 1.0, int(wet.sum())) - LWIR_OFFSET_C)
+                / LWIR_SCALE
+            ).astype("uint16")
         paths = {}
         for band, values in (("lwir11", dn), ("qa_pixel", qa)):
             path = directory / f"scene{i:04d}_{band}.tif"

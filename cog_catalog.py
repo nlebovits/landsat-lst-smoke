@@ -72,6 +72,7 @@ from lst_qa import (
     MIN_TOTAL_OBSERVATIONS,
     MIN_WATER_OBSERVATIONS,
     QA_WATER_BIT,
+    WATER_MAX_C,
     WATER_SHARE_THRESHOLD,
 )
 from stac_window import DEFAULT_COLLECTION, DEFAULT_PLATFORMS
@@ -1327,7 +1328,8 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
         "| Outside the land geometry | the pixel sits beyond Natural Earth "
         "land grown by 25 km | no |\n"
         f"| Observed water | at least {WATER_SHARE_THRESHOLD:.0%} of its clear "
-        f"observations set QA_PIXEL bit {QA_WATER_BIT} | no |\n"
+        f"observations set QA_PIXEL bit {QA_WATER_BIT}, and it is no hotter "
+        f"than {WATER_MAX_C:.0f} C | no |\n"
         f"| Too little evidence | fewer than {MIN_TOTAL_OBSERVATIONS} clear "
         "observations over the whole window | yes |\n"
         f"| Physically impossible | below {LST_OUTPUT_MIN_C:.0f} C or above "
@@ -1482,10 +1484,13 @@ def mask_lineage(mask_rule: dict[str, Any] | None) -> dict[str, Any]:
     observed = (
         f"Observed water: a pixel becomes nodata, and its qa_count becomes 0, "
         f"when at least {WATER_SHARE_THRESHOLD:.0%} of its usable clear "
-        f"observations set QA_PIXEL bit {QA_WATER_BIT}. The share is counted "
-        f"over the whole window from unsaturated counters, and a pixel with "
-        f"fewer than {MIN_WATER_OBSERVATIONS} such observations is left alone "
-        f"rather than called water. This rule reads the record and not a "
+        f"observations set QA_PIXEL bit {QA_WATER_BIT} and its percentile is "
+        f"at or below {WATER_MAX_C:.0f} C. The share is counted over the whole "
+        f"window from unsaturated counters, and a pixel with fewer than "
+        f"{MIN_WATER_OBSERVATIONS} such observations is left alone rather than "
+        f"called water. The temperature bound is there because the flag comes "
+        f"from a reflectance test that fires over a dark roof, and water has a "
+        f"ceiling asphalt does not. This rule reads the record and not a "
         f"polygon, so it removes a river the land geometry cannot."
     )
     if not mask_rule:
