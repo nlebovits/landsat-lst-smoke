@@ -58,3 +58,9 @@ artifacts/aster_numobs.tif
 # same digest so CI can check the tie without the file, and
 # `artifacts/land_buffered_slice.gpkg` is the cut the tests rasterise.
 artifacts/land_buffered.gpkg
+
+# The unbuffered geometry, which is what a published `lst:land_pixels` counts.
+# 7.3 MB, and it stands in the same relation to its own digest and slice:
+# `artifacts/land_strict_sha256.txt` and `artifacts/land_strict_slice.gpkg` are
+# committed and this file is not.
+artifacts/land_strict.gpkg

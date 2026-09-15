@@ -48,6 +48,7 @@ from conftest import (  # noqa: E402
     FULL_LAND_GEOMETRY,
     needs_full_land_geometry,
     needs_land_geometry,
+    needs_strict_land_geometry,
     write_numobs,
 )
 from land_tiles import read_land_tiles, tile_bounds  # noqa: E402
@@ -64,8 +65,32 @@ GED_MANIFEST = ROOT / "artifacts" / "aster_numobs_manifest.json"
 #: the 16 MB file. `land_tiles.py --write-geometry` writes both.
 RECORDED_GEOMETRY_SHA256 = ROOT / "artifacts" / "land_buffered_sha256.txt"
 
-#: The tiles the committed geometry slice covers.
-SLICE_TILES = ("N05E010", "N40W075", "S15E175", "S30W065")
+#: The unbuffered geometry's digest, committed for the same reason. A published
+#: item names it in `processing:lineage`, so a reader who wants to know which
+#: land a coverage count divided by has these bytes to compare against.
+RECORDED_STRICT_SHA256 = ROOT / "artifacts" / "land_strict_sha256.txt"
+
+#: The full 7.3 MB unbuffered geometry, gitignored beside the buffered one.
+FULL_STRICT_GEOMETRY = ROOT / "artifacts" / "land_strict.gpkg"
+
+#: The tiles the committed geometry slices cover. `tests/make_land_slice.py`
+#: cuts both the buffered and the unbuffered geometry to these.
+SLICE_TILES = (
+    "N05E010",
+    "N40W075",
+    "S15E175",
+    "S30W065",
+    "S40W065",
+    "S35W055",
+)
+
+#: Golfo San Matias and the Patagonian coast, where the 25 km processing buffer
+#: is 38% of the mask. The tile the land counts are pinned on.
+COASTAL_TILE = "S40W065"
+
+#: Atlantic off Uruguay. The buffer reaches it and land does not, so the
+#: processing mask is non-empty and land is zero.
+ALL_SEA_TILE = "S35W055"
 
 #: Coarse enough that 895 tiles fit in a test, fine enough to see a coastline.
 COARSE_PPD = 100
@@ -161,6 +186,25 @@ class TestTheLandRule:
         recorded = RECORDED_GEOMETRY_SHA256.read_text().strip()
         assert masks.geometry_checksum(FULL_LAND_GEOMETRY) == recorded
 
+    def test_the_strict_geometry_has_a_recorded_digest_of_its_own(self):
+        """A published item names it, so the bytes need a committed digest.
+
+        `processing:lineage` states which land a coverage count divided by. A
+        reader comparing that digest against nothing cannot check the claim, and
+        the geometry itself is gitignored.
+        """
+        recorded = RECORDED_STRICT_SHA256.read_text().strip()
+        assert len(recorded) == 64
+        assert recorded != RECORDED_GEOMETRY_SHA256.read_text().strip()
+
+    @pytest.mark.skipif(
+        not FULL_STRICT_GEOMETRY.exists(),
+        reason="run land_tiles.py --write-strict-geometry",
+    )
+    def test_the_recorded_strict_digest_is_the_geometry_on_disk(self):
+        recorded = RECORDED_STRICT_SHA256.read_text().strip()
+        assert masks.geometry_checksum(FULL_STRICT_GEOMETRY) == recorded
+
     @needs_full_land_geometry
     def test_the_slice_gives_the_same_mask_as_the_full_geometry(self, land_geometry):
         """The committed fixture is a clip, not a simplification.
@@ -175,6 +219,257 @@ class TestTheLandRule:
             full = masks.land_mask(bbox, 360, FULL_LAND_GEOMETRY)
             sliced = masks.land_mask(bbox, 360, land_geometry)
             assert np.array_equal(full, sliced), tile
+
+
+@needs_strict_land_geometry
+@pytest.mark.timeout(300)
+class TestLandIsNotTheProcessingMask:
+    """The denominator of every published share of land.
+
+    A run masks on Natural Earth land grown by 25 km, so that a coastal scene is
+    not cut at the waterline. That mask reaches open sea. Calling its pixel count
+    `lst:land_pixels` overstated the land of every coastal tile, and the fraction
+    beside it understated coverage by the same factor.
+
+    The counts here are pinned rather than related, because the defect this
+    guards against passes every relational test. A rebuild that quietly returns
+    the processing mask still sums, still contains, and still divides. Only a
+    number says it changed.
+    """
+
+    def geometries(self, land_geometry, strict_land_geometry):
+        return {
+            "land_geometry_uri": land_geometry,
+            "strict_land_geometry_uri": strict_land_geometry,
+        }
+
+    def test_the_land_count_is_pinned(self, land_geometry, strict_land_geometry):
+        """MEASURED 2026-09-15 at 3600 pixels per degree on `S40W065`.
+
+        Natural Earth 10m land, the placeholder record dropped, no buffer, a
+        pixel counted where its centre falls inside a polygon. The same method
+        at 25 km of Mercator buffer gives 73,254,945, which is what the item
+        used to publish as land.
+
+        FINDINGS.md and the pull request record one more measurement: an earlier
+        session reported 47,741,196 for this tile, and that figure does not
+        reproduce from Natural Earth 10m land on this grid. `all_touched=True`
+        moves the count by 28,378, and `ne_10m_minor_islands` and
+        `ne_10m_lakes` contribute no feature inside this box.
+        """
+        _, _, counts = masks.land_split(
+            tile_bounds(COASTAL_TILE),
+            3600,
+            **self.geometries(land_geometry, strict_land_geometry),
+        )
+        assert counts["pixels_strict_land"] == 45_407_126
+        assert counts["pixels_coastal_buffer"] == 27_847_819
+        assert counts["pixels_processing_mask"] == 73_254_945
+
+    def test_the_two_parts_sum_to_the_mask(self, land_geometry, strict_land_geometry):
+        _, _, counts = masks.land_split(
+            tile_bounds(COASTAL_TILE),
+            3600,
+            **self.geometries(land_geometry, strict_land_geometry),
+        )
+        assert (
+            counts["pixels_strict_land"] + counts["pixels_coastal_buffer"]
+            == counts["pixels_processing_mask"]
+        )
+
+    def test_land_lies_inside_the_processing_mask(
+        self, land_geometry, strict_land_geometry
+    ):
+        strict, processing, _ = masks.land_split(
+            tile_bounds(COASTAL_TILE),
+            360,
+            **self.geometries(land_geometry, strict_land_geometry),
+        )
+        assert strict.any()
+        assert not strict.all()
+        assert not (strict & ~processing).any()
+
+    def test_an_inland_tile_splits_into_land_and_nothing(
+        self, land_geometry, strict_land_geometry
+    ):
+        """Interior Argentina, where the buffer reaches no sea.
+
+        The two counts coincide there, which is what makes the coastal numbers
+        a measurement of the buffer rather than of the method.
+        """
+        _, _, counts = masks.land_split(
+            tile_bounds(INLAND_TILE),
+            COARSE_PPD,
+            **self.geometries(land_geometry, strict_land_geometry),
+        )
+        assert counts["pixels_coastal_buffer"] == 0
+        assert counts["pixels_strict_land"] == counts["pixels_processing_mask"]
+
+    def test_a_tile_can_be_all_buffer_and_no_land(
+        self, land_geometry, strict_land_geometry
+    ):
+        """`S35W055` is Atlantic that the 25 km buffer reaches and land does not.
+
+        MEASURED 2026-09-15 at 3600 pixels per degree: 588,696 pixels of
+        processing mask, 0 pixels of land. It is published, and it reported all
+        588,696 as `lst:land_pixels`. The split has to survive the case, because
+        a denominator of zero is what the first recount of the real catalog hit.
+        """
+        _, _, counts = masks.land_split(
+            tile_bounds(ALL_SEA_TILE),
+            3600,
+            **self.geometries(land_geometry, strict_land_geometry),
+        )
+        assert counts["pixels_strict_land"] == 0
+        assert counts["pixels_processing_mask"] == 588_696
+        assert counts["pixels_coastal_buffer"] == 588_696
+
+    def test_the_caller_can_hand_over_the_mask_it_holds(
+        self, land_geometry, strict_land_geometry
+    ):
+        """`processing` saves rasterising the buffered geometry twice.
+
+        A run already holds it from `output_mask`. Passing it has to give the
+        same answer as letting `land_split` read the file, or the saving is a
+        second opinion.
+        """
+        bbox = tile_bounds(COASTAL_TILE)
+        processing = masks.land_mask(bbox, COARSE_PPD, land_geometry)
+        _, handed, given = masks.land_split(
+            bbox,
+            COARSE_PPD,
+            strict_land_geometry_uri=strict_land_geometry,
+            processing=processing,
+        )
+        _, read, alone = masks.land_split(
+            bbox, COARSE_PPD, **self.geometries(land_geometry, strict_land_geometry)
+        )
+        assert given == alone
+        assert np.array_equal(handed, read)
+
+    def test_the_gap_gets_its_own_numerator(
+        self, land_geometry, strict_land_geometry, numobs_artifact
+    ):
+        """`ged_gap_fraction` divides by land, so its numerator must too.
+
+        The gap over the processing mask counts sea, where ASTER has no clear-sky
+        observation either. Dividing that by land would put the two halves of the
+        fraction on different footprints.
+        """
+        bbox = tile_bounds(COASTAL_TILE)
+        # A box over the coast, so the gap covers both land and sea inside the
+        # processing mask. A gap wholly on land would make the two numerators
+        # equal and prove nothing.
+        gaps = ((-65.0, -43.0, -62.0, -41.0),)
+        numobs = write_numobs(numobs_artifact.parent / "gap.tif", gaps=gaps)
+        keep, gap, counts = masks.output_mask(
+            bbox, COARSE_PPD, numobs_uri=numobs, land_geometry_uri=land_geometry
+        )
+        _, _, split = masks.land_split(
+            bbox,
+            COARSE_PPD,
+            strict_land_geometry_uri=strict_land_geometry,
+            processing=keep,
+            gap=gap,
+        )
+        on_strict = split["pixels_emissivity_gap_on_strict_land"]
+        assert on_strict <= counts["pixels_emissivity_gap_on_land"]
+
+    def test_a_geometry_pair_that_cannot_both_be_true_is_refused(self, tmp_path):
+        """Land outside the mask that is supposed to contain it.
+
+        A buffer contains what it buffers. Losing that means the two files hold
+        different Natural Earth releases, and every count built from them would
+        compare two worlds. The failure is silent without this check: both masks
+        rasterise, both counts look plausible, and their difference goes
+        negative.
+        """
+        gpd = pytest.importorskip("geopandas")
+        from shapely.geometry import box
+
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        small = tmp_path / "small.gpkg"
+        large = tmp_path / "large.gpkg"
+        gpd.GeoDataFrame(geometry=[box(0.1, 0.1, 0.4, 0.4)], crs="EPSG:4326").to_file(
+            small, driver="GPKG"
+        )
+        gpd.GeoDataFrame(geometry=[box(0.1, 0.1, 0.9, 0.9)], crs="EPSG:4326").to_file(
+            large, driver="GPKG"
+        )
+        with pytest.raises(masks.MaskError, match="outside the processing mask"):
+            masks.land_split(
+                bbox,
+                COARSE_PPD,
+                land_geometry_uri=small,
+                strict_land_geometry_uri=large,
+            )
+
+
+@needs_strict_land_geometry
+class TestCountingValuesInsideAMask:
+    """What `count_valid_within` answers, and what it refuses to answer."""
+
+    def raster(self, path, values, nodata=0):
+        import rasterio
+
+        height, width = values.shape
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype=values.dtype,
+            nodata=nodata,
+        ) as dst:
+            dst.write(values, 1)
+        return path
+
+    def test_each_region_is_counted_in_one_pass(self, tmp_path):
+        values = np.zeros((8, 8), dtype="uint16")
+        values[:4] = 300  # the top half carries a value
+        path = self.raster(tmp_path / "v.tif", values)
+        left = np.zeros((8, 8), dtype=bool)
+        left[:, :4] = True
+        counts = masks.count_valid_within(path, 0, left=left, right=~left)
+        assert counts == {"total": 32, "left": 16, "right": 16}
+
+    def test_the_regions_of_a_masked_tile_sum_to_the_total(self, tmp_path):
+        values = np.full((8, 8), 300, dtype="uint16")
+        values[6:] = 0  # nodata, outside every region
+        path = self.raster(tmp_path / "v.tif", values)
+        land = np.zeros((8, 8), dtype=bool)
+        land[:3] = True
+        coast = np.zeros((8, 8), dtype=bool)
+        coast[3:6] = True
+        counts = masks.count_valid_within(path, 0, land=land, coast=coast)
+        assert counts["land"] + counts["coast"] == counts["total"] == 48
+
+    def test_no_nodata_counts_every_pixel(self, tmp_path):
+        values = np.zeros((4, 4), dtype="uint8")
+        path = self.raster(tmp_path / "v.tif", values, nodata=None)
+        whole = np.ones((4, 4), dtype=bool)
+        assert masks.count_valid_within(path, None, all=whole) == {
+            "total": 16,
+            "all": 16,
+        }
+
+    def test_a_mask_on_the_wrong_grid_is_refused(self, tmp_path):
+        """The failure this catches returns a number rather than an error.
+
+        A recount derives the grid from the raster. If it ever derived it from
+        somewhere else, the mask would still rasterise and still count, and the
+        answer would describe different ground.
+        """
+        path = self.raster(tmp_path / "v.tif", np.zeros((8, 8), dtype="uint16"))
+        with pytest.raises(masks.MaskError, match="different grid"):
+            masks.count_valid_within(path, 0, land=np.ones((4, 4), dtype=bool))
+
+    def test_total_cannot_name_a_region(self, tmp_path):
+        path = self.raster(tmp_path / "v.tif", np.zeros((4, 4), dtype="uint16"))
+        with pytest.raises(ValueError, match="cannot name a region"):
+            masks.count_valid_within(path, 0, total=np.ones((4, 4), dtype=bool))
 
 
 @needs_land_geometry

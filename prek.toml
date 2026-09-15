@@ -82,6 +82,7 @@ hooks = [
       "measure_scene_centre.py",
       "memory_sampler.py",
       "observe.py",
+      "publish_catalog.py",
       "shard_lst_p95.py",
       "stac_reference.py",
       "stac_window.py",

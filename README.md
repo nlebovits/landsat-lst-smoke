@@ -113,6 +113,28 @@ nodata pixel is the signature of sea. The other two leave `qa_count` standing.
 A count of 1 to 4 beside a nodata pixel is the evidence rule. A count above 5
 beside one is a value outside the bounds. Sum the 12 bands to read it.
 
+The water rule reads land grown by 25 km. That growth stops the mask cutting a
+coastal scene at the waterline, and it reaches open sea. So the geometry decides
+pixels and does not define land.
+
+Until 2026-09-15 every published share of land divided by it. MEASURED at 3600
+pixels per degree, `S40W065` holds 73,254,945 pixels of processing mask and
+45,407,126 pixels of land. An item reported the first under the name
+`lst:land_pixels`. The properties below state which footprint each one counts.
+
+| Property | Footprint |
+|---|---|
+| `lst:land_pixels` | Natural Earth 10m land, unbuffered |
+| `lst:processing_mask_pixels` | that land grown by 25 km, which the run masked on |
+| `lst:coastal_buffer_pixels` | the difference, which is sea |
+| `lst:coastal_buffer_valid_pixels` | values the product publishes over that sea |
+
+`lst:valid_fraction`, `lst:empty_land_pixels`, and `lst:ged_gap_fraction` divide
+by `lst:land_pixels`. `masks.land_split` builds both masks from one method and
+refuses a pair where land reaches outside the mask, which is how two Natural
+Earth releases would show up. `land_tiles.py --write-strict-geometry` writes the
+unbuffered artifact.
+
 The evidence rule cuts a thin tail. MEASURED across the five audited tiles: it
 removes 0.0003% of N30E075, 0.0005% of S30W065, 0.0069% of N40W080, 0.5965% of
 N00E110, and 0.8035% of S25E030 of valid land. Median total observations run
@@ -200,13 +222,21 @@ and no compositing rule recovers a pixel nothing ever saw.
 MEASURED across the five audited tiles, land pixels with no clear observation
 in 2021 to 2025:
 
-| tile | place | land pixels | no clear observation |
-|---|---|---|---|
-| `N30E075` | Delhi, north India | 324,000,000 | 27,915, 0.009% |
-| `S30W065` | interior Argentina | 324,000,000 | 85,489, 0.03% |
-| `N40W080` | Philadelphia, Pennsylvania | 307,324,200 | 289,580, 0.09% |
-| `S25E030` | Durban, South Africa | 178,974,823 | 35,754,489, 20.0% |
-| `N00E110` | Borneo, Kalimantan | 233,439,938 | 105,608,892, **45.2%** |
+| tile | place | land pixels | processing mask | no usable observation |
+|---|---|---|---|---|
+| `N30E075` | Delhi, north India | 324,000,000 | 324,000,000 | 27,915, 0.009% |
+| `S30W065` | interior Argentina | 324,000,000 | 324,000,000 | 85,489, 0.03% |
+| `N40W080` | Philadelphia, Pennsylvania | 267,003,973 | 307,324,200 | 289,580, 0.09% |
+| `S25E030` | Durban, South Africa | 158,478,897 | 178,974,823 | 35,754,489, 20.0% |
+| `N00E110` | Borneo, Kalimantan | 209,193,037 | 233,439,938 | 105,608,892, **45.2%** |
+
+Two denominators, because the run that produced the last column divided by the
+wrong one. The processing mask is Natural Earth land grown by 25 km, so that a
+coastal scene is not cut at the waterline, and it reaches open sea. The land
+column is the same geometry unbuffered, MEASURED 2026-09-15 at 3600 pixels per
+degree. The percentages are the 2026-09-14 run's own, against the mask.
+`publish_catalog.py recount` restates every share against land and reads the
+count off the published raster, touching no pixel of it.
 
 Read `qa_count` before reading a temperature. Its twelve bands sum to the
 evidence behind each pixel, and a tile can be 45% empty without any band of
@@ -261,8 +291,24 @@ cost 0.78% of `S25W065`'s land and 0.53% of `S30W060`'s.
 The published rasters are right. `qa_count` reads zero because zero
 observations exist, and no compositing rule invents a value from none. The
 account the product gives of itself is what misleads: `lst:empty_land_pixels`
-counts ground
-Landsat never photographed alongside ground it photographed through cloud, and
-only the second would improve with a wider window. The imaged footprint is
-derivable from `qa_count`, so separating the two costs nothing at composite
-time.
+counts ground Landsat never photographed alongside ground where every
+observation failed the QA or range rule. A wider window helps the second case.
+It can do nothing for the first.
+
+`qa_count` cannot separate them. It counts pixels where
+`not_fill AND qa_clear AND in_trusted_range` all held. Neither a source fill nor
+a rejected observation raises that count. Both cases read the same on disk.
+`lst_p95` holds 0 and `qa_count` holds 0 in all twelve bands.
+
+Read a straight-edged region of zeros as ground outside Landsat's imaged
+footprint, whatever the scene rectangles say. Those pixels are not cloudy.
+
+Splitting the count needs a per-pixel record of source presence that no
+published artifact carries. `lst_qa.not_fill` produces it once per scene per
+pixel and `lst_qa.masked_celsius` ANDs it with the QA and range tests in the
+same statement, so nothing downstream can recover it. A bare `!= 0` test on the
+loaded plane is not a substitute either. Reprojection interpolates fill against
+data, so small non-zero DNs appear along a scene edge, decode near -124 C, and
+pass every test except the range check. The split belongs in
+`composite.reduce_block`, as one boolean reduction over time, and it can describe
+only the tiles built after that change.
