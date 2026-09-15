@@ -114,13 +114,64 @@ Sharp rectangular gaps occur where scene bounding boxes extend beyond the
 rotated Landsat image. `qa_count` cannot distinguish that source fill from a QA
 rejection. The product has no source-presence band.
 
-### Cloud and emissivity limit coverage
+### ASTER emissivity gaps
 
 Some pixels have no observations due to persistent cloud cover.
 
-USGS interpolates emissivity where the ASTER Global Emissivity Dataset (GED)
-lacks coverage. Some source pixels remain empty or fail retrieval. Each STAC
-item reports the affected region without masking it.
+Landsat Collection 2 surface temperature also depends on mean emissivity from
+the ASTER Global Emissivity Dataset (GED). ASTER GED uses clear-sky ASTER
+observations collected from 2000 through 2008. [USGS documents persistent
+Landsat temperature gaps where ASTER GED lacks mean
+emissivity](https://www.usgs.gov/landsat-missions/landsat-collection-2-surface-temperature-data-gaps-due-missing-aster-ged).
+
+An earlier analysis intersected ASTER GED observation counts with GHS-SMOD
+R2023A urban land. MEASURED in that analysis, zero-observation cells cover
+80,397 km2 of urban land. That equals 2.66% of the 3,027,063 km2 total.
+
+MEASURED in the same analysis, another 10.23% of urban land rests on only one
+or two ASTER observations. The zero-observation share varies sharply by region:
+
+| Region | MEASURED share of urban land with no ASTER observations |
+|---|---:|
+| Southeast Asia | 12.07% |
+| Amazonia | 11.62% |
+| Southern Africa | 8.36% |
+| Europe | 2.80% |
+| North America | 1.18% |
+| Australia | 0.30% |
+| Sahara and Sahel | 0.00% |
+
+These figures measure ASTER support over urban land, not missing pixels in this
+product. UNKNOWN for current inputs: this repository has not rerun the global
+urban analysis.
+
+An ASTER zero-observation cell also does not locate every failed Landsat
+retrieval. USGS interpolation leaves temperatures in much of the coarse gap
+region. MEASURED on `S30W065`, 89.53% of processing-mask pixels inside those
+cells still held a temperature.
+
+MEASURED on the same tile, masking every zero-observation cell would remove
+701,839 valid temperatures. Only 4,588 of those temperatures reached 70 C.
+MEASURED across five tiles, the earlier paired gap-and-temperature rule also
+missed the hot tail. All 207 pixels at or above 80 C on `N30E075` fell outside
+the reported gap region and its one-cell buffer.
+
+The current product reports the region instead of masking it. Each STAC item
+stores its strict-land share as `lst:ged_gap_fraction`. DERIVED from the current
+code, the pipeline applies the 80 C output maximum everywhere.
+
+A larger reported fraction indicates greater coverage risk without predicting
+an exact missing share. MEASURED on the 2026-09-14 run, three tiles showed this
+relationship:
+
+| Tile | MEASURED processing-mask pixels with no usable observation | MEASURED count outside the GED gap |
+|---|---:|---:|
+| `N40W080` | 289,580 | 0 |
+| `S25E030` | 35,754,489 | 0 |
+| `N00E110` | 105,608,892 | 5,895 |
+
+Do not use `qa_count == 0` as an ASTER gap mask. A zero count cannot separate
+ASTER failure from cloud, source fill, other QA rejection, or missing coverage.
 
 ### Seam correction changes the statistic
 
