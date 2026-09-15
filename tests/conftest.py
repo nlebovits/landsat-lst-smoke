@@ -54,11 +54,17 @@ FULL_ARTIFACT = ROOT / "artifacts" / "tile_scene_inventory.parquet"
 #: one equatorial, and one on the antimeridian.
 SLICE_TILES = ("N05E010", "N40W075", "S15E175", "S30W065")
 
-#: The tiles `make_land_slice.py` cuts, which are the inventory's four plus one.
+#: The tiles `make_land_slice.py` cuts, which are the inventory's four plus two.
+#: Neither extra needs a scene, so they join the geometry slice alone.
+#:
 #: `S40W065` is Golfo San Matias and the Patagonian coast, where the 25 km
 #: processing buffer is 38% of the mask. It is the tile the land counts are
-#: pinned on, and it needs no scenes, so it joins the geometry slice alone.
-LAND_SLICE_TILES = (*SLICE_TILES, "S40W065")
+#: pinned on.
+#:
+#: `S35W055` is Atlantic off Uruguay. The buffer reaches it and land does not,
+#: so it holds 588,696 pixels of processing mask and none of land. It is
+#: published, and it is the case a zero denominator comes from.
+LAND_SLICE_TILES = (*SLICE_TILES, "S40W065", "S35W055")
 
 #: The committed cut of the buffered land geometry, clipped to `SLICE_TILES`.
 #: Built by `tests/make_land_slice.py`. `masks.land_mask` only rasterises

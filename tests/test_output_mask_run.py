@@ -616,6 +616,33 @@ class TestTheCoverageSummary:
                 valid={"land": 400, "coast": 50, "total": 450},
             )
 
+    def test_a_tile_with_no_land_reports_counts_and_no_fraction(self):
+        """The buffer alone can put a cell of open sea inside the mask.
+
+        MEASURED 2026-09-15, the published `S35W055` is 588,696 pixels of
+        processing mask over the Atlantic and 0 pixels of land. It reported all
+        588,696 as land, and the first recount of the real catalog died on it
+        with `ZeroDivisionError`. There is no share of land to report on such a
+        tile, and 0/0 is not zero.
+        """
+        out = shard_lst_p95.coverage(
+            self.counts(),
+            self.stats(80),
+            split=self.split(
+                pixels_strict_land=0,
+                pixels_coastal_buffer=600,
+                pixels_emissivity_gap_on_strict_land=0,
+            ),
+            valid=self.land(on_land=0, on_coast=80),
+        )
+        assert out is not None
+        assert out["land_pixels"] == 0
+        assert out["empty_land_pixels"] == 0
+        assert out["coastal_buffer_pixels"] == 600
+        assert out["coastal_buffer_valid_pixels"] == 80
+        assert "valid_fraction" not in out
+        assert "ged_gap_fraction" not in out
+
     def test_it_returns_none_when_no_mask_ran(self):
         """`--no-output-mask` leaves no land count, and a coverage figure
         without one would divide by the raster and understate every coastal

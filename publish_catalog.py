@@ -316,13 +316,17 @@ def rewrite_coverage(item: dict, fresh: dict, sentence: str, *, dry_run: bool) -
     names = [name for _, name, _ in cog_catalog.COVERAGE_PROPERTIES]
     before = {name: properties.get(name) for name in names}
     after = cog_catalog.coverage_properties(fresh)
-    print(f"{item['id']}")
+    # Flushed per tile. A 30-tile recount reads a gigabyte and runs for tens of
+    # minutes, and MEASURED on 2026-09-15 the first attempt died at tile 18 with
+    # eighteen tiles of report still in the buffer. A step this long has to
+    # report as it goes or a failure takes its own evidence with it.
+    print(f"{item['id']}", flush=True)
     for name in names:
         old, new = before.get(name), after.get(name)
         if old != new:
-            print(f"  {name:38} {_show(old)} -> {_show(new)}")
+            print(f"  {name:38} {_show(old)} -> {_show(new)}", flush=True)
     if before == after and sentence in properties.get("processing:lineage", ""):
-        print("  unchanged")
+        print("  unchanged", flush=True)
         return False
     if dry_run:
         return True

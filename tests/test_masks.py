@@ -75,11 +75,22 @@ FULL_STRICT_GEOMETRY = ROOT / "artifacts" / "land_strict.gpkg"
 
 #: The tiles the committed geometry slices cover. `tests/make_land_slice.py`
 #: cuts both the buffered and the unbuffered geometry to these.
-SLICE_TILES = ("N05E010", "N40W075", "S15E175", "S30W065", "S40W065")
+SLICE_TILES = (
+    "N05E010",
+    "N40W075",
+    "S15E175",
+    "S30W065",
+    "S40W065",
+    "S35W055",
+)
 
 #: Golfo San Matias and the Patagonian coast, where the 25 km processing buffer
 #: is 38% of the mask. The tile the land counts are pinned on.
 COASTAL_TILE = "S40W065"
+
+#: Atlantic off Uruguay. The buffer reaches it and land does not, so the
+#: processing mask is non-empty and land is zero.
+ALL_SEA_TILE = "S35W055"
 
 #: Coarse enough that 895 tiles fit in a test, fine enough to see a coastline.
 COARSE_PPD = 100
@@ -293,6 +304,25 @@ class TestLandIsNotTheProcessingMask:
         )
         assert counts["pixels_coastal_buffer"] == 0
         assert counts["pixels_strict_land"] == counts["pixels_processing_mask"]
+
+    def test_a_tile_can_be_all_buffer_and_no_land(
+        self, land_geometry, strict_land_geometry
+    ):
+        """`S35W055` is Atlantic that the 25 km buffer reaches and land does not.
+
+        MEASURED 2026-09-15 at 3600 pixels per degree: 588,696 pixels of
+        processing mask, 0 pixels of land. It is published, and it reported all
+        588,696 as `lst:land_pixels`. The split has to survive the case, because
+        a denominator of zero is what the first recount of the real catalog hit.
+        """
+        _, _, counts = masks.land_split(
+            tile_bounds(ALL_SEA_TILE),
+            3600,
+            **self.geometries(land_geometry, strict_land_geometry),
+        )
+        assert counts["pixels_strict_land"] == 0
+        assert counts["pixels_processing_mask"] == 588_696
+        assert counts["pixels_coastal_buffer"] == 588_696
 
     def test_the_caller_can_hand_over_the_mask_it_holds(
         self, land_geometry, strict_land_geometry

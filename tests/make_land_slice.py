@@ -41,8 +41,17 @@ sys.path.insert(0, str(ROOT))
 from land_tiles import tile_bounds  # noqa: E402
 
 #: The tiles both geometry slices hold. Kept in step with
-#: `tests/conftest.LAND_SLICE_TILES`, which names the same five.
-SLICE_TILES = ("N05E010", "N40W075", "S15E175", "S30W065", "S40W065")
+#: `tests/conftest.LAND_SLICE_TILES`, which names the same six. `S35W055` holds
+#: no land at all and is cut anyway: an empty clip there is the answer under
+#: test, and the strict slice has no feature to contribute.
+SLICE_TILES = (
+    "N05E010",
+    "N40W075",
+    "S15E175",
+    "S30W065",
+    "S40W065",
+    "S35W055",
+)
 
 
 def build(source: Path, out: Path, tiles=SLICE_TILES) -> Path:

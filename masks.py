@@ -539,6 +539,8 @@ def coverage(mask_counts, lst_statistics, split=None, valid=None) -> dict | None
         has no land to divide by. Without `split` the block holds the two counts
         that need no land geometry and no fraction at all, because naming a
         share of land without land is the defect this function exists to end.
+        A tile with no land at all holds the counts and neither fraction, for the
+        same reason: the buffer alone can put a cell of open sea in the mask.
 
     Raises:
         ValueError: if `split` and `valid` do not arrive together, if more
@@ -572,16 +574,26 @@ def coverage(mask_counts, lst_statistics, split=None, valid=None) -> dict | None
             f"The masks and the raster describe different ground."
         )
         raise ValueError(msg)
-    return {
+    block = {
         "land_pixels": land,
         "valid_pixels": on_land,
         "empty_land_pixels": land - on_land,
-        "valid_fraction": on_land / land,
-        "ged_gap_fraction": int(split["pixels_emissivity_gap_on_strict_land"]) / land,
         "coastal_buffer_pixels": int(split["pixels_coastal_buffer"]),
         "coastal_buffer_valid_pixels": on_coast,
         "processing_mask_pixels": int(split["pixels_processing_mask"]),
     }
+    # A tile can hold no land and still hold pixels. The buffer reaches 25 km
+    # out, so a cell of open sea near a coast enters the processing mask on its
+    # own. MEASURED 2026-09-15, the published `S35W055` is 588,696 pixels of
+    # processing mask over the Atlantic and 0 pixels of land, and it reported
+    # all 588,696 as land. There is no share of land to report there, and 0/0 is
+    # not zero, so both fractions are absent rather than invented.
+    if land:
+        block["valid_fraction"] = on_land / land
+        block["ged_gap_fraction"] = (
+            int(split["pixels_emissivity_gap_on_strict_land"]) / land
+        )
+    return block
 
 
 __all__ = [
