@@ -58,9 +58,31 @@ at least half its scenes produced a valid observation.
 Half is a threshold, so ground a path sees less often falls outside every swath
 and still carries temperatures. Those pixels take the pooled percentile. The
 cross-fade weights one path's estimate against another, and outside every swath
-there is one estimate to weigh, so the blend is the pooled value already. The
-run summary counts them as `n_pooled_fallback`. A nodata pixel keeps the meaning
-it had. No scene imaged that ground.
+there is one estimate to weigh, so the blend is the pooled value already. A
+nodata pixel keeps the meaning it had. No scene imaged that ground.
+
+Every run states how much of its raster went that way. `pooled_share` in
+`summary.json` is `n_pooled_fallback_retained / retained_pixels`, and the item's
+`processing:lineage` carries the same figure in words. The numerator counts
+pooled pixels present in the published raster, after the output mask, so it
+divides by the count the coverage figures already use. `n_pooled_fallback` is
+the kernel's decision before that mask and stays in the summary because the
+measurements in `FINDINGS.md` quote it. Both appear on every tile, zero
+included.
+
+A whole WRS path can stay under the threshold everywhere on one tile. Its
+scenes still load and still reach `qa_count`. They feed the pooled fallback and
+take no part in the blend. The prep run used to refuse such a tile and name
+`--no-feather` as the way past it. A tile then waited on an operator reading
+that message.
+
+The run records the path instead. Its name and its scene count reach three
+places: the prep output, `summary.json` under
+`correction.paths_without_swath`, and the item lineage. The exclusion is
+narrower than the refusal implied.
+`DESTRIPE_MIN_PATH_OBSERVATIONS` already drops a thin path from one pixel's
+blend and renormalises the rest. A swath-less path is the limiting case of a
+rule the composite applies everywhere.
 
 Both corrections run inside the block the graph has already loaded, so neither
 adds a read and neither adds a pass. The prep file is the extra traversal,

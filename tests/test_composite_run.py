@@ -312,6 +312,9 @@ class TestTheFusedEngine:
         for key in (
             "valid_fraction",
             "n_pooled_fallback",
+            "n_pooled_fallback_retained",
+            "retained_pixels",
+            "pooled_share",
             "qa_count_per_month",
             "min_c",
             "mean_c",

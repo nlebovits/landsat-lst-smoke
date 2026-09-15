@@ -283,33 +283,40 @@ def swath_transform(bbox, pixels_per_degree: int, swath_factor: int):
     return transform_for(bbox, pixels_per_degree // swath_factor)
 
 
-def check_every_path_has_a_swath(item_dicts, paths) -> None:
-    """Refuse a tile where some path reached no swath cell at all.
+def paths_without_a_swath(item_dicts, paths) -> dict[str, int]:
+    """The WRS paths that reached no swath cell, and how many scenes each holds.
 
     `feathered_percentile` reduces one subset per path in `paths` and blends
     them. A scene whose path is missing from that list enters no subset, so it
-    loads, costs a read, and contributes nothing. The pixels it observed still
-    reach `qa_count`, and where another path covers them the composite is a
-    value fitted without them. That is a wrong number rather than a missing
-    one, and nothing in the raster marks it.
+    loads, costs a read, and contributes nothing to the blend. The pixels it
+    observed still reach `qa_count`, and where another path covers them the
+    composite is a value fitted without them.
 
     A path drops out when every one of its quads stayed under
     `SWATH_QUAD_SHARE` on every cell. That is the swath definition failing to
-    describe the path, not a fact about the ground, so the tile stops here
-    rather than at the shards.
+    describe the path, not a fact about the ground.
 
-    Raises:
-        SystemExit: naming the paths and the one flag that composites anyway.
+    This used to raise and tell the operator to pass `--no-feather`, which made
+    a whole tile wait on someone noticing a message. The exclusion is narrower
+    than the refusal implied. `DESTRIPE_MIN_PATH_OBSERVATIONS` already drops a
+    thin path from a pixel's blend and renormalises the rest, so a swath-less
+    path is the limiting case of a rule the composite already applies
+    everywhere. What the refusal bought was the operator's attention, and the
+    run records that instead: the count travels in the prep metadata, in
+    `summary.json`, and in the item's `processing:lineage`, where a reader
+    meets it without having read this function.
+
+    Returns:
+        `{path: n_scenes}`, keyed by WRS path, in path order. Empty when every
+        path the items carry reached a swath, which is the ordinary tile.
     """
-    absent = sorted({destripe.path_of(d) for d in item_dicts} - set(paths))
-    if not absent:
-        return
-    raise SystemExit(
-        f"{len(absent)} WRS paths reached no swath cell on this tile: "
-        f"{', '.join(absent)}. Their scenes would load and contribute nothing "
-        f"to any shard, against a swath share of {destripe.SWATH_QUAD_SHARE}. "
-        f"Composite with --no-feather."
-    )
+    counts: dict[str, int] = {}
+    known = set(paths)
+    for item in item_dicts:
+        path = destripe.path_of(item)
+        if path not in known:
+            counts[path] = counts.get(path, 0) + 1
+    return {path: counts[path] for path in sorted(counts)}
 
 
 def memory_model(block: int, scenes_per_block, n_scenes, n_quads, swath_shape, slots):
@@ -820,7 +827,17 @@ def main(argv=None) -> int:  # noqa: C901
             f"{covered.mean():.1%} of the prep grid covered, "
             f"{(inside.sum(axis=0) >= 2).mean():.1%} reached by two or more"
         )
-        check_every_path_has_a_swath(items, paths)
+        swathless = paths_without_a_swath(items, paths)
+        if swathless:
+            named = ", ".join(f"{p} ({n} scenes)" for p, n in swathless.items())
+            print(
+                f"              {len(swathless)} path(s) reached no swath cell "
+                f"against a share of {destripe.SWATH_QUAD_SHARE}: {named}"
+            )
+            print(
+                "              their scenes still feed the pooled fallback. "
+                "The composite reports the share and names them."
+            )
 
     write_artifact(
         args.out_dir,
@@ -851,6 +868,12 @@ def main(argv=None) -> int:  # noqa: C901
             "max_offset_c_reported": args.max_offset_c,
             "swath_quad_share": destripe.SWATH_QUAD_SHARE,
             "paths": list(paths),
+            # The paths this tile's swath definition could not describe, and
+            # the scenes behind each. A slice recomputes the same mapping from
+            # its own item list, so an older prep file without this key still
+            # loads and still reports. Recorded here so the prep file alone
+            # answers what the run will say.
+            "paths_without_swath": swathless,
             "n_scenes": len(items),
             "scenes_without_thermal": dropped,
             "offsets": diagnostics,

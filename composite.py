@@ -944,12 +944,19 @@ def build_graph(
 #: Append to this tuple, never insert. `compute_all` zips it against the
 #: summed flag axis and `fused_block` enumerates it, so a new entry in the
 #: middle silently renames every count after it.
+#: `fallback` counts the kernel's decision, before the output mask. A pooled
+#: pixel the water rule then removes is counted there and is absent from the
+#: published raster, so `fallback / valid` is not a share of anything and can
+#: exceed 1 on a tile that is mostly sea. `fallback_valid` is the same decision
+#: intersected with what survived, which is the numerator of the `pooled_share`
+#: the summary and the item lineage report.
 FLAGS = (
     "fallback",
     "removed_water",
     "qa_zeroed",
     "valid",
     "removed_observed_water",
+    "fallback_valid",
 )
 
 
@@ -1196,11 +1203,13 @@ def finalize_block(
         _write_window(path, lock, pooled_dn[None], y0, x0)
 
     flags = np.zeros((height, width, len(FLAGS)), dtype="uint8")
+    retained = lst != LST_NODATA_DN
     flags[..., 0] = fallback
     flags[..., 1] = valid_before & ~keep
     flags[..., 2] = qa_before & water
-    flags[..., 3] = lst != LST_NODATA_DN
+    flags[..., 3] = retained
     flags[..., 4] = valid_before & keep & observed
+    flags[..., 5] = fallback & retained
     return flags
 
 
