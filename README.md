@@ -297,8 +297,8 @@ It can do nothing for the first.
 
 `qa_count` cannot separate them. It counts pixels where
 `not_fill AND qa_clear AND in_trusted_range` all held. Neither a source fill nor
-a rejected observation raises that count, so the two cases read the same on
-disk: `lst_p95` at 0 and `qa_count` at 0 in all twelve bands.
+a rejected observation raises that count. Both cases read the same on disk.
+`lst_p95` holds 0 and `qa_count` holds 0 in all twelve bands.
 
 Read a straight-edged region of zeros as ground outside Landsat's imaged
 footprint, whatever the scene rectangles say. Those pixels are not cloudy.
