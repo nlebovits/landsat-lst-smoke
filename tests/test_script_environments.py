@@ -109,42 +109,20 @@ def fresh_checkout(tmp_path, *, with_mask=False):
     if not with_mask:
         return work
 
-    import json
+    from conftest import LAND_GEOMETRY, restamped_plan_inputs, write_numobs
 
-    from conftest import (
-        LAND_GEOMETRY,
-        _restamp_parquet,
-        land_geometry_sha256,
-        write_numobs,
-    )
-
-    # Under the names the scripts default to, not the fixtures' own. A fleet
+    # Under the names the commands default to, not the fixtures' own. An
     # instance holds the real geometry at `artifacts/land_buffered.gpkg`, and
     # the point of this checkout is to be that instance.
     shutil.copy2(LAND_GEOMETRY, work / "artifacts" / "land_buffered.gpkg")
     write_numobs(work / "artifacts" / "aster_numobs.tif")
 
-    # And internally consistent. `fleet_plan` refuses a plan whose tile list,
-    # inventory and mosaic disagree about the land geometry, so all three name
-    # the digest of the geometry this checkout actually holds.
-    digest = land_geometry_sha256()
-
-    def stamp_tiles(meta):
-        meta[b"land_geometry_sha256"] = digest.encode()
-        return meta
-
-    def stamp_inventory(meta):
-        manifest = json.loads(meta[b"manifest"])
-        manifest["land_geometry_sha256"] = digest
-        meta[b"manifest"] = json.dumps(manifest).encode()
-        return meta
-
-    _restamp_parquet(
-        ROOT / "artifacts" / "land_tiles.parquet",
-        work / "artifacts" / "land_tiles.parquet",
-        stamp_tiles,
-    )
-    _restamp_parquet(SLICE, work / "artifacts" / SLICE.name, stamp_inventory)
+    # And internally consistent. `lst-fleet-plan` refuses a plan whose tile
+    # list, inventory and mosaic disagree about the land geometry, so all three
+    # name the digest of the geometry this checkout actually holds. The
+    # restamping lives in conftest because the `masked_plan_inputs` fixture
+    # needs the same agreement, and two copies of it can drift apart.
+    restamped_plan_inputs(work / "artifacts")
     return work
 
 

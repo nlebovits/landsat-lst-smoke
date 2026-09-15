@@ -275,11 +275,23 @@ def masked_plan_inputs(tmp_path_factory):
     """
     tiles_source = ROOT / "artifacts" / "land_tiles.parquet"
     if not tiles_source.exists():
-        pytest.skip(f"{tiles_source} is missing; run land_tiles.py")
+        pytest.skip(f"{tiles_source} is missing; run lst-land-tiles")
     if not SLICE_ARTIFACT.exists():
         pytest.skip(f"{SLICE_ARTIFACT} is missing; run tests/make_slice.py")
+    return restamped_plan_inputs(tmp_path_factory.mktemp("plan-inputs"))
+
+
+def restamped_plan_inputs(dest: Path) -> tuple[Path, Path]:
+    """The tile list and the inventory in `dest`, both carrying the slice digest.
+
+    One definition, because two callers need the same three-way agreement and
+    a second copy can drift from it. `tests/test_script_environments.py` builds
+    the same pair inside a checkout it is about to sync.
+
+    Returns:
+        The `(land_tiles, inventory)` pair, written into `dest`.
+    """
     digest = land_geometry_sha256()
-    work = tmp_path_factory.mktemp("plan-inputs")
 
     def stamp_tiles(meta):
         meta[b"land_geometry_sha256"] = digest.encode()
@@ -291,9 +303,13 @@ def masked_plan_inputs(tmp_path_factory):
         meta[b"manifest"] = json.dumps(manifest).encode()
         return meta
 
-    tiles = _restamp_parquet(tiles_source, work / "land_tiles.parquet", stamp_tiles)
+    tiles = _restamp_parquet(
+        ROOT / "artifacts" / "land_tiles.parquet",
+        dest / "land_tiles.parquet",
+        stamp_tiles,
+    )
     inventory = _restamp_parquet(
-        SLICE_ARTIFACT, work / "inventory_slice.parquet", stamp_inventory
+        SLICE_ARTIFACT, dest / SLICE_ARTIFACT.name, stamp_inventory
     )
     return tiles, inventory
 

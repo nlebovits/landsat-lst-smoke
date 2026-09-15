@@ -4,11 +4,30 @@ Read this before FINDINGS.md. FINDINGS.md is the measurement history and it
 records its own mistakes; the merged pull requests carry the current numbers.
 When the two disagree, the pull request wins.
 
+## The layout
+
+The code is one installed package, `lst`, under `src/`. Read
+`src/lst/__init__.py` first: it says what each of the three layers is for.
+
+- `lst.*` is the run path. Nothing in it may import `lst.fleet` or
+  `lst.measure`, and nothing an instance runs may import `lst.stac_reference`.
+  `.importlinter` states both, and `uv run lint-imports` checks them.
+- `fleet/` holds deployment assets and no importable code: `run.sh`,
+  `drive.sh`, `user-data.sh`, `config.toml`, and `upload.py`. `upload.py` keeps
+  a PEP 723 inline block because `drive.sh` copies it to an instance outside
+  the checkout and runs it there. Nothing else in the repository has one.
+- Dependencies are declared once, in `[project] dependencies`. An instance
+  installs with `uv sync --frozen --no-dev`. Never `--only-group`: that
+  installs a group instead of the project, so the console scripts vanish.
+- Commands are console scripts. `uv run lst-prep`, `uv run lst-shard`,
+  `uv run lst-fleet-plan`, and the rest are in `[project.scripts]`. Never
+  `uv run <path>.py` for anything in the package.
+
 ## The pipeline
 
-The composite is one lazy dask-xarray graph per tile (`composite.py`), run
-on a frisky cluster by `shard_lst_p95.py`, after `tile_prep.py` has fitted
-the seam correction. Read `composite.py`'s module docstring first.
+The composite is one lazy dask-xarray graph per tile (`lst.composite`), run
+on a frisky cluster by `lst.shard_lst_p95`, after `lst.tile_prep` has fitted
+the seam correction. Read `lst/composite.py`'s module docstring first.
 
 - The time axis is never chunked. `odc.stac.load` is called with
   `chunks={"time": -1, ...}`, `open_stack` asserts it, and `apply_ufunc`
@@ -18,8 +37,8 @@ the seam correction. Read `composite.py`'s module docstring first.
 - The graph's task count scales with the block count, not the scene count.
   `tests/test_composite_graph.py` asserts it. If a change makes that test
   fail, the change reintroduced per-scene tasks.
-- One implementation per numeric rule. The kernels in `lst_qa.py` and
-  `destripe.py` are numpy and run inside `composite.reduce_block`. Do not add
+- One implementation per numeric rule. The kernels in `lst.lst_qa` and
+  `lst.destripe` are numpy and run inside `composite.reduce_block`. Do not add
   a lazy twin of any of them.
 - The driver does no per-block work before or during submission. Correction
   weights, masks, and statistics are lazy arrays or lazy reductions in the
@@ -85,6 +104,37 @@ domain, disable it in `.vale.ini` with a stated reason and add a test to
 - Run anything over 30 seconds in the background and keep talking.
 - Retry a blocked command once before building a workaround.
 - Read a file before editing it, and edit tracked Python through the Edit
-  tool, never through heredocs or `sed -i`.
+  tool. Not through a heredoc, and not through `sed -i`. See the exception
+  below, which is narrow and has conditions.
 - Work in the worktree you were given. Never `git stash` on the shared stack.
-- Do not add a `measure_*.py` script in the same change as a pipeline change.
+- Do not add a module under `lst.measure` in the same change as a pipeline
+  change. A measurement whose subject moved in the same commit is evidence
+  about neither version.
+
+### The one exception to editing Python by hand
+
+A change that is mechanical, affects more files than anyone will read, and
+fails loudly when wrong may be applied by a script. The move to `src/lst`
+rewrote 172 imports across 44 files that way. Doing it by hand would not have
+been safer: its failure mode is a missed site at edit 97, and a reviewer has
+to trust 172 opaque operations instead of reading one script.
+
+The conditions are the point, and all four hold or the rule stands:
+
+1. **AST-scoped, not textual.** These module names appear in docstrings, skip
+   reasons and assertion messages throughout this repository. A regex cannot
+   tell an import from a sentence; `ast.Import` and `ast.ImportFrom` can.
+2. **Dry run first, and read it.** The dry run for that change surfaced three
+   bugs before anything was written: a rewrite that silently rebound a module
+   name, a rename that shadowed a module with a local, and a per-line
+   substitution that clobbered itself when one line held two references.
+3. **Audit the diff mechanically.** Assert that every changed line is the kind
+   of line you meant to change, and read whatever the audit flags. The Edit
+   tool proves each edit matched; it does not prove the set was complete or
+   that nothing else moved. This replaces that guarantee with a stronger one.
+4. **Every gate green afterwards**, and the script kept where the reviewer can
+   read it.
+
+Convenience is not a condition. If the change needs judgment per site, it is
+not mechanical, and it goes through the Edit tool however many sites there
+are.

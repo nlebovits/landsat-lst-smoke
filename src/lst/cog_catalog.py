@@ -137,6 +137,28 @@ MARKDOWN_MEDIA_TYPE = "text/markdown"
 PNG_MEDIA_TYPE = "image/png"
 HTML_MEDIA_TYPE = "text/html"
 
+#: The two documents Portolan requires beside every catalog and collection.
+#:
+#: One definition, spliced into both. The collection and the root catalog each
+#: carried their own copy of these two dicts, which is 24 lines describing the
+#: same two files. jscpd reported it as the largest duplicate block in the
+#: package. Two copies of a required pair can disagree about a filename, and
+#: the conformance check would then pass on one document and fail on the other.
+PORTOLAN_DOCUMENT_LINKS = (
+    {
+        "rel": "agents",
+        "href": "./AGENTS.md",
+        "type": MARKDOWN_MEDIA_TYPE,
+        "title": "Guidance for AI agents",
+    },
+    {
+        "rel": "describedby",
+        "href": "./README.md",
+        "type": MARKDOWN_MEDIA_TYPE,
+        "title": "Human-readable documentation",
+    },
+)
+
 # --------------------------------------------------------------------------
 # Provenance. The producer is the USGS and the host is whoever runs this
 # pipeline, so a published catalog is a mirror: it MUST carry a `via` link to
@@ -971,18 +993,7 @@ def build_collection(
                 "type": JSON_MEDIA_TYPE,
                 "title": "USGS LandsatLook STAC API",
             },
-            {
-                "rel": "agents",
-                "href": "./AGENTS.md",
-                "type": MARKDOWN_MEDIA_TYPE,
-                "title": "Guidance for AI agents",
-            },
-            {
-                "rel": "describedby",
-                "href": "./README.md",
-                "type": MARKDOWN_MEDIA_TYPE,
-                "title": "Human-readable documentation",
-            },
+            *PORTOLAN_DOCUMENT_LINKS,
         ],
         "updated": updated,
     }
@@ -1009,18 +1020,7 @@ def build_root_catalog(collection_id: str, *, updated: str) -> dict[str, Any]:
                 "type": JSON_MEDIA_TYPE,
                 "title": "Landsat P95 Land Surface Temperature Composite",
             },
-            {
-                "rel": "agents",
-                "href": "./AGENTS.md",
-                "type": MARKDOWN_MEDIA_TYPE,
-                "title": "Guidance for AI agents",
-            },
-            {
-                "rel": "describedby",
-                "href": "./README.md",
-                "type": MARKDOWN_MEDIA_TYPE,
-                "title": "Human-readable documentation",
-            },
+            *PORTOLAN_DOCUMENT_LINKS,
         ],
         "updated": updated,
     }

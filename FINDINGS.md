@@ -3006,40 +3006,66 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 
 ## Files
 
+This table used to name `profile_lst_p95.py`, `measure_seam.py`,
+`sweep_throughput.py`, `item_table.py`, `measure_shard_memory.py`,
+`measure_submit_cost.py`, `dryrun/` and `full/`. Earlier changes deleted all
+eight, and the table kept listing them until this one. It lists what the
+repository holds today.
+
+### The run path, `src/lst/`
+
+| module | contents |
+|---|---|
+| `shard_lst_p95.py` | the driver: resolves the tile, stages, computes, writes the catalog |
+| `tile_prep.py` | one coarse pass per tile for the offsets and the swath geometry |
+| `composite.py` | the graph, both engines, and every numeric rule's one call site |
+| `destripe.py` | the seam rules, the per-path cross-fade, and the prep artifact's schema version |
+| `lst_qa.py` | the QA, fill, range, and nodata rules |
+| `masks.py` | the pixel rules: water, and the ASTER emissivity gap |
+| `aster_ged.py` | the ASTER GED observation counts, built once and read per tile |
+| `land_tiles.py` | the buffered land geometry and the generated tile list |
+| `usgs_inventory.py` | the precompute stage: USGS bulk metadata to one artifact |
+| `tile_inventory.py` | the runtime read of one tile, from one row group |
+| `cog_catalog.py` | writes the COGs and the Portolan catalog |
+| `stac_window.py` | the composite window, and the cache identity it fixes |
+| `stac_reference.py` | Earth Search, kept only as a parity oracle |
+| `staging.py` | fetches each scene object once, beside compute, and the L2SR filter |
+| `memory_sampler.py` | client and worker RSS, sampled from its own process |
+| `observe.py` | frisky tracing, phases, and span collection |
+
+### The fleet, `src/lst/fleet/`
+
+| module | contents |
+|---|---|
+| `planner.py` | the plan, and the checks that run before the fleet does |
+| `launch.py` | one instance per tile, at a pinned commit |
+| `watch.py` | polls object storage for each run's markers |
+| `teardown.py` | terminates, then prices |
+| `cost_report.py` | the labelled, deterministic cost report |
+| `publish_catalog.py` | promotes finished tiles into the public catalog |
+
+### The measurements, `src/lst/measure/`
+
+| module | contents |
+|---|---|
+| `compare_qa_masks.py` | one window, run under both masks, in one process |
+| `ged_registration.py` | the mask against a composite built before it |
+| `land_defects.py` | what each defect in the shared land method selects |
+| `s3_requests.py` | counts the S3 GET requests one run issues |
+| `scene_centre.py` | computed scene centre against the published one |
+| `tile_seam.py` | how far two adjacent tiles disagree about one scene |
+| `stage_bench.py` | which staging setting binds, measured per setting |
+
+### Everything else
+
 | path | contents |
 |---|---|
 | `README.md` | the known issues a consumer of the output has to know |
+| `fleet/` | deployment assets: `run.sh`, `drive.sh`, `user-data.sh`, `config.toml`, and `upload.py`, which `drive.sh` copies to an instance and runs outside the checkout |
 | `tests/make_land_slice.py` | cuts the committed geometry fixture from the full artifact |
-| `shard_lst_p95.py` | the sharded pipeline, the slicer, and the merge |
-| `profile_lst_p95.py` | the array-graph profiling harness |
-| `lst_qa.py` | the QA, fill, range, and nodata rules both P95 paths call |
-| `cog_catalog.py` | writes the COGs and the Portolan catalog the merge emits |
-| `destripe.py` | the two seam rules both P95 paths call: scene offsets, and the per-path cross-fade |
-| `tile_prep.py` | one coarse pass per tile for the offsets and the swath geometry |
-| `measure_seam.py` | four composites from one load, on a shard that straddles a swath |
-| `stac_window.py` | the composite window, and the cache identity it fixes |
-| `land_tiles.py` | the buffered land geometry and the generated tile list |
-| `masks.py` | the pixel rules: water, and the ASTER emissivity gap |
-| `aster_ged.py` | the ASTER GED observation counts, built once and read per tile |
-| `measure_ged_registration.py` | the mask against a composite built before it |
-| `usgs_inventory.py` | the precompute stage: USGS bulk metadata to one artifact |
-| `tile_inventory.py` | the runtime read of one tile, from one row group |
-| `fleet_plan.py` | the driver, and the checks that run before the fleet does |
-| `stac_reference.py` | Earth Search, kept only as a parity oracle |
 | `artifacts/` | `land_tiles.parquet`, the inventory, the buffered geometry, the ASTER GED counts, their manifests, and the committed slices of the three that `.gitignore` excludes |
-| `compare_qa_masks.py` | one shard, run under both masks, in one process |
-| `evidence/qa-parity/` | that comparison, with both rasters and the difference image |
-| `sweep_throughput.py` | configuration sweep driver |
-| `cost_report.py` | the labelled, deterministic cost report |
-| `staging.py` | fetches each scene object once, beside compute, and the L2SR filter |
-| `item_table.py` | the scene table every worker reads instead of receiving |
-| `memory_sampler.py` | client and worker RSS, sampled from its own process |
-| `measure_shard_memory.py` | what a shard costs in memory, and shard size in compute |
-| `measure_s3_requests.py` | counts the S3 GET requests one shard issues |
-| `measure_submit_cost.py` | what one `client.submit` costs, against its payload |
+| `evidence/qa-parity/` | the mask comparison, with both rasters and the difference image |
 | `evidence/s3-requests/` | the request measurement: both shard sizes, and the priced tile |
-| `dryrun/` | local graph-build runs, no cluster and no reads |
 | `evidence/ec2-results/` | eight department-scale runs: stages, memory series, frisky reports |
 | `evidence/fulltile/` | the full-tile run (part files and merged raster gitignored) |
 | `evidence/smoke/`, `evidence/smoke2/`, `evidence/split/`, `evidence/sweep/` | local runs with full frisky spans and traces |
-| `full/`, `full.log` | the 673-scene local run, ended early by a network change |
