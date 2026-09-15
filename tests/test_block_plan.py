@@ -14,18 +14,16 @@ pruning, the placement, and the accounting.
 from __future__ import annotations
 
 import pickle
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from lst import composite
+from lst import destripe
+from lst.masks import transform_for
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import composite  # noqa: E402
-import destripe  # noqa: E402
-from masks import transform_for  # noqa: E402
 
 #: A five degree tile at 3,600 px per degree: 18,000 px, 50 x 50 blocks of 360.
 TILE_BBOX = (-65.0, -35.0, -60.0, -30.0)
@@ -695,7 +693,7 @@ class TestTheDriverBranch:
 
     @staticmethod
     def args_for(tmp_path):
-        import shard_lst_p95
+        from lst import shard_lst_p95
 
         # 5 degrees at 120 px per degree is 600 px, so 40 px blocks make 15x15.
         return shard_lst_p95.parse_args(
@@ -714,7 +712,7 @@ class TestTheDriverBranch:
         )
 
     def call(self, tmp_path, items, boxes, **overrides):
-        import shard_lst_p95
+        from lst import shard_lst_p95
 
         kwargs = {
             "client": FakeClient(),
@@ -773,13 +771,21 @@ class TestTheDriverBranch:
         assert all(out.keep.shape == (40, 40) for out in outs)
         assert all(out.cut for out in outs)
 
-    def test_the_engine_flag_defaults_to_the_graph(self):
-        import shard_lst_p95
+    def test_the_engine_flag_defaults_to_the_fused_one(self):
+        """The default is what production runs, and it was not for a while.
 
-        assert shard_lst_p95.parse_args(["--tile", "S30W065"]).engine == "graph"
+        `fleet/run.sh` has passed `--engine fused` since the fleet existed, and
+        every run FINDINGS.md publishes used it, while the default stayed
+        `graph`. Anyone running the command without the flag got the engine
+        whose build cost scales with the tile's time axis: MEASURED at 62.9 s
+        against 27 ms at 4,776 items.
+        """
+        from lst import shard_lst_p95
+
+        assert shard_lst_p95.parse_args(["--tile", "S30W065"]).engine == "fused"
         assert (
-            shard_lst_p95.parse_args(["--tile", "S30W065", "--engine", "fused"]).engine
-            == "fused"
+            shard_lst_p95.parse_args(["--tile", "S30W065", "--engine", "graph"]).engine
+            == "graph"
         )
 
 

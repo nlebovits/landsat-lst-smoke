@@ -1,34 +1,29 @@
-# ty settings. The repository has no package, so `src.include` names the files
-# to check rather than a source root.
+# ty settings.
 #
-# The search path for `measure_s3_requests.py`, which imports shard_lst_p95
-# after a sys.path insert, comes from `--extra-search-path .` on the command
-# line. The equivalent `[environment] extra-paths` key has no effect for this
-# layout, so both prek.toml and .github/workflows/ci.yml pass the flag.
+# Three directories, and between them they are everything. The previous version
+# of this file listed 20 root filenames and carried a comment saying the list
+# was not everything: it omitted aster_ged, lst_qa, masks, measure_tile_seam,
+# publish_catalog, stage_bench and all of fleet/, so seven modules were not
+# type-checked at all. Naming the package instead makes the omission
+# impossible rather than documented.
+
+# The two extra search paths stay on the command line, in prek.toml and
+# .github/workflows/ci.yml: `--extra-search-path tests --extra-search-path
+# fleet`. The equivalent `[environment] extra-paths` key here is read and has
+# no effect, which was measured rather than assumed.
+#
+# `tests/` because the test modules import their shared fixtures from `conftest`
+# by bare name, the way pytest resolves them. `fleet/` because
+# `tests/test_fleet_launch.py` imports `upload`, which lives there and not in
+# the package.
 
 [src]
-# vulture_whitelist.py is deliberately unresolvable: a vulture whitelist names
-# symbols that exist nowhere, which is the format. Everything else is checked.
 include = [
-  "cog_catalog.py",
-  "compare_qa_masks.py",
-  "composite.py",
-  "cost_report.py",
-  "destripe.py",
-  "fleet_plan.py",
-  "land_tiles.py",
-  "measure_ged_registration.py",
-  "measure_land_defects.py",
-  "measure_s3_requests.py",
-  "measure_scene_centre.py",
-  "memory_sampler.py",
-  "observe.py",
-  "shard_lst_p95.py",
-  "staging.py",
-  "stac_reference.py",
-  "stac_window.py",
-  "tile_inventory.py",
-  "tile_prep.py",
-  "usgs_inventory.py",
+  "src/lst",
   "tests",
+  # Not part of the package, and checked anyway. `fleet/drive.sh` copies this
+  # to an instance outside the checkout and runs it there on its own inline
+  # block, so it cannot import from `lst`. That is the reason it sits outside,
+  # not a reason to leave it unchecked.
+  "fleet/upload.py",
 ]

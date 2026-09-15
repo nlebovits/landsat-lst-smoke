@@ -107,7 +107,14 @@ upload_profile = "source-coop"
 
 [artifacts]
 # `shard_lst_p95.check_mask_inputs` and `tile_inventory.check_manifest` refuse
-# a run whose artifacts disagree with each other, so all six travel together.
+# a run whose artifacts disagree with each other, so all eight travel together.
+#
+# The last two are the unbuffered geometry and its digest. Without them a run
+# still succeeds: `shard_lst_p95` checks for the file and publishes an item
+# that states no land share. That is the wrong default for a published tile,
+# because every share of land divides by this geometry and a tile whose buffer
+# holds only sea has no land to divide by. Shipping it is what lets the item
+# say so.
 files = [
     "tile_scene_inventory.parquet",
     "land_tiles.parquet",
@@ -115,6 +122,8 @@ files = [
     "aster_numobs_manifest.json",
     "land_buffered.gpkg",
     "land_buffered_sha256.txt",
+    "land_strict.gpkg",
+    "land_strict_sha256.txt",
 ]
 
 [upload]

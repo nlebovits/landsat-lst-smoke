@@ -2,16 +2,29 @@
 
 ## The composite
 
-One tile is one lazy dask-xarray graph. `odc.stac.load` opens every scene of
-the tile once, chunked in space and never in time, because a percentile over
-time needs every scene of a pixel in one block. One task masks,
-corrects, reduces, and encodes each block, and the blocks stream from the
-workers into the two COGs the catalog publishes. The driver receives
-nothing larger than one block. Every phase the driver runs around that graph
-is a frisky client phase. The dashboard shows the current phase and its
-elapsed time while it runs.
+One tile is a plan of blocks, and one submitted task per block. Each task
+reads only the scenes whose footprint reaches its own block. It then masks,
+corrects, reduces, and encodes that block.
+
+A percentile over time needs every scene of a pixel together, so each block
+carries its whole time axis. The finished blocks stream from the
+workers into the two COGs the catalog publishes, and the driver receives
+nothing larger than one of them. Every phase the driver runs is a frisky
+client phase. The dashboard shows the current phase and its elapsed time while
+it runs.
+
 `--rehearse N` runs the whole pipeline over N synthetic scenes on local disk,
 with no S3 reads, and tags every line and every artifact `REHEARSAL:`.
+
+`--engine graph` selects a second implementation: one lazy dask-xarray graph
+over the whole tile, through `odc.stac.load`. It applies the same numeric
+rules and writes the same bytes. `tests/test_composite_fused.py` checks that
+block for block.
+
+Runs do not use it. Its build cost scales with the tile's scene count rather
+than with what a block reads, MEASURED at 62.9 s against 27 ms at 4,776
+scenes. It stays because the test suite compares the two against each other,
+and one implementation gives it nothing to compare.
 
 ## Removing the WRS seam
 
@@ -24,27 +37,27 @@ prep file.
 Build the prep file once per tile, then composite against it:
 
 ```bash
-uv run tile_prep.py --tile S30W065 --out-dir ./tile-prep
-uv run shard_lst_p95.py --tile S30W065 --tile-prep ./tile-prep \
+uv run lst-prep --tile S30W065 --out-dir ./tile-prep
+uv run lst-shard --tile S30W065 --tile-prep ./tile-prep \
     --stage-dir /mnt/nvme/stage --out-dir ./run
 frisky observe overview ./run/spans.json
 ```
 
-`tile_prep.py` reads the tile once at a quarter of the output resolution and
+`lst.tile_prep` reads the tile once at a quarter of the output resolution and
 writes two things a block cannot work out for itself.
 
 **One offset per scene.** Landsat Collection 2 surface temperature is
 atmospherically corrected one scene at a time, with a published error of 1 to
-5 K that applies to the whole scene. `tile_prep.py` compares each scene against a
+5 K that applies to the whole scene. `lst.tile_prep` compares each scene against a
 per-pixel median for its own calendar month, pooled across every year in the
 window, then shifts the scene by its bulk deviation. The month is what makes the reference safe to
 subtract. An annual reference hides the seasonal cycle, and
-`nlebovits/landsat-lst` measured that failure at 40.6 C down to 29.8 C. `tile_prep.py`
+`nlebovits/landsat-lst` measured that failure at 40.6 C down to 29.8 C. `lst.tile_prep`
 discards a scene whose offset exceeds 15 C rather than clamping it, which also
 means
 `qa_count` reports the evidence behind the P95 instead of raw availability.
 
-**One swath per WRS path, and cross-fade weights on it.** `tile_prep.py` fits the offset
+**One swath per WRS path, and cross-fade weights on it.** `lst.tile_prep` fits the offset
 at the median, and the product is a P95, so a tail difference between paths
 survives it. Building one percentile per path and blending them on distance to
 each swath edge removes that step. A pixel that only one path covers takes that path's estimate unchanged.
@@ -120,8 +133,8 @@ several, so the item is where the claim belongs.
 ### Evidence, plausibility, and water
 
 A published pixel has a temperature only where every rule below agrees.
-`lst_qa.py` defines the two that describe the estimate, and
-`composite.reduce_block` applies them. `masks.py` defines the one that
+`lst.lst_qa` defines the two that describe the estimate, and
+`composite.reduce_block` applies them. `lst.masks` defines the one that
 describes the place.
 
 | Rule | Threshold | What a nodata pixel says |
@@ -309,7 +322,7 @@ flare inventory read against their coordinates would settle it.
 
 Where ASTER GED caught no clear sky between 2000 and 2008, USGS interpolates
 emissivity from the neighbouring cells and retrieves a temperature anyway, and
-some of those retrievals fail upward. `masks.py` measures how far that region
+some of those retrievals fail upward. `lst.masks` measures how far that region
 reaches and `output_mask` reports it per tile, so a reader can see how much of
 a tile rests on interpolated emissivity. A pixel inside it keeps its
 temperature.

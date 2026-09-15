@@ -4,7 +4,7 @@
 # ///
 """Cut the committed land-geometry fixtures out of the full geometries.
 
-`land_tiles.py --write-geometry` writes 16 MB of buffered Natural Earth, which
+`lst-land-tiles --write-geometry` writes 16 MB of buffered Natural Earth, which
 the large-file hook refuses and which no repository wants in its history. The
 inventory has the same shape of problem and the same answer: the full artifact
 is gitignored and a slice of real rows is committed beside it.
@@ -32,13 +32,11 @@ needs the real artifact and skips without it.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
+from lst.land_tiles import tile_bounds
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-from land_tiles import tile_bounds  # noqa: E402
 
 #: The tiles both geometry slices hold. Kept in step with
 #: `tests/conftest.LAND_SLICE_TILES`, which names the same six. `S35W055` holds
@@ -95,7 +93,7 @@ def main(argv=None) -> int:
     if not source.exists():
         print(
             f"no geometry at {source}. Write it with:\n"
-            f"  uv run land_tiles.py --out artifacts/land_tiles.parquet "
+            f"  uv run lst-land-tiles --out artifacts/land_tiles.parquet "
             f"{flag} {source}"
         )
         return 1

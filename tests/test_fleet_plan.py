@@ -18,18 +18,16 @@ the filter fires on what the archive actually returns.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
+from lst.fleet import planner
+from lst import lst_qa
+from lst import masks
+from lst.tile_inventory import InventoryError, thermal_rows_for_tile
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import fleet_plan  # noqa: E402
-import lst_qa  # noqa: E402
-import masks  # noqa: E402
-from tile_inventory import InventoryError, thermal_rows_for_tile  # noqa: E402
 
 LAND_TILES = ROOT / "artifacts" / "land_tiles.parquet"
 
@@ -41,14 +39,14 @@ LIVE_TILES = ("N05E010", "N40W075", "S30W065")
 
 @pytest.fixture
 def plan(slice_artifact):
-    return fleet_plan.build_plan(LAND_TILES, slice_artifact)
+    return planner.build_plan(LAND_TILES, slice_artifact)
 
 
 @pytest.fixture
 def masked_plan(masked_plan_inputs, numobs_artifact, land_geometry):
     """A plan that also screens the tiles for ASTER emissivity."""
     tiles, inventory = masked_plan_inputs
-    return fleet_plan.build_plan(
+    return planner.build_plan(
         tiles,
         inventory,
         numobs_uri=numobs_artifact,
@@ -151,7 +149,7 @@ class TestARunPointedAtABarrenTile:
     def run(self, slice_artifact, numobs_artifact, land_geometry, tmp_path_factory):
         import json
 
-        import shard_lst_p95
+        from lst import shard_lst_p95
 
         tmp_path = tmp_path_factory.mktemp("barren")
 
@@ -229,7 +227,7 @@ class TestNothingToLaunch:
         pq.write_table(only_barren, path)
 
         with pytest.raises(InventoryError, match="OLI_TIRS_L2SR"):
-            fleet_plan.build_plan(LAND_TILES, path)
+            planner.build_plan(LAND_TILES, path)
 
 
 class TestEmissivityCostsNoTile:
@@ -256,7 +254,7 @@ class TestEmissivityCostsNoTile:
             tmp_path / "numobs.tif", value=8, gaps=[(-65.0, -35.0, -60.0, -30.0)]
         )
         tiles, inventory = masked_plan_inputs
-        plan = fleet_plan.build_plan(
+        plan = planner.build_plan(
             tiles,
             inventory,
             numobs_uri=gapped,
@@ -304,11 +302,11 @@ class TestTheMaskArtifactsHaveToAgree:
     """One land geometry, three holders, one digest."""
 
     def test_a_missing_geometry_stops_the_plan(self, masked_plan_inputs, tmp_path):
-        import masks
+        from lst import masks
 
         with pytest.raises(masks.MaskError, match="--write-geometry"):
             tiles, inventory = masked_plan_inputs
-            fleet_plan.build_plan(
+            planner.build_plan(
                 tiles,
                 inventory,
                 numobs_uri=tmp_path / "numobs.tif",
@@ -318,11 +316,11 @@ class TestTheMaskArtifactsHaveToAgree:
     def test_a_missing_mosaic_stops_the_plan(
         self, masked_plan_inputs, land_geometry, tmp_path
     ):
-        import aster_ged
+        from lst import aster_ged
 
-        with pytest.raises(aster_ged.GedError, match="uv run aster_ged.py"):
+        with pytest.raises(aster_ged.GedError, match="uv run lst-aster-ged"):
             tiles, inventory = masked_plan_inputs
-            fleet_plan.build_plan(
+            planner.build_plan(
                 tiles,
                 inventory,
                 numobs_uri=tmp_path / "absent.tif",
@@ -332,7 +330,7 @@ class TestTheMaskArtifactsHaveToAgree:
     def test_a_mosaic_built_from_another_geometry_stops_the_plan(
         self, masked_plan_inputs, land_geometry, tmp_path
     ):
-        import aster_ged
+        from lst import aster_ged
         import numpy as np
 
         rows, cols = aster_ged.mosaic_shape(60)
@@ -348,7 +346,7 @@ class TestTheMaskArtifactsHaveToAgree:
         )
         with pytest.raises(aster_ged.GedError, match="land_geometry_sha256"):
             tiles, inventory = masked_plan_inputs
-            fleet_plan.build_plan(
+            planner.build_plan(
                 tiles,
                 inventory,
                 numobs_uri=path,
@@ -360,7 +358,7 @@ class TestTheMaskArtifactsHaveToAgree:
     ):
         # 895 machines are about to be launched from this output. A traceback
         # is a worse answer than a line naming the artifact and the fix.
-        code = fleet_plan.main(
+        code = planner.main(
             [
                 "--land-tiles-uri",
                 str(masked_plan_inputs[0]),
@@ -377,5 +375,5 @@ class TestTheMaskArtifactsHaveToAgree:
         assert code == 1
         out = capsys.readouterr().out
         assert "fleet not launched" in out
-        assert "uv run aster_ged.py" in out
+        assert "uv run lst-aster-ged" in out
         assert not (tmp_path / "plan.json").exists()

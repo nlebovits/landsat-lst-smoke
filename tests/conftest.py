@@ -3,7 +3,7 @@
 Two kinds of inventory appear here, and they answer different questions.
 
 `slice_artifact` is a handful of real tiles cut out of the artifact
-`usgs_inventory.py` builds, committed to the repository. It is what lets the
+`lst.usgs_inventory` builds, committed to the repository. It is what lets the
 offline guarantee be tested rather than asserted: the full artifact is 167 MB
 and gitignored, so every test that needed it used to skip, and on a clean
 checkout that was eleven of them, including every socket-blocked check. Real
@@ -22,7 +22,7 @@ production grid with values this suite chooses, so a gap, a thin tier and a
 well-observed cell are all reachable, and none of it depends on a download.
 
 The buffered land geometry is real and committed. `artifacts/land_buffered.gpkg`
-is the file `land_tiles.py --write-geometry` produces, and its digest is the
+is the file `lst-land-tiles --write-geometry` produces, and its digest is the
 `land_geometry_sha256` that `artifacts/land_tiles.parquet` records. The mask
 checks the two against each other, so a synthetic geometry could not exercise
 that check at all.
@@ -31,17 +31,19 @@ that check at all.
 from __future__ import annotations
 
 import json
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from lst.land_tiles import tile_bounds
+from lst.tile_inventory import INVENTORY_SCHEMA_VERSION
 
+#: The repository root. Still needed, because the committed artifacts and the
+#: prose configuration live there. It no longer goes on `sys.path`: `lst` is an
+#: installed package, so the imports above resolve without help, and the 34
+#: inserts this suite used to carry were what made every test file assume the
+#: modules were flat files beside it.
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from land_tiles import tile_bounds  # noqa: E402
-from tile_inventory import INVENTORY_SCHEMA_VERSION  # noqa: E402
 
 #: The committed slice. Built by `tests/make_slice.py`.
 SLICE_ARTIFACT = ROOT / "artifacts" / "inventory_slice.parquet"
@@ -217,9 +219,7 @@ def write_numobs(path, *, value=8, gaps=(), lat_limit=None):
         The path written.
     """
     import numpy as np
-
-    import aster_ged
-    import masks
+    from lst import aster_ged, masks
 
     lat_limit = aster_ged.LATITUDE_LIMIT if lat_limit is None else lat_limit
     rows, cols = aster_ged.mosaic_shape(lat_limit)
@@ -249,7 +249,7 @@ def land_geometry_sha256() -> str:
     and `land_tiles_for_slice` restamps the tile list to match. The tie is the
     thing under test; which bytes it points at is not.
     """
-    import masks
+    from lst import masks
 
     if not LAND_GEOMETRY.exists():
         return "0" * 64
@@ -297,11 +297,23 @@ def masked_plan_inputs(tmp_path_factory):
     """
     tiles_source = ROOT / "artifacts" / "land_tiles.parquet"
     if not tiles_source.exists():
-        pytest.skip(f"{tiles_source} is missing; run land_tiles.py")
+        pytest.skip(f"{tiles_source} is missing; run lst-land-tiles")
     if not SLICE_ARTIFACT.exists():
         pytest.skip(f"{SLICE_ARTIFACT} is missing; run tests/make_slice.py")
+    return restamped_plan_inputs(tmp_path_factory.mktemp("plan-inputs"))
+
+
+def restamped_plan_inputs(dest: Path) -> tuple[Path, Path]:
+    """The tile list and the inventory in `dest`, both carrying the slice digest.
+
+    One definition, because two callers need the same three-way agreement and
+    a second copy can drift from it. `tests/test_script_environments.py` builds
+    the same pair inside a checkout it is about to sync.
+
+    Returns:
+        The `(land_tiles, inventory)` pair, written into `dest`.
+    """
     digest = land_geometry_sha256()
-    work = tmp_path_factory.mktemp("plan-inputs")
 
     def stamp_tiles(meta):
         meta[b"land_geometry_sha256"] = digest.encode()
@@ -313,9 +325,13 @@ def masked_plan_inputs(tmp_path_factory):
         meta[b"manifest"] = json.dumps(manifest).encode()
         return meta
 
-    tiles = _restamp_parquet(tiles_source, work / "land_tiles.parquet", stamp_tiles)
+    tiles = _restamp_parquet(
+        ROOT / "artifacts" / "land_tiles.parquet",
+        dest / "land_tiles.parquet",
+        stamp_tiles,
+    )
     inventory = _restamp_parquet(
-        SLICE_ARTIFACT, work / "inventory_slice.parquet", stamp_inventory
+        SLICE_ARTIFACT, dest / SLICE_ARTIFACT.name, stamp_inventory
     )
     return tiles, inventory
 

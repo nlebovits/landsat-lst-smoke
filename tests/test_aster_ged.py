@@ -21,18 +21,16 @@ arithmetic is what these check, and that does not need real observations.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from lst import aster_ged
+from lst.land_tiles import tile_bounds
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import aster_ged  # noqa: E402
 from conftest import write_numobs  # noqa: E402
-from land_tiles import tile_bounds  # noqa: E402
 
 
 class TestTheGranuleFilename:
@@ -119,7 +117,7 @@ class TestNumobsForBbox:
         than 0 to 35, and a bilinear one would smear its edges. Both stay
         invisible in a tile-wide statistic.
         """
-        import masks
+        from lst import masks
 
         rows, cols = aster_ged.mosaic_shape(5)
         mosaic = np.zeros((rows, cols), dtype="uint8")
@@ -150,7 +148,7 @@ class TestNumobsForBbox:
             aster_ged.numobs_for_bbox(artifact, (0.0, 58.0, 5.0, 63.0), (500, 500))
 
     def test_a_missing_artifact_names_the_build_command(self, tmp_path):
-        with pytest.raises(aster_ged.GedError, match="uv run aster_ged.py"):
+        with pytest.raises(aster_ged.GedError, match="uv run lst-aster-ged"):
             aster_ged.numobs_for_bbox(
                 tmp_path / "absent.tif", tile_bounds("S30W065"), (500, 500)
             )
@@ -190,7 +188,7 @@ class TestTheManifest:
         message = str(exc.value)
         assert "land_geometry_sha256" in message
         assert "f" * 64 in message
-        assert "land_tiles.py first" in message
+        assert "lst-land-tiles first" in message
 
     def test_a_stale_schema_is_refused(self, numobs_artifact):
         manifest = aster_ged.read_manifest(numobs_artifact) | {"schema_version": 0}
@@ -240,7 +238,7 @@ class TestTheManifest:
         )
 
     def test_a_missing_artifact_names_the_build_command(self, tmp_path):
-        with pytest.raises(aster_ged.GedError, match="uv run aster_ged.py"):
+        with pytest.raises(aster_ged.GedError, match="uv run lst-aster-ged"):
             aster_ged.read_manifest(tmp_path / "absent.tif")
 
     def test_a_raster_without_a_manifest_is_refused(self, tmp_path):
@@ -388,13 +386,13 @@ class TestCoverageIsNotTheCount:
         assert covered.all()
 
     def test_a_read_cell_at_zero_is_a_gap(self, partial):
-        import masks
+        from lst import masks
 
         gap = masks.emissivity_gap((-65.0, -31.0, -64.0, -30.0), 100, partial)
         assert gap.all()
 
     def test_an_unread_cell_is_not_a_gap(self, partial):
-        import masks
+        from lst import masks
 
         # Both cells hold a count of zero. Only the read one is evidence.
         gap = masks.emissivity_gap((-60.0, -31.0, -59.0, -30.0), 100, partial)

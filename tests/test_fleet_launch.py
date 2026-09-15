@@ -14,13 +14,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from lst.fleet import launch, teardown, watch
 
 ROOT = Path(__file__).resolve().parents[1]
+
+#: The one `sys.path` insert this suite still needs. `fleet/upload.py` is not
+#: part of the package and must not be: `fleet/drive.sh` copies it to an
+#: instance outside the checkout and runs it there, so a box whose clone is
+#: broken still uploads what it produced. It has no importable home, so the
+#: directory holding it goes on the path.
 sys.path.insert(0, str(ROOT / "fleet"))
 
-import launch  # noqa: E402
 import upload  # noqa: E402
-import watch  # noqa: E402
 
 SHA = "9e2b703abec9756945686d5e8037788a666d28e6"
 
@@ -94,7 +99,7 @@ class TestTheCallCarriesWhatTeardownNeeds:
             assert value in argv, value
 
     def test_the_purpose_tag_is_the_one_cost_report_filters_on(self, cfg):
-        """`cost_report.py --tag Key=Value` is the only way a finished run gets
+        """`lst-cost-report --tag Key=Value` is the only way a finished run gets
         priced, and an untagged instance cannot be found by teardown either."""
         spec = launch.tag_spec(cfg, "lst-T-1", "T")
         assert f"{{Key=purpose,Value={cfg['tags']['purpose']}}}" in spec
@@ -196,7 +201,7 @@ class TestTheWatcherNamesTheState:
 
 class TestTeardownPricesBeforeItTerminates:
     def test_the_terminate_call_names_every_instance(self, cfg):
-        import teardown
+        from lst.fleet import teardown
 
         argv = teardown.terminate_argv(cfg, ["i-1", "i-2"])
         assert argv[:3] == ["aws", "ec2", "terminate-instances"]
@@ -221,9 +226,15 @@ class TestTheConfigCarriesTheKnowledge:
         ):
             assert section in cfg
 
-    def test_the_six_artifacts_travel_together(self, cfg):
+    def test_the_artifacts_travel_together(self, cfg):
         """`check_mask_inputs` and `check_manifest` refuse a run whose
-        artifacts disagree, so a partial set is worse than none."""
+        artifacts disagree, so a partial set is worse than none.
+
+        The unbuffered geometry and its digest are the two most recent. Without
+        them a run still succeeds and publishes an item stating no land share,
+        which is the quietest of the failures this set exists to prevent: the
+        tile looks finished and the field a reader wants is absent.
+        """
         assert set(cfg["artifacts"]["files"]) == {
             "tile_scene_inventory.parquet",
             "land_tiles.parquet",
@@ -231,7 +242,20 @@ class TestTheConfigCarriesTheKnowledge:
             "aster_numobs_manifest.json",
             "land_buffered.gpkg",
             "land_buffered_sha256.txt",
+            "land_strict.gpkg",
+            "land_strict_sha256.txt",
         }
+
+    def test_run_sh_downloads_every_artifact_the_config_names(self, cfg):
+        """The two lists are written separately and neither reads the other.
+
+        `fleet/run.sh` carries its own literal list inside a heredoc, so a file
+        added to the config alone is never fetched, and the instance fails
+        several minutes into billing rather than here.
+        """
+        script = (ROOT / "fleet" / "run.sh").read_text()
+        for name in cfg["artifacts"]["files"]:
+            assert name in script, f"run.sh never downloads {name}"
 
     def test_the_deadline_clears_the_measured_wall_clock(self, cfg):
         """MEASURED tile wall clock is 26 to 43 minutes. Too tight kills a slow
@@ -255,7 +279,7 @@ class TestTheRunScriptKeepsTheLoadBearingFlags:
     @pytest.mark.parametrize(
         "flag,why",
         [
-            ("--engine fused", "not the default; changes speed and the memory model"),
+            ("--engine fused", "the default now, and stated so a run names its engine"),
             ("--stage-dir /mnt/nvme/stage", "the default is the 150 GB root volume"),
             ("--keep-staged", "without it the two passes pay for every object twice"),
             ("--tile-prep", "omitted, it composites pooled and leaves the WRS seam"),
@@ -380,7 +404,7 @@ class TestTheWatcherSurvivesAnExpiredToken:
 
 
 class TestTeardownTerminatesBeforeItPrices:
-    """`cost_report.py` excludes instances that are still running. Pricing
+    """`lst.fleet.cost_report` excludes instances that are still running. Pricing
     first reported one instance of five and put $2.98 against a run that cost
     about $12.60.
     """
@@ -402,7 +426,8 @@ class TestTeardownTerminatesBeforeItPrices:
         out = sp.run(
             [
                 sys.executable,
-                str(ROOT / "fleet" / "teardown.py"),
+                "-m",
+                teardown.__name__,
                 "--manifest",
                 str(manifest),
                 "--dry-run",
@@ -416,5 +441,5 @@ class TestTeardownTerminatesBeforeItPrices:
     def test_it_waits_for_the_state_to_settle(self):
         """`StateTransitionReason` carries the timestamp the report prices
         against, and it is not set the instant the call returns."""
-        source = (ROOT / "fleet" / "teardown.py").read_text()
+        source = Path(teardown.__file__).read_text()
         assert "instance-terminated" in source

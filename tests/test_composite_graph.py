@@ -15,7 +15,6 @@ array graph lacked:
 
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 
@@ -23,13 +22,9 @@ import dask
 import numpy as np
 import pytest
 import xarray as xr
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-import composite  # noqa: E402
-import destripe  # noqa: E402
-from lst_qa import (  # noqa: E402
+from lst import composite
+from lst import destripe
+from lst.lst_qa import (
     LST_NODATA_DN,
     LST_OFFSET,
     LST_SCALE,
@@ -40,7 +35,10 @@ from lst_qa import (  # noqa: E402
     encode_celsius,
     masked_celsius,
 )
-from masks import transform_for  # noqa: E402
+from lst.masks import transform_for
+
+ROOT = Path(__file__).resolve().parent.parent
+
 
 QA_CLEAR = 0b1000000
 QA_CLOUD = QA_CLEAR | (1 << 3)
@@ -275,7 +273,7 @@ class TestTheTimeAxis:
             graph([{} for _ in range(N_TIME)])
 
     def test_quantile_is_not_used(self):
-        source = (ROOT / "composite.py").read_text()
+        source = Path(composite.__file__).read_text()
         assert ".quantile(" not in source
 
 
@@ -364,7 +362,7 @@ class TestTheGraphShape:
 
 def fake_item(scene_id, bbox, datetime, path):
     """A STAC item with a footprint and asset hrefs that no task will open."""
-    from tile_inventory import ASSET_TEMPLATES
+    from lst.tile_inventory import ASSET_TEMPLATES
 
     west, south, east, north = bbox
     ring = [(west, south), (east, south), (east, north), (west, north), (west, south)]

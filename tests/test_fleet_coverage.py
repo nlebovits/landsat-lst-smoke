@@ -10,7 +10,7 @@ Neither number predicts swath coverage. A swath is counted from valid
 observations over the scene set the window selects, and the gap region is a
 property of an emissivity mosaic built from other granules for another purpose.
 A tile with no gap at all can still hold a WRS path that reaches no swath cell,
-which is what `tile_prep.paths_without_a_swath` reports at run time.
+which is what `destripe.paths_without_a_swath` reports at run time.
 
 Every geometry here is real and committed. `artifacts/land_strict_slice.gpkg`
 is the unbuffered geometry clipped to `conftest.LAND_SLICE_TILES`, and
@@ -21,18 +21,15 @@ gives the same answer there as the whole world would.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
+from conftest import write_numobs
+from lst import masks
+from lst.fleet import planner
+from lst.land_tiles import tile_bounds
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-import fleet_plan  # noqa: E402
-import masks  # noqa: E402
-from land_tiles import tile_bounds  # noqa: E402
-from tests.conftest import write_numobs  # noqa: E402
 
 #: In the geometry slice, and mostly land.
 LAND_TILE = "N05E010"
@@ -49,8 +46,8 @@ SEA_TILE = "S35W055"
 
 @pytest.fixture
 def screen(strict_land_geometry, numobs_artifact):
-    def build(tile_id, numobs=None, ppd=fleet_plan.PLANNING_PIXELS_PER_DEGREE):
-        return fleet_plan.coverage_row(
+    def build(tile_id, numobs=None, ppd=planner.PLANNING_PIXELS_PER_DEGREE):
+        return planner.coverage_row(
             tile_id,
             numobs_uri=numobs or numobs_artifact,
             strict_land_geometry_uri=strict_land_geometry,
@@ -65,7 +62,7 @@ class TestTheScreenMeasuresOneTile:
         """A 5 degree tile is 500 by 500 here and 18,000 by 18,000 at the
         compositing grid, so the screen costs 1/1296 of the pixels."""
         row = screen(LAND_TILE)
-        assert fleet_plan.PLANNING_PIXELS_PER_DEGREE == 100
+        assert planner.PLANNING_PIXELS_PER_DEGREE == 100
         assert row["planning_pixels"] == 500 * 500
         assert row["planning_pixels_per_degree"] == 100
 
@@ -111,7 +108,7 @@ class TestTheScreenMeasuresOneTile:
         strict = screen(COAST_TILE)["strict_land_pixels"]
         buffered = masks.land_mask(
             tile_bounds(COAST_TILE),
-            fleet_plan.PLANNING_PIXELS_PER_DEGREE,
+            planner.PLANNING_PIXELS_PER_DEGREE,
             land_geometry,
         )
         assert strict < int(buffered.sum())
@@ -190,7 +187,7 @@ class TestTheScreenCoversEveryLandTile:
         }
 
     def rows(self, plan, strict, numobs):
-        return fleet_plan.coverage_rows(
+        return planner.coverage_rows(
             plan,
             numobs_uri=numobs,
             strict_land_geometry_uri=strict,
@@ -253,7 +250,7 @@ class TestTheOutputIsDeterministic:
         }
 
     def rows(self, strict, numobs):
-        return fleet_plan.coverage_rows(
+        return planner.coverage_rows(
             self.plan(),
             numobs_uri=numobs,
             strict_land_geometry_uri=strict,
@@ -268,10 +265,10 @@ class TestTheOutputIsDeterministic:
     def test_two_runs_write_the_same_bytes(
         self, strict_land_geometry, numobs_artifact, tmp_path
     ):
-        first = fleet_plan.write_coverage_rows(
+        first = planner.write_coverage_rows(
             tmp_path / "a.jsonl", self.rows(strict_land_geometry, numobs_artifact)
         )
-        second = fleet_plan.write_coverage_rows(
+        second = planner.write_coverage_rows(
             tmp_path / "b.jsonl", self.rows(strict_land_geometry, numobs_artifact)
         )
         assert first.read_bytes() == second.read_bytes()
@@ -280,7 +277,7 @@ class TestTheOutputIsDeterministic:
         self, strict_land_geometry, numobs_artifact, tmp_path
     ):
         rows = self.rows(strict_land_geometry, numobs_artifact)
-        path = fleet_plan.write_coverage_rows(tmp_path / "c.jsonl", rows)
+        path = planner.write_coverage_rows(tmp_path / "c.jsonl", rows)
         lines = path.read_text().splitlines()
         assert len(lines) == len(rows)
         assert [json.loads(line)["tile_id"] for line in lines] == [
@@ -291,7 +288,7 @@ class TestTheOutputIsDeterministic:
         self, strict_land_geometry, numobs_artifact, tmp_path
     ):
         rows = self.rows(strict_land_geometry, numobs_artifact)
-        path = fleet_plan.write_coverage_rows(tmp_path / "d.jsonl", rows)
+        path = planner.write_coverage_rows(tmp_path / "d.jsonl", rows)
         assert path.read_text().endswith("\n")
 
 
@@ -302,21 +299,21 @@ class TestTheReportStatesWhatItDoesNotDo:
             {"tile_id": "B", "strict_land_pixels": 900, "ged_gap_share": 0.01},
         ]
         lines: list[str] = []
-        fleet_plan.report_coverage(rows, say=lines.append)
+        planner.report_coverage(rows, say=lines.append)
         text = " ".join(lines)
         assert "not excluded" in text
         assert "1 tiles above 40%" in text
 
     def test_an_empty_screen_reports_nothing_rather_than_dividing_by_zero(self):
         lines: list[str] = []
-        fleet_plan.report_coverage([], say=lines.append)
+        planner.report_coverage([], say=lines.append)
         assert lines == []
 
     def test_a_screen_of_nothing_but_landless_tiles_says_so(self):
         """No row carries a share, so there is no distribution to report."""
         rows = [{"tile_id": "A", "strict_land_pixels": 0}]
         lines: list[str] = []
-        fleet_plan.report_coverage(rows, say=lines.append)
+        planner.report_coverage(rows, say=lines.append)
         assert "no gap share is defined" in " ".join(lines)
 
     def test_it_names_the_tiles_with_no_land_at_this_resolution(self):
@@ -328,7 +325,7 @@ class TestTheReportStatesWhatItDoesNotDo:
             {"tile_id": "B", "strict_land_pixels": 500, "ged_gap_share": 0.0},
         ]
         lines: list[str] = []
-        fleet_plan.report_coverage(rows, say=lines.append)
+        planner.report_coverage(rows, say=lines.append)
         assert "1 tiles hold no strict-land pixel" in " ".join(lines)
 
     def test_a_landless_tile_is_not_counted_as_a_tile_with_no_gap(self):
@@ -339,7 +336,7 @@ class TestTheReportStatesWhatItDoesNotDo:
             {"tile_id": "B", "strict_land_pixels": 500, "ged_gap_share": 0.9},
         ]
         lines: list[str] = []
-        fleet_plan.report_coverage(rows, say=lines.append)
+        planner.report_coverage(rows, say=lines.append)
         text = " ".join(lines)
         assert "on the 1 tiles that hold land" in text
         assert "0% under 5%" in text

@@ -1,6 +1,6 @@
 """Which pixels the product describes, and the rule that decides.
 
-`land_tiles.py` opens with the contract this module completes: one geometry
+`lst.land_tiles` opens with the contract this module completes: one geometry
 answers both "which tiles does the fleet run" and "which pixels carry a
 temperature". A tile chosen from one geometry and masked with another produces
 tiles that are entirely nodata, and pixels no tile ever visits. Until now only
@@ -34,16 +34,16 @@ so both bands go.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from lst import masks
+from lst.land_tiles import read_land_tiles, tile_bounds
+from lst.lst_qa import LST_NODATA_DN
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import masks  # noqa: E402
 from conftest import (  # noqa: E402
     FULL_LAND_GEOMETRY,
     needs_full_land_geometry,
@@ -51,8 +51,6 @@ from conftest import (  # noqa: E402
     needs_strict_land_geometry,
     write_numobs,
 )
-from land_tiles import read_land_tiles, tile_bounds  # noqa: E402
-from lst_qa import LST_NODATA_DN  # noqa: E402
 
 LAND_TILES = ROOT / "artifacts" / "land_tiles.parquet"
 
@@ -62,7 +60,7 @@ LAND_TILES = ROOT / "artifacts" / "land_tiles.parquet"
 GED_MANIFEST = ROOT / "artifacts" / "aster_numobs_manifest.json"
 
 #: The buffered geometry's digest, committed so CI can check the tie without
-#: the 16 MB file. `land_tiles.py --write-geometry` writes both.
+#: the 16 MB file. `lst-land-tiles --write-geometry` writes both.
 RECORDED_GEOMETRY_SHA256 = ROOT / "artifacts" / "land_buffered_sha256.txt"
 
 #: The unbuffered geometry's digest, committed for the same reason. A published
@@ -630,7 +628,7 @@ class TestTheEmissivityRule:
         """
         import numpy as np
 
-        import aster_ged
+        from lst import aster_ged
 
         rows, cols = aster_ged.mosaic_shape(60)
         manifest = aster_ged.build_manifest(

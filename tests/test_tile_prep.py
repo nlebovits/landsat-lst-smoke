@@ -19,18 +19,15 @@ a fixture with known contents.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 import xarray as xr
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import destripe  # noqa: E402
-import tile_prep  # noqa: E402
-from lst_qa import LWIR_OFFSET_C, LWIR_SCALE  # noqa: E402
+from lst import destripe
+from lst import tile_prep
+from lst.lst_qa import LWIR_OFFSET_C, LWIR_SCALE
 
 NY = NX = 8
 RATIO = 2
@@ -407,21 +404,21 @@ class TestASwathlessPathIsReportedNotRefused:
 
     def test_one_swathless_path_is_named_with_its_scene_count(self):
         items = make_items()
-        assert tile_prep.paths_without_a_swath(items, (WEST,)) == {EAST: 6}
+        assert destripe.paths_without_a_swath(items, (WEST,)) == {EAST: 6}
 
     def test_every_swathless_path_is_named(self):
         items = make_items()
-        assert tile_prep.paths_without_a_swath(items, ()) == {WEST: 6, EAST: 6}
+        assert destripe.paths_without_a_swath(items, ()) == {WEST: 6, EAST: 6}
 
     def test_it_never_raises(self):
         """The whole point of the change. No tile stops here any more."""
         items = make_items()
         for paths in ((), (WEST,), (EAST,), (WEST, EAST)):
-            tile_prep.paths_without_a_swath(items, paths)
+            destripe.paths_without_a_swath(items, paths)
 
     def test_every_path_present_reports_nothing(self):
         items = make_items()
-        assert tile_prep.paths_without_a_swath(items, (WEST, EAST)) == {}
+        assert destripe.paths_without_a_swath(items, (WEST, EAST)) == {}
 
     def test_a_path_the_scenes_never_carry_is_not_reported(self):
         """The report is one-way. A prep file may name more paths than it needs.
@@ -431,18 +428,18 @@ class TestASwathlessPathIsReportedNotRefused:
         the other direction, which would name a path the tile never held.
         """
         items = make_items()
-        assert tile_prep.paths_without_a_swath(items, (WEST, EAST, "999")) == {}
+        assert destripe.paths_without_a_swath(items, (WEST, EAST, "999")) == {}
 
     def test_the_counts_are_the_scenes_behind_each_path(self):
         """A scene count is what tells a large exclusion from a trivial one."""
         items = make_items()
-        counts = tile_prep.paths_without_a_swath(items, ())
+        counts = destripe.paths_without_a_swath(items, ())
         assert sum(counts.values()) == len(items)
 
     def test_the_order_is_the_path_order(self):
         """Deterministic output. The same tile writes the same lineage twice."""
         items = make_items()
-        counts = tile_prep.paths_without_a_swath(items, ())
+        counts = destripe.paths_without_a_swath(items, ())
         assert list(counts) == sorted(counts)
 
 
@@ -537,7 +534,7 @@ class TestTheStagingThreadCount:
     """`tile_prep` stages the whole tile, and until now could not be told how.
 
     It called `staging.stage_scenes` with no thread argument, so every prep
-    took `min(64, 4 x cores)`. MEASURED by `stage_bench.py` on an
+    took `min(64, 4 x cores)`. MEASURED by `lst.measure.stage_bench` on an
     `m6id.16xlarge` over 200 objects: 64 threads 233 MB/s, 128 threads
     321 MB/s, 192 threads 293, 256 threads 277. Staging is about 45% of a
     tile's wall clock.
@@ -553,7 +550,7 @@ class TestTheStagingThreadCount:
 
     def test_none_reproduces_the_measured_default(self):
         """`FetchSettings.build` has to read None as unset, not as zero."""
-        import staging
+        from lst import staging
 
         assert (
             staging.FetchSettings.build(threads=None).threads
@@ -562,7 +559,7 @@ class TestTheStagingThreadCount:
         assert staging.FetchSettings.build(threads=128).threads == 128
 
     def test_a_zero_thread_count_is_refused_rather_than_treated_as_unset(self):
-        import staging
+        from lst import staging
 
         with pytest.raises(staging.StagingError, match="threads"):
             staging.FetchSettings.build(threads=0)

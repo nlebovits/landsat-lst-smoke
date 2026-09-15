@@ -24,18 +24,16 @@ Reads `s3://usgs-landsat`, which is requester-pays. Opt-in and capped:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from lst import destripe
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 pytestmark = [pytest.mark.s3, pytest.mark.timeout(1800)]
 
-import destripe  # noqa: E402
 
 ARTIFACT = ROOT / "artifacts" / "tile_scene_inventory.parquet"
 
@@ -59,9 +57,9 @@ def loaded():
 
     import dask
 
-    import composite
-    import shard_lst_p95
-    from tile_inventory import items_for_tile
+    from lst import composite
+    from lst import shard_lst_p95
+    from lst.tile_inventory import items_for_tile
 
     shard_lst_p95.configure_read_env("earth-search")
     inventory, boxes = items_for_tile(ARTIFACT, TILE)

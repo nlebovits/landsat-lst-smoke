@@ -15,9 +15,14 @@ import sys
 from pathlib import Path
 
 import pytest
+from lst.fleet import cost_report
 
 ROOT = Path(__file__).resolve().parent.parent
-COST_REPORT = ROOT / "cost_report.py"
+
+
+#: The CLI under test, located through the module rather than spelled as a root
+#: filename, so that moving the module moves this with it.
+COST_REPORT = Path(cost_report.__file__)
 
 # The full-tile fleet, exactly as FINDINGS.md records it.
 FLEET = "c6i.16xlarge:4:642"

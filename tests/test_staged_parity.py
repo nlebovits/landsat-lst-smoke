@@ -19,19 +19,17 @@ costs about $0.09 in egress from outside the region, and a few cents inside.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import dask
 import numpy as np
 import pytest
+from lst import composite
+from lst import shard_lst_p95 as S
+from lst import staging
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import composite  # noqa: E402
-import shard_lst_p95 as S  # noqa: E402
-import staging  # noqa: E402
 
 pytestmark = [pytest.mark.s3, pytest.mark.timeout(1800)]
 

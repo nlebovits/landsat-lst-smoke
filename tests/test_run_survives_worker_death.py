@@ -36,9 +36,11 @@ import time
 from pathlib import Path
 
 import pytest
+from lst import composite
+from lst import shard_lst_p95
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+
 
 TILE = "S30W065"
 
@@ -59,7 +61,7 @@ def argv(out_dir, *extra):
     """
     return [
         sys.executable,
-        str(ROOT / "shard_lst_p95.py"),
+        shard_lst_p95.__file__,
         "--tile",
         TILE,
         "--rehearse",
@@ -201,12 +203,15 @@ class TestABlockErringFailsTheRun:
         reach them. Same reason `test_script_environments.py` copies before it
         runs.
         """
+        # The package, copied whole. It used to be a flat glob of the root,
+        # which stopped copying anything the moment the modules moved under
+        # src/. Copying the package directory tracks the layout instead of
+        # restating it.
         work = tmp_path / "checkout"
-        work.mkdir(parents=True)
-        for script in ROOT.glob("*.py"):
-            shutil.copy2(script, work / script.name)
+        package = Path(composite.__file__).parent
+        shutil.copytree(package, work / package.name)
 
-        target = work / "composite.py"
+        target = work / package.name / Path(composite.__file__).name
         source = target.read_text()
         marker = "def reduce_block("
         # Past the signature's closing paren and past the docstring, so the
@@ -222,7 +227,12 @@ class TestABlockErringFailsTheRun:
         proc = subprocess.run(
             [
                 sys.executable,
-                "shard_lst_p95.py",
+                # `-m` with `cwd=work`, so `work` lands at sys.path[0] and the
+                # broken copy of the package shadows the installed one. Naming
+                # the file directly would put `work/lst` on the path instead,
+                # and its own `from lst import ...` would not resolve.
+                "-m",
+                shard_lst_p95.__name__,
                 *argv(out)[2:],
                 # Small: the run is expected to die on the first block, so
                 # there is nothing to be gained by writing 200 scenes first.

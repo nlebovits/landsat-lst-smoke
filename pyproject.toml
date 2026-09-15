@@ -1,28 +1,31 @@
-# This repository is a set of standalone PEP 723 benchmark scripts. Each one
-# still declares its own inline dependencies and still runs with `uv run
-# <script>.py` against a per-script environment.
+# The code is one installed package, `lst`, under `src/`. This file is where
+# its dependencies are declared, once.
 #
-# This file exists so that the quality gates have somewhere to resolve
-# against. `ty` cannot type-check an import it cannot find, and pytest cannot
-# import a script whose dependencies are not installed. The `dev` group is the
-# union of every script's inline block, plus the two tools.
+# It used to be otherwise. Every script carried a PEP 723 inline block and ran
+# with `uv run <script>.py` against a per-script environment, and this file
+# held a `dev` group described as "the union of every script's inline block".
+# It was not the union. deptry found `pystac` in five blocks and not here, and
+# `botocore` and `affine` imported and declared nowhere at all. Two
+# declarations of the same fact drift, and a comment asking the next person to
+# keep them in step does not stop that.
 #
-# Keep the two in step. A dependency added to a script's PEP 723 block belongs
-# here as well.
+# One exception remains, and it is deliberate: `fleet/upload.py` keeps its
+# inline block. `fleet/drive.sh` copies it to an instance outside the checkout
+# and runs it there, so it has to resolve without this project.
 
 [project]
 name = "landsat-lst-smoke"
 version = "0.0.0"
 description = "Profiling a p95 composite of land surface temperature"
 requires-python = ">=3.12,<3.15"
-dependencies = []
-
-[dependency-groups]
-dev = [
-  # The union of the inline blocks in shard_lst_p95.py, composite.py,
-  # measure_s3_requests.py and compare_qa_masks.py. cost_report.py is standard
-  # library only.
+dependencies = [
   "rasterio",
+  # `destripe.py` imports `affine` directly, to build the swath transform. It
+  # arrives with rasterio today, so the import works and nothing declares it.
+  # deptry reports it as DEP001, which is correct: a rasterio release that
+  # stopped depending on affine would break de-striping and no gate would say
+  # why.
+  "affine",
   "frisky>=0.7.2",
   # Pinned: frisky 0.7.2 imports the private `dask._task_spec` and
   # `dask._expr` modules and declares no dask bound of its own.
@@ -31,14 +34,22 @@ dev = [
   # The graph reprojects the cross-fade weights and reads the tile geobox
   # through odc.geo, so it is a direct dependency and not odc-stac's.
   "odc-geo",
+  # `composite.py` and `tile_prep.py` call `pystac.Item.from_dict` on the item
+  # dicts the inventory hands them, so pystac is read directly and not only
+  # through pystac-client. Five inline blocks already declare it. This one did
+  # not, which is the drift the comment above this list claims cannot happen.
+  "pystac",
   "pystac-client",
-  "planetary-computer",
   "xarray",
   "numpy",
   "geopandas",
-  "rioxarray",
   # Staging fetches each scene object once, with one get_object per object.
   "boto3",
+  # `staging.py` builds its own `botocore.config.Config`, because the two
+  # defaults it has to override, the retry mode and the connection pool size,
+  # are set nowhere else. boto3 pulls botocore in, so the import works; the
+  # settings it configures are the reason `staging.json` can count requests.
+  "botocore",
   # The COG and catalog writer, cog_catalog.py. rasterio, listed above, writes
   # the GeoTIFF and drives GDAL's COG driver; stac-geoparquet writes the item
   # mirror.
@@ -55,13 +66,57 @@ dev = [
   "earthaccess",
   "pyproj",
   "shapely",
+  # geopandas' IO engine, and never imported by name. With it installed,
+  # `read_file(bbox=...)` pushes the filter into GDAL and reads only the
+  # polygons that meet the bbox; without it geopandas falls back to fiona and
+  # reads the lot. See the note at `lst/masks.py:136`. deptry reports it as
+  # DEP002 for that reason, and `[tool.deptry] ignore` names it.
   "pyogrio",
   "requests",
   "matplotlib",
   "psutil",
-  "rich",
-  # Gates.
+]
+
+# Every command the pipeline and the fleet expose. `fleet/run.sh` calls
+# `lst-prep` and `lst-shard`; `fleet/README.md` documents the rest. A console
+# script resolves wherever the package is installed, which is what lets the
+# instance stop caring where in the tree a module sits.
+[project.scripts]
+lst-prep = "lst.tile_prep:main"
+lst-shard = "lst.shard_lst_p95:main"
+lst-land-tiles = "lst.land_tiles:main"
+lst-inventory = "lst.usgs_inventory:main"
+lst-aster-ged = "lst.aster_ged:main"
+lst-fleet-plan = "lst.fleet.planner:main"
+lst-fleet-launch = "lst.fleet.launch:main"
+lst-fleet-watch = "lst.fleet.watch:main"
+lst-fleet-teardown = "lst.fleet.teardown:main"
+lst-cost-report = "lst.fleet.cost_report:main"
+lst-publish-catalog = "lst.fleet.publish_catalog:main"
+lst-measure-qa-masks = "lst.measure.compare_qa_masks:main"
+lst-measure-ged-registration = "lst.measure.ged_registration:main"
+lst-measure-land-defects = "lst.measure.land_defects:main"
+lst-measure-s3-requests = "lst.measure.s3_requests:main"
+lst-measure-scene-centre = "lst.measure.scene_centre:main"
+lst-measure-tile-seam = "lst.measure.tile_seam:main"
+lst-measure-water-share = "lst.measure.water_share:main"
+lst-stage-bench = "lst.measure.stage_bench:main"
+
+[dependency-groups]
+# The gates and the test tooling, and nothing else. An instance installs the
+# project without this group:
+#
+#     uv sync --frozen --no-dev
+#
+# Not `--only-group`. That installs a group *instead of* the project, so the
+# console scripts above would not exist on the box.
+dev = [
   "ty>=0.0.1a14",
+  # Reads the import graph of `lst`, so it has to be installed beside it. `uvx`
+  # gives it an isolated environment where the package does not exist and it
+  # reports "Could not find package 'lst'", which reads like a broken config
+  # rather than a missing install.
+  "import-linter>=2.15",
   "pytest>=8",
   "pytest-timeout>=2.3",
   # The slow tests each drive a real frisky cluster in a subprocess, so the
@@ -74,11 +129,40 @@ dev = [
   "rashid>=0.1.8",
 ]
 
-[tool.uv]
-# Nothing here is importable as a package. Without this, uv tries to build and
-# install the repository into its own environment and fails on the missing
-# module.
-package = false
+# Imported names against declared dependencies. Two entries, and both are
+# naming gaps rather than suppressions.
+[tool.deptry]
+# The package's own name. `src/lst/*` imports `lst.*`, which is first-party and
+# not a missing dependency.
+known_first_party = ["lst"]
+
+[tool.deptry.per_rule_ignores]
+# DEP002 is "declared but never imported". deptry found four. Three were real
+# and are gone: `planetary-computer`, which only ever appeared as a refused
+# `--source` choice; `rioxarray`, which appeared only inside a usage snippet
+# the catalog writer emits for its readers; and `rich`, which nothing imported
+# at all.
+#
+# `pyogrio` is the fourth and it stays. geopandas loads it as an IO engine
+# rather than this code importing it, and which engine is present changes
+# whether a bbox filter is pushed into GDAL.
+DEP002 = ["pyogrio"]
+
+[tool.deptry.package_module_name_map]
+# Distribution name to the module it provides. `odc-stac` and `odc-geo` are
+# separate distributions sharing the `odc` namespace package, so neither
+# distribution name matches the import name and deptry cannot infer the link.
+"odc-stac" = ["odc"]
+"odc-geo" = ["odc"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# The distribution is `landsat-lst-smoke` and the import name is `lst`, so the
+# package directory has to be named rather than inferred.
+packages = ["src/lst"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

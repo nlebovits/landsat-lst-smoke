@@ -18,12 +18,12 @@ import sys
 from pathlib import Path
 
 import pytest
+from lst.fleet import launch
+from lst.fleet import teardown
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "fleet"))
 
-import launch  # noqa: E402
-import teardown  # noqa: E402
 
 SHA = "9e2b703abec9756945686d5e8037788a666d28e6"
 

@@ -10,8 +10,11 @@
 fail_fast = true
 
 # Measurement artifacts. The whitespace hooks would rewrite committed
-# evidence, and none of it is handwritten.
-exclude = "^(ec2-results/|fulltile/|s3-requests/|shard-run/|smoke/|smoke2/|split/|sweep/|.*\\.log$)"
+# evidence, and none of it is handwritten. One prefix, because the nine
+# directories now live under it: naming them individually gave four configs
+# four different lists, and three of those listed directories that had never
+# existed here.
+exclude = "^(evidence/|.*\\.log$)"
 
 # =============================================================================
 # Built-in hooks (native Rust, no network fetch required)
@@ -41,7 +44,7 @@ hooks = [
     # sample over an 18.6 min run. It is the evidence behind the memory
     # findings and no summary replaces it. Excluded by exact path, so the
     # 500 KB ceiling still catches a COG or a parquet committed by accident.
-    exclude = { glob = ["ec2-results/quartertile/qt-v2/memory.csv"] },
+    exclude = { glob = ["evidence/ec2-results/quartertile/qt-v2/memory.csv"] },
   },
 ]
 
@@ -62,39 +65,16 @@ rev = "v2.14"
 hooks = [
   {
     id = "vulture",
-    # Keep this list and the vulture step in .github/workflows/ci.yml the
-    # same. CI says it runs the same gates as these hooks, and a module in
-    # one list but not the other gets no dead-code check on the path that
-    # matters.
-    args = [
-      "aster_ged.py",
-      "cog_catalog.py",
-      "compare_qa_masks.py",
-      "composite.py",
-      "cost_report.py",
-      "destripe.py",
-      "fleet_plan.py",
-      "land_tiles.py",
-      "masks.py",
-      "measure_ged_registration.py",
-      "measure_land_defects.py",
-      "measure_s3_requests.py",
-      "measure_scene_centre.py",
-      "measure_water_share.py",
-      "memory_sampler.py",
-      "observe.py",
-      "publish_catalog.py",
-      "shard_lst_p95.py",
-      "stac_reference.py",
-      "stac_window.py",
-      "staging.py",
-      "tile_inventory.py",
-      "tile_prep.py",
-      "usgs_inventory.py",
-      "vulture_whitelist.py",
-      "--min-confidence",
-      "80",
-    ],
+    # One directory, not a list of files. This used to name 22 modules, and the
+    # same 22 were written again in .github/workflows/ci.yml with a comment
+    # asking the next person to keep them in step. They did not stay in step:
+    # both copies omitted lst_qa, stage_bench, measure_tile_seam and every
+    # fleet module, so none of those was ever checked for dead code.
+    #
+    # main has now added `publish_catalog.py` and `measure_water_share.py` to
+    # both lists in two separate pull requests while this branch was open. That
+    # is the drift, twice, during the review of the change that removes it.
+    args = ["src/lst", "fleet/upload.py", "--min-confidence", "80"],
     pass_filenames = false,
   },
 ]
@@ -151,15 +131,42 @@ hooks = [
     types_or = ["python", "markdown"],
   },
 
-  # Type checking. `--extra-search-path .` puts the repository root on the
-  # module path, which measure_s3_requests.py needs: it imports shard_lst_p95
-  # after a sys.path insert. `tests` goes on it for the same reason, because
-  # pytest puts the test directory on sys.path and the test modules import
-  # their shared fixtures from conftest by name. ty.toml carries the rest.
+  # Type checking. `tests` on the search path because the test modules import
+  # their shared fixtures from `conftest` by bare name, the way pytest resolves
+  # them. `fleet` because `tests/test_fleet_launch.py` imports `upload`, which
+  # is deliberately outside the package. The equivalent `[environment]
+  # extra-paths` key in ty.toml has no effect, which was measured.
   {
     id = "ty",
     name = "ty type check",
-    entry = "uv run ty check --extra-search-path . --extra-search-path tests --extra-search-path fleet",
+    entry = "uv run ty check --extra-search-path tests --extra-search-path fleet",
+    language = "system",
+    types = ["python"],
+    pass_filenames = false,
+  },
+
+  # Import contracts. States the layering `src/lst/__init__.py` describes in
+  # prose, and that the run path reaches neither `lst.fleet` nor `lst.measure`.
+  # It found a real cycle on its first run: `shard_lst_p95` read the prep
+  # schema version through a deferred `import tile_prep`, while `tile_prep`
+  # imported `shard_lst_p95` at module level.
+  {
+    id = "lint-imports",
+    name = "import contracts",
+    entry = "uv run lint-imports --no-logo",
+    language = "system",
+    types = ["python"],
+    pass_filenames = false,
+  },
+
+  # Declared dependencies against imported ones. This is the gate that would
+  # have caught `pystac`, `botocore` and `affine` being imported and declared
+  # nowhere. The module-name map is a namespace-package gap and nothing else:
+  # `odc.geo` and `odc.stac` both import as `odc`.
+  {
+    id = "deptry",
+    name = "dependency declarations",
+    entry = "uvx deptry . --no-ansi",
     language = "system",
     types = ["python"],
     pass_filenames = false,
@@ -177,15 +184,55 @@ hooks = [
     pass_filenames = false,
     stages = ["pre-push"],
   },
+
+  # --- Advisory. Manual stage, because each one needs judgment. ---
+  #
+  #     prek run radon --all-files --hook-stage manual
+  #     prek run xenon --all-files --hook-stage manual
+  #     prek run jscpd --all-files --hook-stage manual
+  {
+    id = "radon",
+    name = "radon (complexity report)",
+    entry = "uvx radon cc -n C -s --total-average src/lst",
+    language = "system",
+    pass_filenames = false,
+    stages = ["manual"],
+  },
+  {
+    id = "xenon",
+    name = "xenon (complexity grades)",
+    entry = "uvx xenon --max-average A --max-modules C --max-absolute C src/lst",
+    language = "system",
+    pass_filenames = false,
+    stages = ["manual"],
+  },
+  {
+    id = "jscpd",
+    name = "jscpd (duplication report)",
+    entry = "npm exec --yes -- jscpd src tests --min-lines 12 --min-tokens 60 --reporters console --format python",
+    language = "system",
+    pass_filenames = false,
+    stages = ["manual"],
+  },
 ]
 
 # =============================================================================
-# Not here, and why
+# Advisory rather than blocking, and why
 # =============================================================================
 #
-# xenon   ruff's C901 replaces it. xenon grades a whole module and offers no
-#         per-function escape, so on this repository it either fails on the
+# xenon   ruff's C901 blocks instead. xenon grades a whole module and offers no
+#         per-function escape, so as a gate it either fails on the
 #         argparse-and-report `main` functions or has to be set so loose that
-#         it gates nothing. C901 gates each function at 12 and names the three
+#         it gates nothing. C901 gates each function at 12 and names the two
 #         entry points it exempts, each with a `# noqa: C901` and a reason.
-#         See ruff.toml.
+#         See ruff.toml. xenon still reports: at `--max-absolute C` the whole
+#         package passes except `shard_lst_p95.main` (F, 56),
+#         `cost_report.main` (E, 36) and `measure.s3_requests.main` (D, 23).
+#
+# radon   A report, not a threshold. `cc -n C` lists what xenon would grade.
+#
+# jscpd   MEASURED at 0.04% duplication over 30,533 lines at 12 lines and 60
+#         tokens. Below that threshold it reports the PEP 723 headers and the
+#         `sys.path` preambles the tests share, which are the measurement
+#         rather than a copy. A blocking gate at that sensitivity would fail on
+#         its own false positives.

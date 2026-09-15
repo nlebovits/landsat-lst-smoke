@@ -22,7 +22,11 @@ git fetch --all --prune --tags
 git checkout --detach "$COMMIT" || die checkout $?
 git rev-parse HEAD | tee "$RUN/commit.txt"
 test "$(git rev-parse HEAD)" = "$COMMIT" || die commit_mismatch 1
-uv sync || die uv_sync $?
+# `--frozen` so the box installs the resolution CI tested, never a fresh one.
+# `--no-dev` drops pytest, ty and rashid, which an instance never runs. Not
+# `--only-group`: that installs a group instead of the project, and the console
+# scripts below are the project.
+uv sync --frozen --no-dev || die uv_sync $?
 
 # boto3 through `uv`, not the `aws` CLI. The AMI has no CLI installed, and
 # adding one is a second way to do what the run's own dependencies already do.
@@ -39,7 +43,8 @@ bucket, _, prefix = uri.removeprefix("s3://").partition("/")
 s3 = boto3.client("s3", region_name="us-west-2", config=Config(signature_version=UNSIGNED))
 for name in ["tile_scene_inventory.parquet", "land_tiles.parquet",
              "aster_numobs.tif", "aster_numobs_manifest.json",
-             "land_buffered.gpkg", "land_buffered_sha256.txt"]:
+             "land_buffered.gpkg", "land_buffered_sha256.txt",
+             "land_strict.gpkg", "land_strict_sha256.txt"]:
     out = dest / name
     s3.download_file(bucket, f"{prefix}/{name}", str(out))
     print("got", name, out.stat().st_size, flush=True)
@@ -64,7 +69,7 @@ trap 'kill $HEARTBEAT 2>/dev/null' EXIT
 # that cannot fit stops before the fetch, `--stage-threads 128` because MEASURED
 # staging runs at 321 MB/s there against 233 at the default 64.
 mark prep_start
-uv run tile_prep.py --tile "$TILE" \
+uv run lst-prep --tile "$TILE" \
     --stage-dir /mnt/nvme/stage \
     --out-dir "$RUN/prep" \
     --block 512 --workers 64 --threads-per-worker 1 \
@@ -83,12 +88,16 @@ if [ "${PREP_ONLY:-}" = "1" ]; then
   exit 0
 fi
 
-# Four flags whose defaults are wrong for an instance. `--engine fused` is not
-# the default and changes both the speed and the memory model. `--tile-prep`
-# omitted composites the pooled percentile and leaves the WRS seam in a
-# finished, wrong raster. `--keep-staged` lets the two passes share one fetch.
+# Three flags whose defaults are wrong for an instance. `--tile-prep` omitted
+# composites the pooled percentile and leaves the WRS seam in a finished, wrong
+# raster. `--keep-staged` lets the two passes share one fetch. `--stage-dir`
+# points at the instance store rather than the root volume.
+#
+# `--engine fused` is stated rather than assumed. It is the default now, and
+# this line is what a reader checks to see which engine produced a published
+# tile. Passing it costs nothing and removes a question.
 mark composite_start
-uv run shard_lst_p95.py --tile "$TILE" \
+uv run lst-shard --tile "$TILE" \
     --tile-prep "$RUN/prep" \
     --engine fused --chunk 360 \
     --workers 48 --threads-per-worker 1 --memory-limit-gib 5 \

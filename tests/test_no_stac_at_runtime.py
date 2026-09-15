@@ -29,33 +29,44 @@ import sys
 from pathlib import Path
 
 import pytest
+from lst import aster_ged
+from lst import composite
+from lst import destripe
+from lst import land_tiles
+from lst import masks
+from lst import memory_sampler
+from lst import observe
+from lst import shard_lst_p95
+from lst import staging
+from lst import tile_inventory
+from lst import tile_prep
+from lst.land_tiles import tile_bounds
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import composite  # noqa: E402
-import masks  # noqa: E402
-import shard_lst_p95  # noqa: E402
-import staging  # noqa: E402
-import tile_inventory  # noqa: E402
-from land_tiles import tile_bounds  # noqa: E402
 
 #: The tile the offline tests read. It is in the committed slice.
 TILE = "S30W065"
 
 #: The modules a VM imports to turn a tile into a composite.
+#:
+#: Module objects, not names. A name has to be resolved back to a file to read
+#: the source, and the obvious resolution is `ROOT / f"{name}.py"`, which
+#: assumes every runtime module is a file at the repository root. Holding the
+#: module itself means `__file__` answers that question, and a module that moves
+#: is still checked rather than silently skipped.
 RUNTIME_MODULES = (
-    "shard_lst_p95",
-    "composite",
-    "observe",
-    "tile_inventory",
-    "land_tiles",
-    "masks",
-    "aster_ged",
-    "staging",
-    "memory_sampler",
-    "destripe",
-    "tile_prep",
+    shard_lst_p95,
+    composite,
+    observe,
+    tile_inventory,
+    land_tiles,
+    masks,
+    aster_ged,
+    staging,
+    memory_sampler,
+    destripe,
+    tile_prep,
 )
 
 #: Modules that mean the mask is about to fetch its own inputs. `land_tiles`
@@ -87,13 +98,15 @@ def no_network(monkeypatch):
 
 
 class TestNoCatalogueInTheRuntime:
-    @pytest.mark.parametrize("name", RUNTIME_MODULES)
-    def test_module_does_not_name_a_stac_client(self, name):
-        source = (ROOT / f"{name}.py").read_text()
+    @pytest.mark.parametrize(
+        "module", RUNTIME_MODULES, ids=lambda m: m.__name__.rpartition(".")[2]
+    )
+    def test_module_does_not_name_a_stac_client(self, module):
+        source = Path(module.__file__).read_text()
         for needle in STAC_NAMES:
             assert needle not in source, (
-                f"{name}.py names {needle!r}. The production path must not "
-                f"reach a catalogue; put it in stac_reference.py instead."
+                f"{module.__name__} names {needle!r}. The production path must "
+                f"not reach a catalogue; put it in stac_reference instead."
             )
 
     def test_the_shard_runtime_has_no_search_function(self):
@@ -102,23 +115,26 @@ class TestNoCatalogueInTheRuntime:
     def test_the_reference_search_is_not_imported_by_the_runtime(self):
         """stac_reference may exist. It may not be reachable from here.
 
-        Imported here rather than read out of `sys.modules`, because some of
-        these reach the runtime through a deferred import inside a function
+        Read out of the module objects rather than `sys.modules`, because some
+        of these reach the runtime through a deferred import inside a function
         and a missing key would read as a pass.
-        """
-        import importlib
 
-        for name in RUNTIME_MODULES:
-            module = importlib.import_module(name)
+        The comparison is against `stac_reference.__name__` rather than the
+        literal string, so that moving the module renames the thing being
+        compared instead of making every comparison trivially true.
+        """
+        from lst import stac_reference
+
+        for module in RUNTIME_MODULES:
             for attr in vars(module).values():
                 mod = getattr(attr, "__module__", "")
-                assert mod != "stac_reference", (
-                    f"{name} imported {attr!r} from stac_reference"
+                assert mod != stac_reference.__name__, (
+                    f"{module.__name__} imported {attr!r} from stac_reference"
                 )
 
     def test_the_reference_module_still_exists_for_the_oracle(self):
         """It is kept on purpose, for the parity tests and the dry runs."""
-        import stac_reference
+        from lst import stac_reference
 
         assert hasattr(stac_reference, "search_items")
 
@@ -137,7 +153,7 @@ class TestNoCatalogueInTheRuntime:
         import ast
 
         forbidden = {"load_land_polygons", "fetch_granules", *FETCH_NAMES}
-        tree = ast.parse((ROOT / "masks.py").read_text())
+        tree = ast.parse(Path(masks.__file__).read_text())
         used = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Name):
@@ -208,7 +224,7 @@ class TestRuntimeWorksOffline:
         assert items[0]["assets"]["qa_pixel"]["href"].startswith("s3://usgs-landsat")
 
     def test_the_manifest_gate_runs_offline(self, no_network, slice_artifact):
-        from usgs_inventory import INVENTORY_SCHEMA_VERSION
+        from lst.usgs_inventory import INVENTORY_SCHEMA_VERSION
 
         manifest = tile_inventory.read_manifest(slice_artifact)
         tile_inventory.check_manifest(
@@ -270,7 +286,7 @@ class FileBackedS3:
         self.blobs = blobs
         self.calls = []
 
-    def get_object(self, *, Bucket, Key, RequestPayer=None):  # noqa: N803
+    def get_object(self, *, Bucket, Key, RequestPayer=None):
         import io
 
         self.calls.append((Bucket, Key))
@@ -312,7 +328,7 @@ def scenes_in_a_bucket(tmp_path):
         The item dicts, the bbox covering them, and the object store contents.
     """
     from conftest import make_row
-    from tile_inventory import build_item
+    from lst.tile_inventory import build_item
 
     source = tmp_path / "source"
     source.mkdir()

@@ -1,0 +1,74 @@
+; Import contracts for the `lst` package.
+;
+; These say in a checkable form what `src/lst/__init__.py` says in prose: the
+; run path imports downwards only, and it reaches neither the fleet tooling nor
+; the measurement scripts.
+;
+; Two of these were previously hand-written tests. `tests/test_no_stac_at_runtime.py`
+; still owns the part a contract cannot express, which is that no runtime module
+; *names* a STAC client anywhere in its source, including inside a function. A
+; contract sees imports; that test reads the syntax tree.
+
+[importlinter]
+root_packages =
+    lst
+include_external_packages = False
+
+[importlinter:contract:layers]
+name = The run path imports downwards only
+type = layers
+layers =
+    lst.tile_prep
+    lst.shard_lst_p95
+    lst.composite : lst.cog_catalog
+    lst.destripe
+    lst.masks
+    lst.aster_ged
+    lst.lst_qa : lst.land_tiles : lst.observe : lst.staging : lst.stac_window : lst.tile_inventory : lst.memory_sampler
+exhaustive = False
+
+[importlinter:contract:no-tooling-in-the-run-path]
+name = The run path imports no fleet tool and no measurement script
+type = forbidden
+source_modules =
+    lst.aster_ged
+    lst.cog_catalog
+    lst.composite
+    lst.destripe
+    lst.land_tiles
+    lst.lst_qa
+    lst.masks
+    lst.memory_sampler
+    lst.observe
+    lst.shard_lst_p95
+    lst.stac_window
+    lst.staging
+    lst.tile_inventory
+    lst.tile_prep
+forbidden_modules =
+    lst.fleet
+    lst.measure
+
+[importlinter:contract:no-catalogue-at-runtime]
+name = Nothing an instance runs reaches the catalogue
+type = forbidden
+source_modules =
+    lst.composite
+    lst.shard_lst_p95
+    lst.staging
+    lst.tile_inventory
+    lst.tile_prep
+forbidden_modules =
+    lst.stac_reference
+
+[importlinter:contract:the-measurements-do-not-depend-on-each-other]
+name = A measurement script imports the pipeline, never another measurement
+type = independence
+modules =
+    lst.measure.compare_qa_masks
+    lst.measure.ged_registration
+    lst.measure.land_defects
+    lst.measure.s3_requests
+    lst.measure.scene_centre
+    lst.measure.stage_bench
+    lst.measure.tile_seam

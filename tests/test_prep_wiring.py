@@ -14,18 +14,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import composite  # noqa: E402
-import destripe  # noqa: E402
-import shard_lst_p95  # noqa: E402
-import tile_prep  # noqa: E402
+from lst import composite
+from lst import destripe
+from lst import shard_lst_p95
+from lst import tile_prep
 
 TILE = "S30W065"
 BBOX = (-66.0, -36.0, -59.0, -29.0)
@@ -71,7 +69,7 @@ def write_prep(directory: Path, item_dicts, **overrides) -> Path:
     # fewer paths than its items carry, which is the swath-less case.
     paths = overrides.pop("paths", [WEST, EAST])
     meta = {
-        "schema_version": tile_prep.PREP_SCHEMA_VERSION,
+        "schema_version": destripe.PREP_SCHEMA_VERSION,
         "scene_digest": destripe.scene_digest(scene_ids, window),
         "tile": TILE,
         "bbox": list(BBOX),
@@ -277,7 +275,7 @@ class TestTheCorrectionRule:
 class TestTheRuleNamesTheSwathlessPaths:
     """The refusal became a record. The record has to reach the item.
 
-    `tile_prep.paths_without_a_swath` decides the mapping and
+    `destripe.paths_without_a_swath` decides the mapping and
     `tests/test_tile_prep.py` pins it. This is the wiring: a rule built from a
     prep file that names fewer paths than its scenes carry has to say so, with
     the scene counts, so a reader of the published item can weigh the gap.

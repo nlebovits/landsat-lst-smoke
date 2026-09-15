@@ -6,14 +6,12 @@ all of 2020, which is outside the five-year window, and it excluded all of
 because the cache file name said nothing about the window it was searched over.
 """
 
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import measure_s3_requests  # noqa: E402
-import shard_lst_p95  # noqa: E402
-from stac_window import (  # noqa: E402
+from lst.measure import s3_requests
+from lst import shard_lst_p95
+from lst.stac_window import (
     DEFAULT_END,
     DEFAULT_START,
     datetime_range,
@@ -62,11 +60,11 @@ class TestEntryPointDefaults:
     def test_s3_request_measurement(self):
         # main() builds its parser inline, so assert on the constants it hands
         # argparse plus the fact that it hands them and not a literal.
-        assert (measure_s3_requests.DEFAULT_START, measure_s3_requests.DEFAULT_END) == (
+        assert (s3_requests.DEFAULT_START, s3_requests.DEFAULT_END) == (
             DEFAULT_START,
             DEFAULT_END,
         )
-        src = Path(measure_s3_requests.__file__).read_text()
+        src = Path(s3_requests.__file__).read_text()
         assert 'ap.add_argument("--start", default=DEFAULT_START)' in src
         assert 'ap.add_argument("--end", default=DEFAULT_END)' in src
 
@@ -91,7 +89,7 @@ class TestStacQuery:
 
         import pystac_client
 
-        import stac_reference
+        from lst import stac_reference
 
         monkeypatch.setattr(pystac_client, "Client", FakeClient)
         # The query moved to stac_reference when the runtime stopped searching.
@@ -147,13 +145,21 @@ class TestCacheIdentity:
 
 
 def test_no_entry_point_still_carries_the_old_window():
-    root = Path(__file__).resolve().parent.parent
-    scripts = [
-        root / "shard_lst_p95.py",
-        root / "composite.py",
-        root / "measure_s3_requests.py",
-        root / "stac_window.py",
-        root / "tile_prep.py",
+    # Module objects, so that `__file__` locates each source. Naming the files
+    # under a fixed root instead would stop finding them the moment one moves,
+    # and a list of unreadable paths reads as a pass.
+    from lst import composite
+    from lst import stac_window
+    from lst import tile_prep
+
+    modules = [
+        shard_lst_p95,
+        composite,
+        s3_requests,
+        stac_window,
+        tile_prep,
     ]
-    offenders = [p.name for p in scripts if '"2020-01-01"' in p.read_text()]
+    offenders = [
+        m.__name__ for m in modules if '"2020-01-01"' in Path(m.__file__).read_text()
+    ]
     assert offenders == []

@@ -19,13 +19,11 @@ capped, and the cap is the spend control:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 # Both marks, because this file needs both. The `paired` fixture queries Earth
 # Search before anything is loaded, so `s3` alone understated what running it
@@ -75,9 +73,9 @@ def paired():
     if not ARTIFACT.exists():
         pytest.skip("run usgs_inventory.py to build artifacts/")
 
-    import shard_lst_p95
-    from stac_reference import search_items
-    from tile_inventory import items_for_tile
+    from lst import shard_lst_p95
+    from lst.stac_reference import search_items
+    from lst.tile_inventory import items_for_tile
 
     shard_lst_p95.configure_read_env("earth-search")
 
@@ -185,7 +183,7 @@ class TestComposite:
     def _reduce(self, dataset):
         import numpy as np
 
-        from lst_qa import encode_celsius, masked_celsius
+        from lst.lst_qa import encode_celsius, masked_celsius
 
         lst, valid = masked_celsius(
             dataset["lwir11"].values, dataset["qa_pixel"].values
@@ -212,7 +210,7 @@ class TestComposite:
 
     def test_the_composite_carries_real_temperatures(self, loaded):
         """Guard against two identical all-nodata rasters passing above."""
-        from lst_qa import LST_NODATA_DN
+        from lst.lst_qa import LST_NODATA_DN
 
         stac_ds, _ = loaded
         dn, _ = self._reduce(stac_ds)

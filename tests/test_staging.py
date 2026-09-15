@@ -21,17 +21,15 @@ from __future__ import annotations
 
 import copy
 import io
-import sys
 from pathlib import Path
 
 import pytest
+from lst import staging
+from lst.tile_inventory import build_item, items_for_tile
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import staging  # noqa: E402
 from conftest import make_row  # noqa: E402
-from tile_inventory import build_item, items_for_tile  # noqa: E402
 
 TILE = "S30W065"
 
@@ -55,7 +53,7 @@ class FakeS3:
         self.calls: list[tuple[str, str]] = []
         self.payers: list[str | None] = []
 
-    def get_object(self, *, Bucket, Key, RequestPayer=None):  # noqa: N803
+    def get_object(self, *, Bucket, Key, RequestPayer=None):
         self.calls.append((Bucket, Key))
         self.payers.append(RequestPayer)
         if len(self.calls) <= self.fail_first:
@@ -176,7 +174,7 @@ class TestStagedPaths:
         seen_at_get = []
 
         class Watching(FakeS3):
-            def get_object(self, **kw):  # noqa: N803
+            def get_object(self, **kw):
                 seen_at_get.append(items[0]["assets"]["lwir11"]["href"])
                 return super().get_object(**kw)
 
@@ -232,7 +230,7 @@ class TestStagingRun:
 
     def test_the_report_matches_what_stage_scenes_returns(self, real_items, tmp_path):
         # One fetch, two orderings. They must not diverge on the counts that
-        # `cost_report.py` prices.
+        # `lst.fleet.cost_report` prices.
         items, _ = real_items
         fresh = copy.deepcopy(items)
         serial = staging.stage_scenes(
@@ -253,7 +251,7 @@ class TestStagingRun:
         manifest = staging.repoint_items(items, [0], tmp_path)
         fake = FakeS3(fail_first=staging.MAX_ATTEMPTS)
 
-        with pytest.raises(staging.StagingError):  # noqa: PT012
+        with pytest.raises(staging.StagingError):
             with staging.StagingRun(
                 manifest, tmp_path, threads=1, client_factory=lambda _n: fake
             ) as run:
@@ -267,7 +265,7 @@ class TestStagingRun:
         manifest = staging.repoint_items(items, list(range(20)), tmp_path)
         fake = FakeS3(fail_first=staging.MAX_ATTEMPTS)
 
-        with pytest.raises(staging.StagingError):  # noqa: PT012
+        with pytest.raises(staging.StagingError):
             with staging.StagingRun(
                 manifest, tmp_path, threads=1, client_factory=lambda _n: fake
             ) as run:
@@ -468,7 +466,7 @@ class TestTheDefaultClient:
     def test_botocore_does_not_retry_behind_the_counter(self):
         # `legacy` retries a 503 up to five times inside get_object. Those are
         # billable GETs that `_fetch_one` cannot see, so a throttled run would
-        # under-report the S3 line that `cost_report.py --s3-get-requests`
+        # under-report the S3 line that `lst-cost-report --s3-get-requests`
         # prices. Retrying belongs to this module, where MAX_ATTEMPTS bounds it.
         client = staging._default_client()
         # total_max_attempts, not max_attempts: botocore reads the latter as
@@ -575,8 +573,8 @@ class TestDiskGuard:
         the parsers reject it rather than trusting a reviewer to notice one
         coming back.
         """
-        import shard_lst_p95
-        import tile_prep
+        from lst import shard_lst_p95
+        from lst import tile_prep
 
         for module in (shard_lst_p95, tile_prep):
             with pytest.raises(SystemExit):

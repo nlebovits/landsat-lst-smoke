@@ -12,15 +12,13 @@ network-free run still checks the grid, the naming, and the artifact format.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import land_tiles  # noqa: E402
-from land_tiles import (  # noqa: E402
+from lst import land_tiles
+from lst.land_tiles import (
     COASTAL_BUFFER_METERS,
     LATITUDE_LIMIT,
     MAX_NATURAL_EARTH_SCALERANK,
@@ -287,7 +285,7 @@ class TestBuiltList:
 
         Recording the count in the file and checking the file against itself
         cannot fail. This is the assertion that catches a change to the land
-        method, and `measure_land_defects.py` is where the number comes from.
+        method, and `lst.measure.land_defects` is where the number comes from.
         """
         names, prov = built
         assert int(prov["tile_count"]) == len(names)

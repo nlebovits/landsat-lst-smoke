@@ -85,21 +85,21 @@ Build the artifacts once, on a laptop, before any instance starts:
 
 ```bash
 # the authoritative tile list, and the geometry the pixel mask rasterises
-uv run land_tiles.py --out artifacts/land_tiles.parquet \
+uv run lst-land-tiles --out artifacts/land_tiles.parquet \
     --write-geometry artifacts/land_buffered.gpkg
 
 # the scene inventory, from the USGS bulk metadata Parquet
-uv run usgs_inventory.py \
+uv run lst-inventory \
     --land-tiles artifacts/land_tiles.parquet \
     --out artifacts/tile_scene_inventory.parquet
 
 # ASTER GED observation counts, for the emissivity half of the mask
 uv run python -c \
     "import earthaccess; earthaccess.login(persist=True)"
-uv run aster_ged.py --out artifacts/aster_numobs.tif
+uv run lst-aster-ged --out artifacts/aster_numobs.tif
 
 # what the fleet will launch, and the checks that gate it
-uv run fleet_plan.py --out artifacts/fleet_plan.json
+uv run lst-fleet-plan --out artifacts/fleet_plan.json
 ```
 
 `land_tiles.py --write-geometry` copies the buffered polygons out of the cache
@@ -126,15 +126,15 @@ come from measurement scripts, which no build runs:
 
 ```bash
 # what each defect in the shared land method selects
-uv run measure_land_defects.py --out artifacts/land_defects.json
+uv run lst-measure-land-defects --out artifacts/land_defects.json
 
 # the ASTER GED mask against a composite built before it existed
-uv run measure_ged_registration.py \
-    --raster fulltile/tile/lst_p95_dn.npy --tile S30W065 \
+uv run lst-measure-ged-registration \
+    --raster evidence/fulltile/tile/lst_p95_dn.npy --tile S30W065 \
     --out artifacts/ged_registration.json
 
 # how far the computed scene centre sits from the published one
-uv run measure_scene_centre.py --all-years \
+uv run lst-measure-scene-centre --all-years \
     --out artifacts/scene_centre_offset.json
 ```
 
@@ -147,13 +147,13 @@ correction over a coarse grid and stages every object the tile needs.
 files, so it issues no billable GET of its own.
 
 ```bash
-uv run tile_prep.py --tile S30W065 \
+uv run lst-prep --tile S30W065 \
     --stage-dir /mnt/nvme/stage \
     --out-dir ./run/prep \
     --block 512 --workers 64 --threads-per-worker 1 \
     --target-memory-gib 256
 
-uv run shard_lst_p95.py --tile S30W065 \
+uv run lst-shard --tile S30W065 \
     --tile-prep ./run/prep \
     --engine fused --chunk 360 \
     --workers 48 --threads-per-worker 1 --memory-limit-gib 5 \
@@ -1330,7 +1330,7 @@ targets. It exits 2 on a configuration the launcher would refuse, which prices a
 fleet before an instance exists:
 
 ```bash
-uv run shard_lst_p95.py --tile S30W065 --chunk 512 --workers 64 \
+uv run lst-shard --tile S30W065 --chunk 512 --workers 64 \
     --target-memory-gib 128 --dry-run
 ```
 
@@ -2007,7 +2007,7 @@ both: min -2.28 C, P50 +0.14 C, P95 +0.63 C, P99 +0.92 C, max +2.15 C, mean
 +0.20 C. The composite warms, which is what removing cool cloud contamination
 from a ninety-fifth percentile does.
 
-`qa-parity/qa_difference.png` holds the two rasters and their difference. This
+`evidence/qa-parity/qa_difference.png` holds the two rasters and their difference. This
 shard sits inside a WRS footprint, so it shows field-shaped differences and no
 scene boundary. A shard chosen on a footprint edge would show the boundary
 case. The image is diagnostic. The table is the measurement.
@@ -3006,40 +3006,66 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 
 ## Files
 
+This table used to name `profile_lst_p95.py`, `measure_seam.py`,
+`sweep_throughput.py`, `item_table.py`, `measure_shard_memory.py`,
+`measure_submit_cost.py`, `dryrun/` and `full/`. Earlier changes deleted all
+eight, and the table kept listing them until this one. It lists what the
+repository holds today.
+
+### The run path, `src/lst/`
+
+| module | contents |
+|---|---|
+| `shard_lst_p95.py` | the driver: resolves the tile, stages, computes, writes the catalog |
+| `tile_prep.py` | one coarse pass per tile for the offsets and the swath geometry |
+| `composite.py` | the graph, both engines, and every numeric rule's one call site |
+| `destripe.py` | the seam rules, the per-path cross-fade, and the prep artifact's schema version |
+| `lst_qa.py` | the QA, fill, range, and nodata rules |
+| `masks.py` | the pixel rules: water, and the ASTER emissivity gap |
+| `aster_ged.py` | the ASTER GED observation counts, built once and read per tile |
+| `land_tiles.py` | the buffered land geometry and the generated tile list |
+| `usgs_inventory.py` | the precompute stage: USGS bulk metadata to one artifact |
+| `tile_inventory.py` | the runtime read of one tile, from one row group |
+| `cog_catalog.py` | writes the COGs and the Portolan catalog |
+| `stac_window.py` | the composite window, and the cache identity it fixes |
+| `stac_reference.py` | Earth Search, kept only as a parity oracle |
+| `staging.py` | fetches each scene object once, beside compute, and the L2SR filter |
+| `memory_sampler.py` | client and worker RSS, sampled from its own process |
+| `observe.py` | frisky tracing, phases, and span collection |
+
+### The fleet, `src/lst/fleet/`
+
+| module | contents |
+|---|---|
+| `planner.py` | the plan, and the checks that run before the fleet does |
+| `launch.py` | one instance per tile, at a pinned commit |
+| `watch.py` | polls object storage for each run's markers |
+| `teardown.py` | terminates, then prices |
+| `cost_report.py` | the labelled, deterministic cost report |
+| `publish_catalog.py` | promotes finished tiles into the public catalog |
+
+### The measurements, `src/lst/measure/`
+
+| module | contents |
+|---|---|
+| `compare_qa_masks.py` | one window, run under both masks, in one process |
+| `ged_registration.py` | the mask against a composite built before it |
+| `land_defects.py` | what each defect in the shared land method selects |
+| `s3_requests.py` | counts the S3 GET requests one run issues |
+| `scene_centre.py` | computed scene centre against the published one |
+| `tile_seam.py` | how far two adjacent tiles disagree about one scene |
+| `stage_bench.py` | which staging setting binds, measured per setting |
+
+### Everything else
+
 | path | contents |
 |---|---|
 | `README.md` | the known issues a consumer of the output has to know |
+| `fleet/` | deployment assets: `run.sh`, `drive.sh`, `user-data.sh`, `config.toml`, and `upload.py`, which `drive.sh` copies to an instance and runs outside the checkout |
 | `tests/make_land_slice.py` | cuts the committed geometry fixture from the full artifact |
-| `shard_lst_p95.py` | the sharded pipeline, the slicer, and the merge |
-| `profile_lst_p95.py` | the array-graph profiling harness |
-| `lst_qa.py` | the QA, fill, range, and nodata rules both P95 paths call |
-| `cog_catalog.py` | writes the COGs and the Portolan catalog the merge emits |
-| `destripe.py` | the two seam rules both P95 paths call: scene offsets, and the per-path cross-fade |
-| `tile_prep.py` | one coarse pass per tile for the offsets and the swath geometry |
-| `measure_seam.py` | four composites from one load, on a shard that straddles a swath |
-| `stac_window.py` | the composite window, and the cache identity it fixes |
-| `land_tiles.py` | the buffered land geometry and the generated tile list |
-| `masks.py` | the pixel rules: water, and the ASTER emissivity gap |
-| `aster_ged.py` | the ASTER GED observation counts, built once and read per tile |
-| `measure_ged_registration.py` | the mask against a composite built before it |
-| `usgs_inventory.py` | the precompute stage: USGS bulk metadata to one artifact |
-| `tile_inventory.py` | the runtime read of one tile, from one row group |
-| `fleet_plan.py` | the driver, and the checks that run before the fleet does |
-| `stac_reference.py` | Earth Search, kept only as a parity oracle |
 | `artifacts/` | `land_tiles.parquet`, the inventory, the buffered geometry, the ASTER GED counts, their manifests, and the committed slices of the three that `.gitignore` excludes |
-| `compare_qa_masks.py` | one shard, run under both masks, in one process |
-| `qa-parity/` | that comparison, with both rasters and the difference image |
-| `sweep_throughput.py` | configuration sweep driver |
-| `cost_report.py` | the labelled, deterministic cost report |
-| `staging.py` | fetches each scene object once, beside compute, and the L2SR filter |
-| `item_table.py` | the scene table every worker reads instead of receiving |
-| `memory_sampler.py` | client and worker RSS, sampled from its own process |
-| `measure_shard_memory.py` | what a shard costs in memory, and shard size in compute |
-| `measure_s3_requests.py` | counts the S3 GET requests one shard issues |
-| `measure_submit_cost.py` | what one `client.submit` costs, against its payload |
-| `s3-requests/` | the request measurement: both shard sizes, and the priced tile |
-| `dryrun/` | local graph-build runs, no cluster and no reads |
-| `ec2-results/` | eight department-scale runs: stages, memory series, frisky reports |
-| `fulltile/` | the full-tile run (part files and merged raster gitignored) |
-| `smoke/`, `smoke2/`, `split/`, `sweep/` | local runs with full frisky spans and traces |
-| `full/`, `full.log` | the 673-scene local run, ended early by a network change |
+| `evidence/qa-parity/` | the mask comparison, with both rasters and the difference image |
+| `evidence/s3-requests/` | the request measurement: both shard sizes, and the priced tile |
+| `evidence/ec2-results/` | eight department-scale runs: stages, memory series, frisky reports |
+| `evidence/fulltile/` | the full-tile run (part files and merged raster gitignored) |
+| `evidence/smoke/`, `evidence/smoke2/`, `evidence/split/`, `evidence/sweep/` | local runs with full frisky spans and traces |

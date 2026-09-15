@@ -12,17 +12,14 @@ tree the writer produced and reports every Portolan requirement it breaks.
 """
 
 import json
-import sys
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 import rasterio
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cog_catalog import (  # noqa: E402
+from lst.cog_catalog import (
     BLOCK_SIZE,
     LST_ASSET_KEY,
     MONTH_NAMES,
@@ -50,7 +47,7 @@ from cog_catalog import (  # noqa: E402
     write_catalog,
     write_cog,
 )
-from lst_qa import (  # noqa: E402
+from lst.lst_qa import (
     LST_MAX_DN,
     LST_MIN_DN,
     LST_NODATA_DN,

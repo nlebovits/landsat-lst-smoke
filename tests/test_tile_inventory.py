@@ -12,14 +12,12 @@ those skip when it is absent.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from conftest import (  # noqa: E402
+from conftest import (
     MANIFEST,
     SLICE_TILES,
     WINDOW,
@@ -27,8 +25,8 @@ from conftest import (  # noqa: E402
     needs_full_artifact,
     write_inventory,
 )
-from land_tiles import tile_bounds  # noqa: E402
-from tile_inventory import (  # noqa: E402
+from lst.land_tiles import tile_bounds
+from lst.tile_inventory import (
     ASSET_TEMPLATES,
     InventoryError,
     build_item,
@@ -39,7 +37,7 @@ from tile_inventory import (  # noqa: E402
     row_groups_for_tile,
     tile_ids,
 )
-from usgs_inventory import INVENTORY_SCHEMA_VERSION  # noqa: E402
+from lst.usgs_inventory import INVENTORY_SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -137,7 +135,7 @@ class TestManifest:
         assert read_manifest(small)["start"] == "2021-01-01"
 
     def test_missing_file_names_the_build_command(self, tmp_path):
-        with pytest.raises(InventoryError, match="usgs_inventory.py"):
+        with pytest.raises(InventoryError, match="lst-inventory"):
             read_manifest(tmp_path / "absent.parquet")
 
     def test_a_parquet_without_a_manifest_is_refused(self, tmp_path):
@@ -243,7 +241,7 @@ class TestBuildItem:
 class TestAntimeridianBbox:
     def test_a_wrapping_bbox_is_trimmed_to_the_tile(self):
         """items_for_shard compares plain intervals, so the wrap has to go."""
-        from tile_inventory import _tile_local_bbox
+        from lst.tile_inventory import _tile_local_bbox
 
         east_side = _tile_local_bbox(
             179.0, -20.0, -179.0, -15.0, True, tile_bounds("S15E175")
@@ -256,7 +254,7 @@ class TestAntimeridianBbox:
         assert west_side == (-180.0, -20.0, -179.0, -15.0)
 
     def test_a_normal_bbox_is_untouched(self):
-        from tile_inventory import _tile_local_bbox
+        from lst.tile_inventory import _tile_local_bbox
 
         plain = _tile_local_bbox(-64.0, -35.0, -62.0, -33.0, False, None)
         assert plain == (-64.0, -35.0, -62.0, -33.0)
@@ -286,7 +284,7 @@ class TestBuiltArtifact:
         assert len(m["source"]["sha256"]) == 64
 
     def test_snap_stayed_well_inside_the_limit(self, slice_artifact):
-        from usgs_inventory import MAX_SNAP_METERS
+        from lst.usgs_inventory import MAX_SNAP_METERS
 
         assert read_manifest(slice_artifact)["max_snap_meters"] < MAX_SNAP_METERS
 

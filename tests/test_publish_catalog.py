@@ -39,21 +39,17 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import needs_strict_land_geometry, write_numobs
+from lst import cog_catalog, masks
+from lst.fleet import publish_catalog
+from lst.land_tiles import tile_bounds
+from lst.lst_qa import LST_NODATA_DN, encode_celsius
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-import cog_catalog  # noqa: E402
-import masks  # noqa: E402
-import publish_catalog  # noqa: E402
-from conftest import needs_strict_land_geometry, write_numobs  # noqa: E402
-from land_tiles import tile_bounds  # noqa: E402
-from lst_qa import LST_NODATA_DN, encode_celsius  # noqa: E402
 
 #: The New Jersey coast. MEASURED at 1/360 degree, 4.43% of the tile is land,
 #: inside a processing mask that reaches well into the Atlantic. The tile has to
