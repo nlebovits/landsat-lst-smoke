@@ -309,7 +309,20 @@ def rewrite_coverage(item: dict, fresh: dict, sentence: str, *, dry_run: bool) -
     """
     properties = item["properties"]
     names = [name for _, name, _ in cog_catalog.COVERAGE_PROPERTIES]
-    before = {name: properties.get(name) for name in names}
+    # Only the keys the item actually carries. Filling every name with None
+    # compares a dense dict against a sparse one, and `coverage_properties` is
+    # sparse on purpose: a tile with no strict land omits every share that
+    # would divide by it.
+    #
+    # MEASURED on 2026-09-15: `S35W055` holds 0 land pixels, so it publishes
+    # no `lst:valid_fraction` and no `lst:ged_gap_fraction`. Under the dense
+    # comparison it read as changed on every recount while every printed value
+    # matched, so it would be rewritten forever, each time with a new
+    # `updated` timestamp and nothing else.
+    #
+    # A key the item carries and `after` does not is still a change. That is
+    # the stale property this function exists to remove.
+    before = {name: properties[name] for name in names if name in properties}
     after = cog_catalog.coverage_properties(fresh)
     # Flushed per tile. A 30-tile recount reads a gigabyte and runs for tens of
     # minutes, and MEASURED on 2026-09-15 the first attempt died at tile 18 with
