@@ -113,13 +113,14 @@ nodata pixel is the signature of sea. The other two leave `qa_count` standing.
 A count of 1 to 4 beside a nodata pixel is the evidence rule. A count above 5
 beside one is a value outside the bounds. Sum the 12 bands to read it.
 
-The geometry that water rule reads is land grown by 25 km, which keeps a coastal
-scene from being cut at the waterline, and it reaches open sea. So it decides
-pixels and it does not define land. Until 2026-09-15 every published share of
-land divided by it: MEASURED at 3600 pixels per degree, `S40W065` is 73,254,945
-pixels of processing mask and 45,407,126 pixels of land, and an item reported the
-first under the name `lst:land_pixels`. The properties below state which
-footprint each one counts.
+The water rule reads land grown by 25 km. That growth stops the mask cutting a
+coastal scene at the waterline, and it reaches open sea. So the geometry decides
+pixels and does not define land.
+
+Until 2026-09-15 every published share of land divided by it. MEASURED at 3600
+pixels per degree, `S40W065` holds 73,254,945 pixels of processing mask and
+45,407,126 pixels of land. An item reported the first under the name
+`lst:land_pixels`. The properties below state which footprint each one counts.
 
 | Property | Footprint |
 |---|---|
@@ -295,12 +296,12 @@ observation failed the QA or range rule. A wider window helps the second case.
 It can do nothing for the first.
 
 `qa_count` cannot separate them. It counts pixels where
-`not_fill AND qa_clear AND in_trusted_range` all held, so a source fill and a
-rejected observation both increment nothing, and the two cases are bit-identical
-on disk: `lst_p95` at 0 and `qa_count` at 0 in all twelve bands. A reader looking
-at a straight-edged region of zeros is looking at ground outside Landsat's
-imaged footprint, whatever the scene rectangles say, and those pixels are not
-cloudy.
+`not_fill AND qa_clear AND in_trusted_range` all held. Neither a source fill nor
+a rejected observation raises that count, so the two cases read the same on
+disk: `lst_p95` at 0 and `qa_count` at 0 in all twelve bands.
+
+Read a straight-edged region of zeros as ground outside Landsat's imaged
+footprint, whatever the scene rectangles say. Those pixels are not cloudy.
 
 Splitting the count needs a per-pixel record of source presence that no
 published artifact carries. `lst_qa.not_fill` produces it once per scene per
