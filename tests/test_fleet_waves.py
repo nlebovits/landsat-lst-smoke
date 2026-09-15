@@ -611,3 +611,99 @@ class TestWhatIsLeftComesFromTheBucket:
         )
         with pytest.raises(SystemExit, match="cannot list"):
             waves.uploaded_tiles(self._cfg())
+
+
+class TestAFinishedInstanceStopsBilling:
+    """A wave costs its slowest tile times its width, not the sum of its tiles.
+
+    MEASURED on 2026-09-15: wave 1 held 20 machines for 38.5 minutes each while
+    its tiles finished between 16:20 and 16:50, at $2.44 a tile against the
+    $1.35 a three-tile wave measured.
+    """
+
+    def _run(self):
+        return {
+            "instances": [
+                {"tile": "A", "name": "lst-A-1", "instance_id": "i-a"},
+                {"tile": "B", "name": "lst-B-1", "instance_id": "i-b"},
+            ]
+        }
+
+    def _state(self, tile, phase, status):
+        from lst.fleet.watch import State
+
+        return State(tile, phase, status)
+
+    def test_an_uploaded_tile_is_terminated_at_once(self, monkeypatch, cfg):
+        killed = []
+        monkeypatch.setattr(
+            waves.launch,
+            "aws_try",
+            lambda argv: killed.append(argv[-1]) or (0, "", ""),
+        )
+        fresh = waves.reap(
+            self._run(),
+            cfg,
+            [
+                self._state("A", "uploaded", "finished"),
+                self._state("B", "composite", "running"),
+            ],
+            set(),
+            say=lambda *a: None,
+        )
+        assert killed == ["i-a"]
+        assert fresh == {"lst-A-1"}
+
+    def test_a_tile_at_all_done_is_left_alone(self, monkeypatch, cfg):
+        """Its upload is still going. This is the bug that lost N00W045."""
+        killed = []
+        monkeypatch.setattr(
+            waves.launch, "aws_try", lambda argv: killed.append(argv[-1]) or (0, "", "")
+        )
+        waves.reap(
+            self._run(),
+            cfg,
+            [self._state("A", "all_done", "finished")],
+            set(),
+            say=lambda *a: None,
+        )
+        assert killed == []
+
+    def test_a_failed_tile_keeps_its_instance_for_the_log(self, monkeypatch, cfg):
+        """Its uploader may still be pushing the log that says why it failed."""
+        killed = []
+        monkeypatch.setattr(
+            waves.launch, "aws_try", lambda argv: killed.append(argv[-1]) or (0, "", "")
+        )
+        waves.reap(
+            self._run(),
+            cfg,
+            [self._state("A", "prep", "failed")],
+            set(),
+            say=lambda *a: None,
+        )
+        assert killed == []
+
+    def test_an_instance_is_not_terminated_twice(self, monkeypatch, cfg):
+        killed = []
+        monkeypatch.setattr(
+            waves.launch, "aws_try", lambda argv: killed.append(argv[-1]) or (0, "", "")
+        )
+        states = [self._state("A", "uploaded", "finished")]
+        reaped = waves.reap(self._run(), cfg, states, set(), say=lambda *a: None)
+        waves.reap(self._run(), cfg, states, reaped, say=lambda *a: None)
+        assert killed == ["i-a"]
+
+    def test_a_refused_termination_is_retried_next_poll(self, monkeypatch, cfg):
+        """The wave teardown is the backstop, but the next poll tries again."""
+        monkeypatch.setattr(
+            waves.launch, "aws_try", lambda argv: (255, "", "UnauthorizedOperation")
+        )
+        fresh = waves.reap(
+            self._run(),
+            cfg,
+            [self._state("A", "uploaded", "finished")],
+            set(),
+            say=lambda *a: None,
+        )
+        assert fresh == set()

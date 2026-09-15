@@ -42,7 +42,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lst.fleet import watch
+from lst.fleet import launch, watch
 from lst.fleet.launch import (
     DEFAULT_FLEET_DIR,
     QuotaExhausted,
@@ -342,6 +342,7 @@ def _await_wave(
 
     deadline = time.monotonic() + timeout_minutes * 60
     waiting_since: dict[str, float] = {}
+    reaped: set[str] = set()
     statuses: dict[str, str] = {}
     while True:
         run = json.loads(manifest_path.read_text())
@@ -353,6 +354,7 @@ def _await_wave(
             waiting_since,
             now,
         )
+        reaped |= reap(run, cfg, states, reaped, say=say)
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
         tally = {
             k: sum(1 for v in statuses.values() if v == k)
@@ -410,6 +412,54 @@ def uploaded_tiles(cfg: dict) -> set[str]:
         if len(parts) >= 2 and parts[0] == "lst":
             done.add(parts[1])
     return done
+
+
+def reap(run: dict, cfg: dict, states: list, reaped: set[str], say=say_now) -> set[str]:
+    """Terminate each instance whose upload is proven, without waiting for the wave.
+
+    A wave costs the lifetime of its slowest tile times its width, not the sum
+    of its tiles. MEASURED on 2026-09-15: wave 1 held 20 machines for an
+    average of 38.5 minutes each while its tiles finished between 16:20 and
+    16:50. The first tile done paid for 30 minutes of doing nothing, and the
+    wave cost $2.44 a tile against the $1.35 a three-tile wave measured.
+
+    Only a tile with its `_MANIFEST.json` is reaped. A failed tile is left for
+    the wave teardown, because its uploader may still be pushing the log that
+    says why it failed, and that log is the whole value of a failed tile.
+
+    Returns:
+        The names newly reaped, to be added to `reaped` by the caller.
+    """
+    by_tile = {e["tile"]: e for e in run["instances"]}
+    fresh = set()
+    for state in states:
+        entry = by_tile.get(state.tile)
+        if entry is None or entry["name"] in reaped:
+            continue
+        if not (state.status == "finished" and state.phase == UPLOADED_PHASE):
+            continue
+        instance_id = entry.get("instance_id")
+        if not instance_id:
+            continue
+        code, _, err = launch.aws_try(
+            [
+                "aws",
+                "ec2",
+                "terminate-instances",
+                "--profile",
+                cfg["aws"]["profile"],
+                "--region",
+                cfg["aws"]["region"],
+                "--instance-ids",
+                instance_id,
+            ]
+        )
+        if code != 0:
+            say(f"           {state.tile:9} could not terminate early: {err}")
+            continue
+        fresh.add(entry["name"])
+        say(f"           {state.tile:9} uploaded, terminated {instance_id}")
+    return fresh
 
 
 def report_remaining(tiles: list[str], cfg: dict) -> int:
