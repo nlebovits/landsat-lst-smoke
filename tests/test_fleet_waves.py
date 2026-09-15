@@ -390,3 +390,67 @@ class _FakeLand:
 class _AlwaysHit:
     def query(self, cell, predicate=None):
         return [0]
+
+
+class TestTheWatcherFallsBackToTheCli:
+    """botocore and the AWS CLI read different credential caches.
+
+    MEASURED on 2026-09-15: the SSO access token expired at 15:27Z while the
+    CLI's role credential stayed valid until 23:17Z. For those eight hours the
+    watcher lost the `gone` state, which is the one that sends a dead instance
+    back to the queue.
+    """
+
+    def test_the_cli_answers_when_botocore_refuses(self, monkeypatch):
+        from lst.fleet import watch
+
+        class Refuses:
+            def describe_instances(self, InstanceIds):
+                raise RuntimeError("UnauthorizedSSOTokenError")
+
+        monkeypatch.setattr(watch, "running_via_cli", lambda ids, p, r: {"i-aaa"})
+        assert watch.running_instances(
+            Refuses(), ["i-aaa", "i-bbb"], profile="radiant-earth", region="us-west-2"
+        ) == {"i-aaa"}
+
+    def test_no_profile_means_no_fallback(self, monkeypatch):
+        """The old two-argument call must keep its old behaviour."""
+        from lst.fleet import watch
+
+        class Refuses:
+            def describe_instances(self, InstanceIds):
+                raise RuntimeError("UnauthorizedSSOTokenError")
+
+        called = []
+        monkeypatch.setattr(
+            watch, "running_via_cli", lambda ids, p, r: called.append(1) or set()
+        )
+        assert watch.running_instances(Refuses(), ["i-aaa"]) is None
+        assert called == []
+
+    def test_a_cli_that_also_fails_reports_not_knowing(self, monkeypatch):
+        """Not knowing is a third answer. It must not read as `every instance is gone`."""
+        from lst.fleet import watch
+
+        class Refuses:
+            def describe_instances(self, InstanceIds):
+                raise RuntimeError("UnauthorizedSSOTokenError")
+
+        monkeypatch.setattr(watch, "running_via_cli", lambda ids, p, r: None)
+        assert (
+            watch.running_instances(
+                Refuses(), ["i-aaa"], profile="p", region="us-west-2"
+            )
+            is None
+        )
+
+    def test_the_cli_reports_nothing_alive_as_an_empty_set(self, monkeypatch):
+        """An empty answer is knowledge. None is the absence of it."""
+        from lst.fleet import watch
+
+        monkeypatch.setattr(
+            watch.subprocess,
+            "run",
+            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "\n"})(),
+        )
+        assert watch.running_via_cli(["i-aaa"], "p", "us-west-2") == set()

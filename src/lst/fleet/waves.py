@@ -128,7 +128,10 @@ def poll_states(run: dict, s3, ec2) -> list[watch.State]:
             return None
 
     alive = watch.running_instances(
-        ec2, [e["instance_id"] for e in run["instances"] if e.get("instance_id")]
+        ec2,
+        [e["instance_id"] for e in run["instances"] if e.get("instance_id")],
+        profile=cfg["aws"]["profile"],
+        region=cfg["aws"]["region"],
     )
     now = datetime.now(timezone.utc)
     states = []

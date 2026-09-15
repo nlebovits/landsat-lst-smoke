@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -123,18 +124,71 @@ def classify(
     )
 
 
-def running_instances(ec2, ids: list[str]) -> set[str] | None:
+def running_via_cli(ids: list[str], profile: str, region: str) -> set[str] | None:
+    """The same question, asked through the AWS CLI instead of botocore.
+
+    The two read different credential caches, and on this account they disagree
+    for most of a run. The CLI writes an assumed-role credential to
+    `~/.aws/cli/cache` that lasts 8 hours. botocore ignores that file and mints
+    its own from the SSO access token, which expires far sooner and needs a
+    browser to renew.
+
+    MEASURED on 2026-09-15: the SSO access token expired at 15:27Z while the
+    role credential stayed valid until 23:17Z. For those eight hours `aws ec2
+    describe-instances` answered and `boto3` raised
+    `UnauthorizedSSOTokenError`, so the watcher lost the `gone` state, which is
+    the one that sends a dead instance back to the queue.
+
+    Returns:
+        The live ids, or None when the CLI could not answer either.
+    """
+    out = subprocess.run(
+        [
+            "aws",
+            "ec2",
+            "describe-instances",
+            "--profile",
+            profile,
+            "--region",
+            region,
+            "--instance-ids",
+            *ids,
+            "--query",
+            "Reservations[].Instances[?State.Name==`pending`||State.Name==`running`]"
+            ".InstanceId",
+            "--output",
+            "text",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        return None
+    return set(out.stdout.split())
+
+
+def running_instances(
+    ec2, ids: list[str], profile: str | None = None, region: str | None = None
+) -> set[str] | None:
     """Which of `ids` are alive, or None when nobody could ask.
 
     An expired SSO token must not take down the markers. Those come from object
     storage on a separate, static key that does not expire, and on the first
     run of this watcher the EC2 half took the whole poll down with it.
+
+    When botocore refuses and the caller named a profile, the CLI is asked the
+    same question before giving up. See `running_via_cli` for why the two
+    disagree.
     """
     if not ids:
         return set()
     try:
         desc = ec2.describe_instances(InstanceIds=ids)
     except Exception as err:
+        if profile and region:
+            alive = running_via_cli(ids, profile, region)
+            if alive is not None:
+                return alive
         print(
             f"# cannot reach EC2, reporting from markers only: {type(err).__name__}",
             flush=True,
@@ -181,7 +235,10 @@ def main() -> int:
 
     while True:
         alive = running_instances(
-            ec2, [e["instance_id"] for e in run["instances"] if e.get("instance_id")]
+            ec2,
+            [e["instance_id"] for e in run["instances"] if e.get("instance_id")],
+            profile=cfg["aws"]["profile"],
+            region=cfg["aws"]["region"],
         )
         now = datetime.now(timezone.utc)
         states = []
