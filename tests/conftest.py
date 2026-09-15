@@ -54,11 +54,22 @@ FULL_ARTIFACT = ROOT / "artifacts" / "tile_scene_inventory.parquet"
 #: one equatorial, and one on the antimeridian.
 SLICE_TILES = ("N05E010", "N40W075", "S15E175", "S30W065")
 
+#: The tiles `make_land_slice.py` cuts, which are the inventory's four plus one.
+#: `S40W065` is Golfo San Matias and the Patagonian coast, where the 25 km
+#: processing buffer is 38% of the mask. It is the tile the land counts are
+#: pinned on, and it needs no scenes, so it joins the geometry slice alone.
+LAND_SLICE_TILES = (*SLICE_TILES, "S40W065")
+
 #: The committed cut of the buffered land geometry, clipped to `SLICE_TILES`.
 #: Built by `tests/make_land_slice.py`. `masks.land_mask` only rasterises
 #: inside one tile's bbox, so a clipped geometry gives the same mask there as
 #: the full one, and `test_masks.py` asserts that rather than assuming it.
 LAND_GEOMETRY = ROOT / "artifacts" / "land_buffered_slice.gpkg"
+
+#: The committed cut of the unbuffered geometry, clipped to the same tiles.
+#: This one is what a published `lst:land_pixels` counts. Built by
+#: `tests/make_land_slice.py --strict`.
+STRICT_LAND_GEOMETRY = ROOT / "artifacts" / "land_strict_slice.gpkg"
 
 #: The full 16 MB geometry, which is gitignored for the same reason the
 #: inventory is. Only the checksum tie needs it, because `land_geometry_sha256`
@@ -68,6 +79,11 @@ FULL_LAND_GEOMETRY = ROOT / "artifacts" / "land_buffered.gpkg"
 needs_land_geometry = pytest.mark.skipif(
     not LAND_GEOMETRY.exists(),
     reason="run tests/make_land_slice.py to cut the geometry fixture",
+)
+
+needs_strict_land_geometry = pytest.mark.skipif(
+    not (LAND_GEOMETRY.exists() and STRICT_LAND_GEOMETRY.exists()),
+    reason="run tests/make_land_slice.py and --strict to cut both fixtures",
 )
 
 needs_full_land_geometry = pytest.mark.skipif(
@@ -304,6 +320,14 @@ def land_geometry():
     if not LAND_GEOMETRY.exists():
         pytest.skip("run tests/make_land_slice.py to cut the geometry fixture")
     return LAND_GEOMETRY
+
+
+@pytest.fixture(scope="session")
+def strict_land_geometry():
+    """The committed unbuffered land geometry, clipped to the same tiles."""
+    if not STRICT_LAND_GEOMETRY.exists():
+        pytest.skip("run tests/make_land_slice.py --strict to cut the fixture")
+    return STRICT_LAND_GEOMETRY
 
 
 @pytest.fixture(scope="session")

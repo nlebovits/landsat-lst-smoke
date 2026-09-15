@@ -26,6 +26,11 @@ equator and about 12.5 km at 60 degrees. `BUFFER_IS_MERCATOR` records that,
 and `land_tiles.parquet` carries it into every run. Changing it would move the
 pixel mask too, which is a separate decision with its own evidence.
 
+The same method at `buffer_meters=0` writes the land a published property means
+when it says land. `--write-strict-geometry` ships it beside the buffered one,
+under a filename of its own, and `masks.land_split` reads both. Only the
+buffered geometry selects tiles and masks pixels. The strict one divides.
+
 The tile grid matches the production grid in the same repository: 5 degrees,
 named for the north edge and the west edge, spanning `(south, north]` and
 `[west, east)`. `S30W065` is lat (-35, -30], lon [-65, -60).
@@ -538,6 +543,16 @@ def main(argv=None) -> int:
         "reads an artifact instead of fetching Natural Earth on a fleet "
         "instance. Conventionally artifacts/land_buffered.gpkg",
     )
+    p.add_argument(
+        "--write-strict-geometry",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="also copy the unbuffered land geometry to PATH. This one defines "
+        "land for a published coverage property, which the buffered geometry "
+        "does not: the buffer reaches 25 km out to sea. Conventionally "
+        "artifacts/land_strict.gpkg",
+    )
     args = p.parse_args(argv)
 
     checksum = land_geometry_checksum(args.cache_dir, buffer_meters=args.buffer_meters)
@@ -566,6 +581,15 @@ def main(argv=None) -> int:
         )
         print(f"              {written} ({written.stat().st_size / 1e6:.1f} MB)")
         print(f"              {geometry_digest_path(written)}")
+    if args.write_strict_geometry:
+        # Buffer zero, which `load_land_polygons` caches under a filename of its
+        # own, so the two artifacts never overwrite one another.
+        strict = write_land_geometry(
+            args.write_strict_geometry, args.cache_dir, buffer_meters=0
+        )
+        print("strict land   ne_10m_land, no buffer")
+        print(f"              {strict} ({strict.stat().st_size / 1e6:.1f} MB)")
+        print(f"              {geometry_digest_path(strict)}")
     return 0
 
 
