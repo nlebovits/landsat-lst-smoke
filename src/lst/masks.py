@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "numpy", "rasterio", "geopandas", "shapely", "pyogrio",
-# ]
-# ///
 """Which pixels a finished tile is allowed to carry a temperature on.
 
 `lst_qa.py` decides whether one observation of one pixel is usable. This module
@@ -54,7 +48,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aster_ged import (
+from lst.aster_ged import (
     COVERAGE_BAND,
     NUMOBS_BAND,
     GedError,
@@ -62,7 +56,7 @@ from aster_ged import (
     cells_to_pixels,
     dilate_cells,
 )
-from lst_qa import LST_NODATA_DN
+from lst.lst_qa import LST_NODATA_DN
 
 DEFAULT_LAND_GEOMETRY_URI = Path("artifacts/land_buffered.gpkg")
 
@@ -153,7 +147,7 @@ def land_mask(bbox, pixels_per_degree: int, land_geometry_uri=None):
     if not path.exists():
         msg = (
             f"no buffered land geometry at {path}. Write it with:\n"
-            f"  uv run land_tiles.py --out artifacts/land_tiles.parquet "
+            f"  uv run lst-land-tiles --out artifacts/land_tiles.parquet "
             f"--write-geometry {path}\n"
             f"The pixel mask reads an artifact rather than fetching Natural "
             f"Earth, so that a run needs no network."

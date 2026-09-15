@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "duckdb>=1.0", "pyarrow>=16", "pyproj", "shapely", "numpy",
-#   "requests", "geopandas", "pyogrio", "pystac-client",
-# ]
-# ///
 """Build the scene inventory once, from the USGS bulk metadata Parquet.
 
 Every tile VM used to open Earth Search and page the same catalogue. Hundreds
@@ -39,7 +32,7 @@ same shape. Matching that is the point: the filters here reproduce
 `stac_reference.search_items`, and nothing is widened because the bulk file
 happens to hold more rows.
 
-    uv run usgs_inventory.py --land-tiles artifacts/land_tiles.parquet \
+    uv run lst-inventory --land-tiles artifacts/land_tiles.parquet \
         --out artifacts/tile_scene_inventory.parquet
 """
 
@@ -53,15 +46,15 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from land_tiles import (
+from lst.land_tiles import (
     COASTAL_BUFFER_METERS,
     LATITUDE_LIMIT,
     NATURAL_EARTH_VERSION,
     read_land_tiles,
     tile_bounds,
 )
-from tile_inventory import INVENTORY_SCHEMA_VERSION
-from stac_window import (
+from lst.tile_inventory import INVENTORY_SCHEMA_VERSION
+from lst.stac_window import (
     DEFAULT_CLOUD_COVER_LT,
     DEFAULT_END,
     DEFAULT_PLATFORMS,
@@ -540,7 +533,7 @@ def _resolve_month_boundaries(centre, item_ids):
         return centre, []
 
     wanted = [item_ids[i] for i in ambiguous]
-    from stac_reference import fetch_items_by_id
+    from lst.stac_reference import fetch_items_by_id
 
     found = fetch_items_by_id(wanted)
     missing = [i for i in wanted if i not in found]

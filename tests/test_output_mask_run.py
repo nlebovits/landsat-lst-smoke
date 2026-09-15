@@ -30,21 +30,19 @@ rehearsal is masked like any other run.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from lst import aster_ged
+from lst import masks
+from lst import shard_lst_p95
+from lst.land_tiles import tile_bounds
+from lst.lst_qa import LST_NODATA_DN
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import aster_ged  # noqa: E402
-import masks  # noqa: E402
-import shard_lst_p95  # noqa: E402
 from conftest import needs_land_geometry, write_numobs  # noqa: E402
-from land_tiles import tile_bounds  # noqa: E402
-from lst_qa import LST_NODATA_DN  # noqa: E402
 
 #: Interior South America. Every pixel is land, so the land rule removes
 #: nothing and the emissivity rule is the only one that can act.
@@ -410,7 +408,7 @@ class TestTheEscapeHatchAndTheGuards:
         assert plain["valid_fraction"] > masked["valid_fraction"]
 
     def test_a_missing_mosaic_stops_the_run(self, tmp_path, land_geometry):
-        with pytest.raises(aster_ged.GedError, match="uv run aster_ged.py"):
+        with pytest.raises(aster_ged.GedError, match="uv run lst-aster-ged"):
             rehearse(tmp_path / "out", INLAND, tmp_path / "absent.tif", land_geometry)
 
     def test_a_missing_geometry_stops_the_run(self, tmp_path, numobs_artifact):

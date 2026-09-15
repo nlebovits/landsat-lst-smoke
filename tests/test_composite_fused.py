@@ -13,21 +13,19 @@ synchronous scheduler; the driver-level comparison of the two engines lives in
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import dask
 import numpy as np
 import pytest
 import rasterio
+from lst import composite
+from lst import destripe
+from lst.lst_qa import LST_NODATA_DN, MIN_TOTAL_OBSERVATIONS
+from lst.masks import transform_for
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import composite  # noqa: E402
-import destripe  # noqa: E402
-from lst_qa import LST_NODATA_DN, MIN_TOTAL_OBSERVATIONS  # noqa: E402
-from masks import transform_for  # noqa: E402
 
 #: A window wide enough that the 7 x 7 rehearsal walk leaves part of it
 #: uncovered, so the fill path and the shallow blocks are exercised.

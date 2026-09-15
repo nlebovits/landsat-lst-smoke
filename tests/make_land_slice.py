@@ -26,13 +26,11 @@ needs the real artifact and skips without it.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
+from lst.land_tiles import tile_bounds
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-from land_tiles import tile_bounds  # noqa: E402
 
 #: The tiles the committed inventory slice holds. Kept in step with
 #: `tests/conftest.py`, which names the same four.
@@ -73,7 +71,7 @@ def main(argv=None) -> int:
     if not args.source.exists():
         print(
             f"no buffered geometry at {args.source}. Write it with:\n"
-            f"  uv run land_tiles.py --out artifacts/land_tiles.parquet "
+            f"  uv run lst-land-tiles --out artifacts/land_tiles.parquet "
             f"--write-geometry {args.source}"
         )
         return 1

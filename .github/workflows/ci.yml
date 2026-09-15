@@ -37,20 +37,18 @@ jobs:
       - name: Lint
         run: uvx ruff@0.14.1 check .
 
-      # Same list as the vulture hook in prek.toml. If they drift, a module
-      # gets checked locally and not here, or the other way round.
+      # Same arguments as the vulture hook in prek.toml. Both name the package
+      # rather than a list of files, so the two cannot drift the way the two
+      # 22-entry lists they replaced did.
       - name: Dead code
-        run: |
-          uvx vulture@2.14 \
-            aster_ged.py cog_catalog.py compare_qa_masks.py composite.py \
-            cost_report.py destripe.py fleet_plan.py \
-            land_tiles.py masks.py measure_ged_registration.py \
-            measure_land_defects.py measure_s3_requests.py \
-            measure_scene_centre.py memory_sampler.py observe.py \
-            shard_lst_p95.py \
-            stac_reference.py stac_window.py staging.py \
-            tile_inventory.py tile_prep.py usgs_inventory.py \
-            --min-confidence 80
+        run: uvx vulture@2.14 src/lst fleet/upload.py --min-confidence 80
+
+      # Imported names against declared ones. This is the gate that would have
+      # caught `pystac`, `botocore` and `affine` being imported and declared
+      # nowhere, and it found `planetary-computer`, `rioxarray` and `rich`
+      # declared and imported nowhere. Configured in pyproject.toml.
+      - name: Dependency declarations
+        run: uvx deptry@0.23.1 . --no-ansi
 
       - name: Spell check
         run: |
@@ -73,14 +71,19 @@ jobs:
       - name: Install the dev environment
         run: uv sync --group dev --frozen
 
-      # --extra-search-path puts the repository root on the module path.
-      # measure_s3_requests.py imports shard_lst_p95 after a sys.path insert.
-      # tests/ goes on it too, because pytest puts it there and the test
-      # modules import their shared fixtures from conftest by name. fleet/
-      # holds the launch scripts, which tests/test_fleet_launch.py imports the
-      # same way.
+      # `tests/` on the search path because the test modules import their
+      # shared fixtures from `conftest` by bare name, the way pytest resolves
+      # them. `fleet/` because tests/test_fleet_launch.py imports `upload`,
+      # which is deliberately outside the package. Same flags as prek.toml.
       - name: ty
-        run: uv run ty check --extra-search-path . --extra-search-path tests --extra-search-path fleet
+        run: uv run ty check --extra-search-path tests --extra-search-path fleet
+
+      # The layering `src/lst/__init__.py` describes, stated as contracts.
+      # import-linter reads the package's import graph, so it is installed in
+      # the environment rather than run through uvx, which would give it an
+      # environment where `lst` does not exist.
+      - name: Import contracts
+        run: uv run lint-imports --no-logo
 
   test:
     name: Unit tests
@@ -100,11 +103,15 @@ jobs:
       - name: pytest
         run: uv run pytest
 
-      # A script has to run on the dependencies its own PEP 723 block declares,
-      # not on the dev group, which is the union of every script's. The suite
-      # above runs inside that union and cannot tell the two apart. This step
-      # can: it copies the scripts to a fresh path and runs them there, which
-      # is what a fleet instance holds after git clone. A missing line here
-      # once cost a live c6id.16xlarge.
-      - name: Script environments resolve on their own metadata
+      # An instance runs on `[project] dependencies` alone, not on the dev
+      # group the suite above runs inside, and that suite cannot tell the two
+      # apart. This step can: it builds a checkout at a fresh path, runs
+      # `uv sync --frozen --no-dev` there exactly as `fleet/run.sh` does, and
+      # then runs the console scripts. A missing line here once cost a live
+      # c6id.16xlarge.
+      #
+      # Its own step rather than part of the run above, because `addopts`
+      # deselects the `packaging` mark. A green default run says nothing about
+      # these.
+      - name: A clean checkout syncs and runs
         run: uv run pytest -m packaging

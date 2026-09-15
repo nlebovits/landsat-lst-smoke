@@ -29,22 +29,21 @@ import sys
 from pathlib import Path
 
 import pytest
+from lst import aster_ged
+from lst import composite
+from lst import destripe
+from lst import land_tiles
+from lst import masks
+from lst import memory_sampler
+from lst import observe
+from lst import shard_lst_p95
+from lst import staging
+from lst import tile_inventory
+from lst import tile_prep
+from lst.land_tiles import tile_bounds
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import aster_ged  # noqa: E402
-import composite  # noqa: E402
-import destripe  # noqa: E402
-import land_tiles  # noqa: E402
-import masks  # noqa: E402
-import memory_sampler  # noqa: E402
-import observe  # noqa: E402
-import shard_lst_p95  # noqa: E402
-import staging  # noqa: E402
-import tile_inventory  # noqa: E402
-import tile_prep  # noqa: E402
-from land_tiles import tile_bounds  # noqa: E402
 
 #: The tile the offline tests read. It is in the committed slice.
 TILE = "S30W065"
@@ -124,7 +123,7 @@ class TestNoCatalogueInTheRuntime:
         literal string, so that moving the module renames the thing being
         compared instead of making every comparison trivially true.
         """
-        import stac_reference
+        from lst import stac_reference
 
         for module in RUNTIME_MODULES:
             for attr in vars(module).values():
@@ -135,7 +134,7 @@ class TestNoCatalogueInTheRuntime:
 
     def test_the_reference_module_still_exists_for_the_oracle(self):
         """It is kept on purpose, for the parity tests and the dry runs."""
-        import stac_reference
+        from lst import stac_reference
 
         assert hasattr(stac_reference, "search_items")
 
@@ -225,7 +224,7 @@ class TestRuntimeWorksOffline:
         assert items[0]["assets"]["qa_pixel"]["href"].startswith("s3://usgs-landsat")
 
     def test_the_manifest_gate_runs_offline(self, no_network, slice_artifact):
-        from usgs_inventory import INVENTORY_SCHEMA_VERSION
+        from lst.usgs_inventory import INVENTORY_SCHEMA_VERSION
 
         manifest = tile_inventory.read_manifest(slice_artifact)
         tile_inventory.check_manifest(
@@ -329,7 +328,7 @@ def scenes_in_a_bucket(tmp_path):
         The item dicts, the bbox covering them, and the object store contents.
     """
     from conftest import make_row
-    from tile_inventory import build_item
+    from lst.tile_inventory import build_item
 
     source = tmp_path / "source"
     source.mkdir()

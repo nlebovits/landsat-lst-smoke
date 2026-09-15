@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "numpy", "rasterio", "geopandas", "shapely", "pyogrio", "pyarrow>=16",
-# ]
-# ///
 """Check the ASTER GED mask against a composite this repository already built.
 
 `FINDINGS.md` labels every figure MEASURED or DERIVED, and the ASTER GED
@@ -39,7 +33,7 @@ The tile-level claim. If the L2SR product type really follows ASTER coverage,
 the tiles that hold nothing but L2SR should hold little or no land with
 emissivity. This is the check `FINDINGS.md:987` names.
 
-    uv run measure_ged_registration.py \\
+    uv run lst-measure-ged-registration \\
         --raster run/lst_p95.tif --qa run/qa_count.tif \\
         --tile S30W065 --out artifacts/ged_registration.json
 """
@@ -50,10 +44,9 @@ import argparse
 import json
 from pathlib import Path
 
-import aster_ged
-import masks
-from land_tiles import tile_bounds
-from lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE
+from lst import aster_ged, masks
+from lst.land_tiles import tile_bounds
+from lst.lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE
 
 #: Where a `--no-catalog` run leaves the two COGs. A catalog run puts them
 #: under `<out-dir>/catalog/<collection>/<tile>/`, so point `--raster` and
@@ -170,8 +163,8 @@ def tile_level_claim(inventory_uri, land_tiles_uri, numobs_uri, land_geometry_ur
     """
     import pyarrow.parquet as pq
 
-    from land_tiles import read_land_tiles
-    from tile_inventory import thermal_rows_for_tile
+    from lst.land_tiles import read_land_tiles
+    from lst.tile_inventory import thermal_rows_for_tile
 
     import numpy as np
 
@@ -335,7 +328,7 @@ def gap_cell_census(numobs_uri, bbox, lst, land, pixels_per_degree: int) -> dict
     """
     import numpy as np
 
-    from lst_qa import LST_NODATA_DN
+    from lst.lst_qa import LST_NODATA_DN
 
     per_cell = aster_ged.cells_per_pixel_block(pixels_per_degree)
     counts, covered = _cell_region(numobs_uri, bbox, pixels_per_degree, 0)
@@ -390,7 +383,7 @@ def rule_table(numobs_uri, bbox, shape, lst, land, pixels_per_degree: int) -> li
     """
     import numpy as np
 
-    from lst_qa import LST_NODATA_DN
+    from lst.lst_qa import LST_NODATA_DN
 
     pad = 1
     cell_counts, cell_covered = _cell_region(numobs_uri, bbox, pixels_per_degree, pad)

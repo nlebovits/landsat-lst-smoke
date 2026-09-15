@@ -16,17 +16,15 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import composite
-import shard_lst_p95
-import cog_catalog
-from cog_catalog import collection_id_for_window, write_catalog
+from lst import composite
+from lst import shard_lst_p95
+from lst import cog_catalog
+from lst.cog_catalog import collection_id_for_window, write_catalog
 
 BBOX = "-65.0,-32.5,-64.5,-32.0"
 NEIGHBOUR_BBOX = "-65.0,-32.0,-64.5,-31.5"
@@ -186,7 +184,7 @@ class TestTheCatalogCheckRunsBeforeTheWriter:
     """
 
     def check(self, **overrides):
-        from cog_catalog import check_catalog_inputs
+        from lst.cog_catalog import check_catalog_inputs
 
         with pytest.raises(ValueError) as failure:
             check_catalog_inputs(meta_for(**overrides))
@@ -201,7 +199,7 @@ class TestTheCatalogCheckRunsBeforeTheWriter:
         # one over the pixels publishes a claim nobody could question.
         meta = meta_for()
         del meta[key]
-        from cog_catalog import check_catalog_inputs
+        from lst.cog_catalog import check_catalog_inputs
 
         with pytest.raises(ValueError, match=key):
             check_catalog_inputs(meta)

@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "geopandas", "shapely", "pyogrio", "pyarrow", "pyproj",
-# ]
-# ///
 """The processing footprint: one buffered land geometry, one tile list.
 
 Two questions need the same answer. Which tiles does the fleet run? Which
@@ -30,7 +24,7 @@ The tile grid matches the production grid in the same repository: 5 degrees,
 named for the north edge and the west edge, spanning `(south, north]` and
 `[west, east)`. `S30W065` is lat (-35, -30], lon [-65, -60).
 
-    uv run land_tiles.py --out artifacts/land_tiles.parquet
+    uv run lst-land-tiles --out artifacts/land_tiles.parquet
 """
 
 from __future__ import annotations

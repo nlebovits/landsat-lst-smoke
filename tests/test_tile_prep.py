@@ -19,18 +19,15 @@ a fixture with known contents.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 import xarray as xr
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import destripe
-import tile_prep
-from lst_qa import LWIR_OFFSET_C, LWIR_SCALE
+from lst import destripe
+from lst import tile_prep
+from lst.lst_qa import LWIR_OFFSET_C, LWIR_SCALE
 
 NY = NX = 8
 RATIO = 2
@@ -541,7 +538,7 @@ class TestTheStagingThreadCount:
 
     def test_none_reproduces_the_measured_default(self):
         """`FetchSettings.build` has to read None as unset, not as zero."""
-        import staging
+        from lst import staging
 
         assert (
             staging.FetchSettings.build(threads=None).threads
@@ -550,7 +547,7 @@ class TestTheStagingThreadCount:
         assert staging.FetchSettings.build(threads=128).threads == 128
 
     def test_a_zero_thread_count_is_refused_rather_than_treated_as_unset(self):
-        import staging
+        from lst import staging
 
         with pytest.raises(staging.StagingError, match="threads"):
             staging.FetchSettings.build(threads=0)

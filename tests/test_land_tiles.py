@@ -12,15 +12,13 @@ network-free run still checks the grid, the naming, and the artifact format.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import land_tiles
-from land_tiles import (
+from lst import land_tiles
+from lst.land_tiles import (
     COASTAL_BUFFER_METERS,
     LATITUDE_LIMIT,
     MAX_NATURAL_EARTH_SCALERANK,

@@ -21,17 +21,15 @@ from __future__ import annotations
 
 import copy
 import io
-import sys
 from pathlib import Path
 
 import pytest
+from lst import staging
+from lst.tile_inventory import build_item, items_for_tile
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import staging  # noqa: E402
 from conftest import make_row  # noqa: E402
-from tile_inventory import build_item, items_for_tile  # noqa: E402
 
 TILE = "S30W065"
 
@@ -575,8 +573,8 @@ class TestDiskGuard:
         the parsers reject it rather than trusting a reviewer to notice one
         coming back.
         """
-        import shard_lst_p95
-        import tile_prep
+        from lst import shard_lst_p95
+        from lst import tile_prep
 
         for module in (shard_lst_p95, tile_prep):
             with pytest.raises(SystemExit):

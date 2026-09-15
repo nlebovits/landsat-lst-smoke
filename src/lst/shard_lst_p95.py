@@ -1,13 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "frisky>=0.7.2", "dask", "odc-stac", "odc-geo", "pystac",
-#   "xarray", "rioxarray", "numpy", "geopandas",
-#   "psutil", "rich", "boto3", "pyarrow>=16",
-#   "rasterio", "shapely", "pyogrio",
-#   "stac-geoparquet", "matplotlib",
-# ]
-# ///
 """The p95 LST composite of one tile, as one lazy dask-xarray graph on frisky.
 
 `composite.build_graph` opens every scene of the tile once, chunked in space
@@ -22,7 +12,7 @@ disk, starts the frisky cluster, computes, collects the trace, and writes the
 catalog. Every phase is a frisky client phase, so the dashboard shows what the
 driver is doing while it does it.
 
-    uv run shard_lst_p95.py --tile S30W065 --tile-prep ./tile-prep \\
+    uv run lst-shard --tile S30W065 --tile-prep ./tile-prep \\
         --stage-dir /mnt/nvme/stage --out-dir ./run
 """
 
@@ -36,15 +26,9 @@ import tempfile
 import time
 from pathlib import Path
 
-import aster_ged
-import composite
-import destripe
-import lst_qa
-import masks
-import observe
-import staging
-from aster_ged import DEFAULT_NUMOBS_URI
-from cog_catalog import (
+from lst import aster_ged, composite, destripe, lst_qa, masks, observe, staging
+from lst.aster_ged import DEFAULT_NUMOBS_URI
+from lst.cog_catalog import (
     DEFAULT_HOST_NAME,
     DEFAULT_HOST_URL,
     DEFAULT_LICENSE,
@@ -53,16 +37,16 @@ from cog_catalog import (
     write_catalog,
     write_cog,
 )
-from land_tiles import tile_bounds
-from lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE
-from memory_sampler import MemorySampler
-from stac_window import (
+from lst.land_tiles import tile_bounds
+from lst.lst_qa import LST_NODATA_DN, LST_OFFSET, LST_SCALE
+from lst.memory_sampler import MemorySampler
+from lst.stac_window import (
     DEFAULT_CLOUD_COVER_LT,
     DEFAULT_END,
     DEFAULT_PLATFORMS,
     DEFAULT_START,
 )
-from tile_inventory import (
+from lst.tile_inventory import (
     INVENTORY_SCHEMA_VERSION,
     check_manifest,
     items_for_tile,
@@ -381,7 +365,7 @@ def check_mask_inputs(args, say=print) -> dict | None:
     if not args.land_geometry_uri.exists():
         msg = (
             f"no buffered land geometry at {args.land_geometry_uri}. Write it "
-            f"with:\n  uv run land_tiles.py --out artifacts/land_tiles.parquet "
+            f"with:\n  uv run lst-land-tiles --out artifacts/land_tiles.parquet "
             f"--write-geometry {args.land_geometry_uri}"
         )
         raise masks.MaskError(msg)
@@ -774,10 +758,13 @@ def load_tile_prep(args, tile_id: str, item_dicts, run_provenance):
 
 
 def tile_prep_schema_version() -> int:
-    """Read lazily, because `tile_prep` imports this module."""
-    import tile_prep
+    """The prep artifact version this run understands.
 
-    return tile_prep.PREP_SCHEMA_VERSION
+    Read from `destripe`, which owns `Prep` and parses the file. It used to be
+    read from `tile_prep` through a deferred import, because `tile_prep`
+    imports this module and the pair formed a cycle.
+    """
+    return destripe.PREP_SCHEMA_VERSION
 
 
 def correction_rule(args, prep) -> dict | None:
@@ -939,7 +926,7 @@ def run_fused(
     """
     from odc.geo.geobox import GeoBox
 
-    from masks import transform_for
+    from lst.masks import transform_for
 
     fused_block = getattr(composite, "fused_block", None)
     if fused_block is None:

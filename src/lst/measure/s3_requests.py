@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "odc-stac", "odc-geo", "pystac", "pystac-client", "xarray", "dask",
-#   "numpy", "rioxarray",
-# ]
-# ///
 """Count the S3 GET requests one block actually issues. Bounded and cheap.
 
 Requester-pays charges scale with request count, not bytes, and nothing in this
@@ -47,9 +40,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from stac_window import DEFAULT_END, DEFAULT_START
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lst.stac_window import DEFAULT_END, DEFAULT_START
 
 
 class Block(NamedTuple):
@@ -69,7 +60,7 @@ def plan_blocks(bbox, pixels_per_degree: int, chunk: int) -> list[Block]:
     read pattern measured here is a block the run actually issues rather than
     an arbitrary window of the same size.
     """
-    import composite
+    from lst import composite
 
     height, width = composite.raster_shape(bbox, pixels_per_degree)
     west, _, _, north = bbox
@@ -168,7 +159,7 @@ def count_requests(
     over one block's bbox with the time axis in one chunk. A second
     implementation here would measure a pipeline that does not exist.
     """
-    import composite
+    from lst import composite
     import dask
 
     t0 = time.perf_counter()
@@ -251,12 +242,12 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path("s3-requests.json"))
     args = ap.parse_args()
 
-    from shard_lst_p95 import configure_read_env
+    from lst.shard_lst_p95 import configure_read_env
 
     # The catalogue query lives in stac_reference now. This is a measurement
     # tool, so it describes what the old runtime did; the runtime itself reads
     # the precomputed inventory and opens no catalogue.
-    from stac_reference import search_items
+    from lst.stac_reference import search_items
 
     # Same settings as the real run, and curl verbose on top of them.
     configure_read_env(args.source)

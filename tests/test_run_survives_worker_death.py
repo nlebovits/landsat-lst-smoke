@@ -36,12 +36,11 @@ import time
 from pathlib import Path
 
 import pytest
+from lst import composite
+from lst import shard_lst_p95
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import composite  # noqa: E402
-import shard_lst_p95  # noqa: E402
 
 TILE = "S30W065"
 
@@ -204,15 +203,15 @@ class TestABlockErringFailsTheRun:
         reach them. Same reason `test_script_environments.py` copies before it
         runs.
         """
+        # The package, copied whole. It used to be a flat glob of the root,
+        # which stopped copying anything the moment the modules moved under
+        # src/. Copying the package directory tracks the layout instead of
+        # restating it.
         work = tmp_path / "checkout"
-        work.mkdir(parents=True)
-        for script in ROOT.glob("*.py"):
-            shutil.copy2(script, work / script.name)
+        package = Path(composite.__file__).parent
+        shutil.copytree(package, work / package.name)
 
-        # Located through the module rather than spelled as a root filename, so
-        # that a module which moves takes this path with it. A missing file
-        # here fails loudly; a name that happens to exist would not.
-        target = work / Path(composite.__file__).relative_to(ROOT)
+        target = work / package.name / Path(composite.__file__).name
         source = target.read_text()
         marker = "def reduce_block("
         # Past the signature's closing paren and past the docstring, so the
@@ -228,9 +227,12 @@ class TestABlockErringFailsTheRun:
         proc = subprocess.run(
             [
                 sys.executable,
-                # Relative, because it names the copy under `work`, not the
-                # checkout. Derived so that it tracks the module's real place.
-                str(Path(shard_lst_p95.__file__).relative_to(ROOT)),
+                # `-m` with `cwd=work`, so `work` lands at sys.path[0] and the
+                # broken copy of the package shadows the installed one. Naming
+                # the file directly would put `work/lst` on the path instead,
+                # and its own `from lst import ...` would not resolve.
+                "-m",
+                shard_lst_p95.__name__,
                 *argv(out)[2:],
                 # Small: the run is expected to die on the first block, so
                 # there is nothing to be gained by writing 200 scenes first.

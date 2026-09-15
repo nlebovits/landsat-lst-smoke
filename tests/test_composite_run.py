@@ -14,25 +14,23 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 import rasterio
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-import composite  # noqa: E402
-import shard_lst_p95  # noqa: E402
-from cog_catalog import read_cog_encoding  # noqa: E402
-from lst_qa import (  # noqa: E402
+from lst import composite
+from lst import shard_lst_p95
+from lst.cog_catalog import read_cog_encoding
+from lst.lst_qa import (
     LST_NODATA_DN,
     LST_OFFSET,
     LST_SCALE,
     MIN_TOTAL_OBSERVATIONS,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
+
 
 pytestmark = pytest.mark.timeout(600)
 
@@ -240,7 +238,7 @@ class TestTheWriter:
         import dask
 
         import frisky
-        import observe
+        from lst import observe
 
         bbox = shard_lst_p95.tile_bounds(TILE)
         items, _ = composite.rehearsal_items(bbox, 6, tmp_path / "scenes")

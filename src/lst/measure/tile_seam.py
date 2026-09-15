@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = ["numpy"]
-# ///
 """How far two adjacent tiles disagree about the same scene.
 
 Each tile fits its own offsets over its own region: `tile_prep.prep_bbox` runs
@@ -15,7 +11,7 @@ numbers are already in `tile-prep.npz`, keyed by scene id. A step at a tile
 boundary is the worst kind of artifact to publish: straight, axis-aligned, and
 sitting on a round-number coordinate.
 
-    uv run measure_tile_seam.py --prep a/tile-prep.npz b/tile-prep.npz
+    uv run lst-measure-tile-seam --prep a/tile-prep.npz b/tile-prep.npz
 
 Only scenes both tiles kept are compared. A scene one tile rejected at the 15 C
 cap never reaches that tile's composite, so it cannot contribute a step.

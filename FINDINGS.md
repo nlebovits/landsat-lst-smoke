@@ -85,21 +85,21 @@ Build the artifacts once, on a laptop, before any instance starts:
 
 ```bash
 # the authoritative tile list, and the geometry the pixel mask rasterises
-uv run land_tiles.py --out artifacts/land_tiles.parquet \
+uv run lst-land-tiles --out artifacts/land_tiles.parquet \
     --write-geometry artifacts/land_buffered.gpkg
 
 # the scene inventory, from the USGS bulk metadata Parquet
-uv run usgs_inventory.py \
+uv run lst-inventory \
     --land-tiles artifacts/land_tiles.parquet \
     --out artifacts/tile_scene_inventory.parquet
 
 # ASTER GED observation counts, for the emissivity half of the mask
 uv run python -c \
     "import earthaccess; earthaccess.login(persist=True)"
-uv run aster_ged.py --out artifacts/aster_numobs.tif
+uv run lst-aster-ged --out artifacts/aster_numobs.tif
 
 # what the fleet will launch, and the checks that gate it
-uv run fleet_plan.py --out artifacts/fleet_plan.json
+uv run lst-fleet-plan --out artifacts/fleet_plan.json
 ```
 
 `land_tiles.py --write-geometry` copies the buffered polygons out of the cache
@@ -126,15 +126,15 @@ come from measurement scripts, which no build runs:
 
 ```bash
 # what each defect in the shared land method selects
-uv run measure_land_defects.py --out artifacts/land_defects.json
+uv run lst-measure-land-defects --out artifacts/land_defects.json
 
 # the ASTER GED mask against a composite built before it existed
-uv run measure_ged_registration.py \
+uv run lst-measure-ged-registration \
     --raster evidence/fulltile/tile/lst_p95_dn.npy --tile S30W065 \
     --out artifacts/ged_registration.json
 
 # how far the computed scene centre sits from the published one
-uv run measure_scene_centre.py --all-years \
+uv run lst-measure-scene-centre --all-years \
     --out artifacts/scene_centre_offset.json
 ```
 
@@ -147,13 +147,13 @@ correction over a coarse grid and stages every object the tile needs.
 files, so it issues no billable GET of its own.
 
 ```bash
-uv run tile_prep.py --tile S30W065 \
+uv run lst-prep --tile S30W065 \
     --stage-dir /mnt/nvme/stage \
     --out-dir ./run/prep \
     --block 512 --workers 64 --threads-per-worker 1 \
     --target-memory-gib 256
 
-uv run shard_lst_p95.py --tile S30W065 \
+uv run lst-shard --tile S30W065 \
     --tile-prep ./run/prep \
     --engine fused --chunk 360 \
     --workers 48 --threads-per-worker 1 --memory-limit-gib 5 \
@@ -1330,7 +1330,7 @@ targets. It exits 2 on a configuration the launcher would refuse, which prices a
 fleet before an instance exists:
 
 ```bash
-uv run shard_lst_p95.py --tile S30W065 --chunk 512 --workers 64 \
+uv run lst-shard --tile S30W065 --chunk 512 --workers 64 \
     --target-memory-gib 128 --dry-run
 ```
 

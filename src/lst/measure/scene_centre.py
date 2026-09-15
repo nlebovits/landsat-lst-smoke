@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "duckdb>=1.0", "pyarrow>=16", "numpy", "pystac-client",
-# ]
-# ///
 """How far the computed scene centre sits from the one Earth Search publishes.
 
 `usgs_inventory` has one tolerance. It computes the acquisition centre as the
@@ -34,7 +28,7 @@ is the default for that reason.
 Run it with `--all-years` to see both regimes in one sample, which is what the
 build faces.
 
-    uv run measure_scene_centre.py --out artifacts/scene_centre_offset.json
+    uv run lst-measure-scene-centre --out artifacts/scene_centre_offset.json
 """
 
 from __future__ import annotations
@@ -44,7 +38,7 @@ import json
 import random
 from pathlib import Path
 
-from stac_window import DEFAULT_CLOUD_COVER_LT
+from lst.stac_window import DEFAULT_CLOUD_COVER_LT
 
 #: How many scenes to compare. Earth Search takes 50 ids per request, so this
 #: is 8 requests at the default.
@@ -75,7 +69,7 @@ def sample_scenes(
     """
     import duckdb
 
-    from usgs_inventory import stac_item_id
+    from lst.usgs_inventory import stac_item_id
 
     sat = SATELLITE_BY_PLATFORM[platform]
     year_clause = (
@@ -122,7 +116,7 @@ def compare(scenes: list[dict], *, source: str = "earth-search") -> dict:
     """
     import numpy as np
 
-    from stac_reference import fetch_items_by_id
+    from lst.stac_reference import fetch_items_by_id
 
     found = fetch_items_by_id([s["item_id"] for s in scenes], source=source)
 
@@ -195,7 +189,7 @@ def _bulk_path(cache_dir: Path | str) -> Path:
 
 
 def main(argv=None) -> int:
-    from usgs_inventory import DEFAULT_CACHE_DIR, MONTH_BOUNDARY_GUARD_SECONDS
+    from lst.usgs_inventory import DEFAULT_CACHE_DIR, MONTH_BOUNDARY_GUARD_SECONDS
 
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)

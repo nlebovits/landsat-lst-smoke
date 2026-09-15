@@ -22,7 +22,11 @@ git fetch --all --prune --tags
 git checkout --detach "$COMMIT" || die checkout $?
 git rev-parse HEAD | tee "$RUN/commit.txt"
 test "$(git rev-parse HEAD)" = "$COMMIT" || die commit_mismatch 1
-uv sync || die uv_sync $?
+# `--frozen` so the box installs the resolution CI tested, never a fresh one.
+# `--no-dev` drops pytest, ty and rashid, which an instance never runs. Not
+# `--only-group`: that installs a group instead of the project, and the console
+# scripts below are the project.
+uv sync --frozen --no-dev || die uv_sync $?
 
 # boto3 through `uv`, not the `aws` CLI. The AMI has no CLI installed, and
 # adding one is a second way to do what the run's own dependencies already do.
@@ -64,7 +68,7 @@ trap 'kill $HEARTBEAT 2>/dev/null' EXIT
 # that cannot fit stops before the fetch, `--stage-threads 128` because MEASURED
 # staging runs at 321 MB/s there against 233 at the default 64.
 mark prep_start
-uv run tile_prep.py --tile "$TILE" \
+uv run lst-prep --tile "$TILE" \
     --stage-dir /mnt/nvme/stage \
     --out-dir "$RUN/prep" \
     --block 512 --workers 64 --threads-per-worker 1 \
@@ -88,7 +92,7 @@ fi
 # omitted composites the pooled percentile and leaves the WRS seam in a
 # finished, wrong raster. `--keep-staged` lets the two passes share one fetch.
 mark composite_start
-uv run shard_lst_p95.py --tile "$TILE" \
+uv run lst-shard --tile "$TILE" \
     --tile-prep "$RUN/prep" \
     --engine fused --chunk 360 \
     --workers 48 --threads-per-worker 1 --memory-limit-gib 5 \

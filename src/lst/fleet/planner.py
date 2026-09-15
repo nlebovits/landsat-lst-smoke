@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "pyarrow>=16", "numpy", "rasterio", "geopandas", "shapely", "pyogrio",
-# ]
-# ///
 """Decide what the fleet runs, before the fleet costs anything.
 
 One machine per tile, and the tile list is the artifact rather than a constant
@@ -14,7 +8,7 @@ the inventory's identity attached.
 Everything here happens before a single instance starts. That is the whole
 design: a window mismatch found after launch has already bought 895 machines.
 
-    uv run fleet_plan.py --out artifacts/fleet_plan.json
+    uv run lst-fleet-plan --out artifacts/fleet_plan.json
 """
 
 from __future__ import annotations
@@ -23,17 +17,15 @@ import argparse
 import json
 from pathlib import Path
 
-import aster_ged
-import lst_qa
-import masks
-from land_tiles import read_land_tiles, tile_bounds
-from stac_window import (
+from lst import aster_ged, lst_qa, masks
+from lst.land_tiles import read_land_tiles, tile_bounds
+from lst.stac_window import (
     DEFAULT_CLOUD_COVER_LT,
     DEFAULT_END,
     DEFAULT_PLATFORMS,
     DEFAULT_START,
 )
-from tile_inventory import (
+from lst.tile_inventory import (
     INVENTORY_SCHEMA_VERSION,
     InventoryError,
     check_manifest,
@@ -76,7 +68,7 @@ def check_land_parameters(manifest: dict, land_provenance: dict) -> None:
         msg = (
             f"the tile list and the inventory were built from different land "
             f"parameters:\n  {joined}\n"
-            f"Rebuild both: land_tiles.py first, then usgs_inventory.py."
+            f"Rebuild both: lst-land-tiles first, then lst-inventory."
         )
         raise InventoryError(msg)
 
@@ -103,7 +95,7 @@ def check_mask_artifacts(land_provenance: dict, numobs_uri, land_geometry_uri) -
     if not land_geometry_uri.exists():
         msg = (
             f"no buffered land geometry at {land_geometry_uri}. Write it "
-            f"with:\n  uv run land_tiles.py --out {{tile list}} "
+            f"with:\n  uv run lst-land-tiles --out {{tile list}} "
             f"--write-geometry {land_geometry_uri}"
         )
         raise masks.MaskError(msg)

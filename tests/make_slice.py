@@ -26,9 +26,15 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-from tests.conftest import FULL_ARTIFACT, SLICE_ARTIFACT, SLICE_TILES  # noqa: E402
+# `conftest`, not `tests.conftest`. This was the only place in the repository
+# spelling it the second way, and two spellings bind two separate module
+# objects with two separate copies of every constant. The directory goes on the
+# path because this is a script, run as `uv run tests/make_slice.py`, and
+# nothing else puts `tests/` there outside pytest.
+sys.path.insert(0, str(ROOT / "tests"))
+
+from conftest import FULL_ARTIFACT, SLICE_ARTIFACT, SLICE_TILES  # noqa: E402
 
 #: Rows to keep per tile. Enough that `items_for_shard` has something to filter
 #: and the offline tests can assert a realistic count, small enough to commit.
@@ -44,7 +50,7 @@ def build_slice(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from tile_inventory import read_manifest, row_groups_for_tile
+    from lst.tile_inventory import read_manifest, row_groups_for_tile
 
     pf = pq.ParquetFile(source)
     manifest = read_manifest(source)

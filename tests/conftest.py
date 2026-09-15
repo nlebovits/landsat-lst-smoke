@@ -31,17 +31,19 @@ that check at all.
 from __future__ import annotations
 
 import json
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from lst.land_tiles import tile_bounds
+from lst.tile_inventory import INVENTORY_SCHEMA_VERSION
 
+#: The repository root. Still needed, because the committed artifacts and the
+#: prose configuration live there. It no longer goes on `sys.path`: `lst` is an
+#: installed package, so the imports above resolve without help, and the 34
+#: inserts this suite used to carry were what made every test file assume the
+#: modules were flat files beside it.
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from land_tiles import tile_bounds  # noqa: E402
-from tile_inventory import INVENTORY_SCHEMA_VERSION  # noqa: E402
 
 #: The committed slice. Built by `tests/make_slice.py`.
 SLICE_ARTIFACT = ROOT / "artifacts" / "inventory_slice.parquet"
@@ -195,9 +197,7 @@ def write_numobs(path, *, value=8, gaps=(), lat_limit=None):
         The path written.
     """
     import numpy as np
-
-    import aster_ged
-    import masks
+    from lst import aster_ged, masks
 
     lat_limit = aster_ged.LATITUDE_LIMIT if lat_limit is None else lat_limit
     rows, cols = aster_ged.mosaic_shape(lat_limit)
@@ -227,7 +227,7 @@ def land_geometry_sha256() -> str:
     and `land_tiles_for_slice` restamps the tile list to match. The tie is the
     thing under test; which bytes it points at is not.
     """
-    import masks
+    from lst import masks
 
     if not LAND_GEOMETRY.exists():
         return "0" * 64

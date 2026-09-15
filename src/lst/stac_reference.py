@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = ["pystac-client", "pystac"]
-# ///
 """Earth Search, kept as an oracle and never as a production path.
 
 The sharded pipeline reads a precomputed inventory. This module holds the
@@ -23,7 +19,7 @@ reads as a mistake.
 
 from __future__ import annotations
 
-from stac_window import (
+from lst.stac_window import (
     DEFAULT_CLOUD_COVER_LT,
     DEFAULT_END,
     DEFAULT_PLATFORMS,

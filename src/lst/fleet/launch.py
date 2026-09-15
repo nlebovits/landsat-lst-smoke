@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = []
-# ///
 """Launch one instance per tile, at a pinned commit, and drive each one.
 
 One command for a whole run. `--dry-run` prints the `run-instances` call it
@@ -34,12 +30,44 @@ import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
+#: Where the deployment assets live, relative to the repository root.
+#:
+#: `config.toml` and `user-data.sh` are not package data. `fleet/drive.sh`
+#: copies `run.sh` and `upload.py` out of the same directory with `scp`, so all
+#: five have to stay one ordinary directory that shell can address.
+#:
+#: This used to be `Path(__file__).parent`, which worked only while this module
+#: sat beside them. An installed console script has no repository to be
+#: relative to, so the directory is now a flag with a stated default rather
+#: than an assumption about where the code lives.
+DEFAULT_FLEET_DIR = Path("fleet")
 
-def load_config(path: Path | None = None) -> dict:
-    return tomllib.loads((path or HERE / "config.toml").read_text())
+
+def fleet_asset(name: str, fleet_dir: Path | None = None) -> Path:
+    """One deployment asset, or a refusal that names the flag to fix it.
+
+    Raises:
+        SystemExit: when the asset is absent. A bare `FileNotFoundError` on
+            `fleet/user-data.sh` reads as a broken install; what it usually
+            means is that the command ran somewhere other than the repository
+            root.
+    """
+    path = (fleet_dir or DEFAULT_FLEET_DIR) / name
+    if not path.is_file():
+        msg = (
+            f"no {name} at {path}. The fleet's deployment assets live in the "
+            f"repository's fleet/ directory, and this command looks for them "
+            f"relative to the working directory. Run it from the repository "
+            f"root, or pass --fleet-dir."
+        )
+        raise SystemExit(msg)
+    return path
+
+
+def load_config(path: Path | None = None, fleet_dir: Path | None = None) -> dict:
+    return tomllib.loads((path or fleet_asset("config.toml", fleet_dir)).read_text())
 
 
 def resolve_commit(value: str, repo: Path | None = None) -> str:
@@ -97,14 +125,14 @@ def tag_spec(cfg: dict, name: str, tile: str) -> str:
     return f"ResourceType=instance,Tags=[{pairs}]"
 
 
-def render_user_data(cfg: dict, out_dir: Path) -> Path:
+def render_user_data(cfg: dict, out_dir: Path, fleet_dir: Path | None = None) -> Path:
     """`user-data.sh` with the deadline substituted in.
 
     The deadline lives in `config.toml` because it is the only thing that
     bounds what a hung run can cost, and a number buried in a shell script is a
     number nobody revises.
     """
-    text = (HERE / "user-data.sh").read_text()
+    text = fleet_asset("user-data.sh", fleet_dir).read_text()
     minutes = int(cfg["instance"]["deadline_minutes"])
     if "__DEADLINE__" not in text:
         raise SystemExit("user-data.sh lost its __DEADLINE__ placeholder")
@@ -259,14 +287,27 @@ def main() -> int:
     p.add_argument(
         "--dry-run", action="store_true", help="print the call and create nothing"
     )
-    p.add_argument("--config", type=Path, default=None)
+    p.add_argument(
+        "--fleet-dir",
+        type=Path,
+        default=DEFAULT_FLEET_DIR,
+        help="the repository's fleet/ directory, holding config.toml and "
+        "user-data.sh (default: %(default)s, relative to the working directory)",
+    )
+    p.add_argument(
+        "--config", type=Path, default=None, help="override config.toml alone"
+    )
     p.add_argument(
         "--manifest-dir", type=Path, default=Path.home() / ".landsat-lst-run"
     )
     a = p.parse_args()
 
-    cfg = load_config(a.config)
-    commit = resolve_commit(a.commit, repo=HERE.parent)
+    cfg = load_config(a.config, a.fleet_dir)
+    # The repository this command was run from, which is the one whose SHA the
+    # instances check out. Resolved from the working directory rather than from
+    # this module's own path, which after installation is a site-packages
+    # directory and not a checkout at all.
+    commit = resolve_commit(a.commit, repo=Path.cwd())
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
     print(
@@ -274,7 +315,7 @@ def main() -> int:
         f"on {cfg['instance']['type']}"
     )
     a.manifest_dir.mkdir(parents=True, exist_ok=True)
-    user_data = render_user_data(cfg, a.manifest_dir)
+    user_data = render_user_data(cfg, a.manifest_dir, a.fleet_dir)
     entries = [launch_one(cfg, t, run_id, a.dry_run, user_data) for t in a.tiles]
 
     if a.dry_run:
@@ -294,7 +335,7 @@ def main() -> int:
     print(f"\nmanifest {manifest}")
     print(
         f"next: uv run fleet/drive.sh per tile, then "
-        f"uv run fleet/watch.py --run {run_id}"
+        f"uv run lst-fleet-watch --run {run_id}"
     )
     for e in entries:
         print(f"  fleet/drive.sh {manifest} {e['tile']}")

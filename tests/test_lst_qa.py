@@ -12,16 +12,12 @@ DN that reprojection leaves along a scene edge, so that value is tested by
 itself as well.
 """
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 import xarray as xr
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lst_qa import (
+from lst.lst_qa import (
     LST_MIN_TRUSTED_C,
     LST_MIN_TRUSTED_DN,
     LST_NODATA_DN,
@@ -354,7 +350,7 @@ class TestThePredicatesTakeDataArrays:
     """
 
     def test_the_validity_rule_agrees_on_both(self):
-        from lst_qa import valid_observation
+        from lst.lst_qa import valid_observation
 
         rng = np.random.default_rng(7)
         dn = rng.integers(0, 65536, size=(5, 8, 8), dtype="uint16")

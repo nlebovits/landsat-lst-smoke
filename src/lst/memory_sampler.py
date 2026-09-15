@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = ["psutil"]
-# ///
 """Sample memory for a client process and its worker children.
 
 The number this exists to produce is worker RSS at fleet width.

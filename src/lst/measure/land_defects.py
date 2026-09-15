@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "geopandas", "shapely", "pyogrio", "pyarrow", "pyproj", "numpy", "duckdb>=1.0",
-# ]
-# ///
 """What each defect in the shared land method selects, measured.
 
 `land_tiles.py` corrects two defects it inherits from the pixel mask's geometry
@@ -29,7 +23,7 @@ ocean as far as the archive is concerned, so this reports how many of the cells
 each defect adds have no scenes in the window. That needs the scene inventory,
 which it builds against the union of the four tile lists.
 
-    uv run measure_land_defects.py --out artifacts/land_defects.json
+    uv run lst-measure-land-defects --out artifacts/land_defects.json
 """
 
 from __future__ import annotations
@@ -38,7 +32,7 @@ import argparse
 import json
 from pathlib import Path
 
-from land_tiles import (
+from lst.land_tiles import (
     COASTAL_BUFFER_METERS,
     DEFAULT_CACHE_DIR,
     LATITUDE_LIMIT,
@@ -133,7 +127,7 @@ def coverage(
     """
     import numpy as np
 
-    from usgs_inventory import (
+    from lst.usgs_inventory import (
         assign_tiles,
         filter_to_window,
         scan_bulk,
@@ -180,13 +174,13 @@ def _bulk_path(cache_dir: Path | str) -> Path:
 
 
 def main(argv=None) -> int:
-    from stac_window import (
+    from lst.stac_window import (
         DEFAULT_CLOUD_COVER_LT,
         DEFAULT_END,
         DEFAULT_PLATFORMS,
         DEFAULT_START,
     )
-    from usgs_inventory import DEFAULT_CACHE_DIR as INVENTORY_CACHE_DIR
+    from lst.usgs_inventory import DEFAULT_CACHE_DIR as INVENTORY_CACHE_DIR
 
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)

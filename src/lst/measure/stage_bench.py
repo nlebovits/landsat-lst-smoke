@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "boto3", "psutil", "pyarrow>=16", "shapely",
-# ]
-# ///
 """Which staging setting binds? Fetch one sample repeatedly and find out.
 
 MEASURED on an `m6id.16xlarge` in us-west-2 against `s3://usgs-landsat`:
@@ -21,7 +15,7 @@ now has a knob per explanation. This runs one fixed sample once per setting and
 prints the throughput each produced, so the next fleet run is configured off a
 measurement rather than off the argument above.
 
-    uv run stage_bench.py --i-am-in-region \\
+    uv run lst-stage-bench --i-am-in-region \\
       --tile S30W065 --root /mnt/nvme --objects 200
 
 The sample is the first N objects of the tile's manifest in the manifest's own
@@ -49,11 +43,9 @@ import sys
 import threading
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import staging
-from land_tiles import tile_bounds
-from tile_inventory import items_for_tile
+from lst import staging
+from lst.land_tiles import tile_bounds
+from lst.tile_inventory import items_for_tile
 
 #: The bucket's region. A cross-region run bills egress and measures a link
 #: the fleet will never use.

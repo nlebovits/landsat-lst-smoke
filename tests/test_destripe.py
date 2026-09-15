@@ -25,17 +25,14 @@ Nothing here reads S3 or opens a catalogue.
 
 from __future__ import annotations
 
-import sys
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import destripe
-from masks import transform_for
+from lst import destripe
+from lst.masks import transform_for
 
 # A 10 x 1 degree box at 6 cells per degree: 6 rows, 60 columns. Small enough
 # to assert on by hand, wide enough to carry an overlap with an interior.
@@ -166,7 +163,7 @@ class TestTheHistogramMedian:
 
     def test_the_bin_range_covers_every_representable_anomaly(self):
         """No overflow bin exists, so nothing may fall outside the range."""
-        from lst_qa import LST_VALID_MAX_C, LST_VALID_MIN_C
+        from lst.lst_qa import LST_VALID_MAX_C, LST_VALID_MIN_C
 
         widest = LST_VALID_MAX_C - LST_VALID_MIN_C
         assert destripe.ANOMALY_MIN_C <= -widest
@@ -605,7 +602,7 @@ def lazy_field(masks, dst_bbox, factor: int, chunk: int):
     import dask
     from odc.geo.geobox import GeoBox
 
-    import composite
+    from lst import composite
 
     paths, weight, inside = destripe.path_weights(masks, grid_transform())
     prep = destripe.Prep(

@@ -1,13 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "boto3",
-#   "matplotlib",
-#   "numpy",
-#   "pyarrow>=16",
-#   "rasterio",
-# ]
-# ///
 """Publish finished tiles from their run prefixes into one public catalog.
 
 A run writes a single-item catalog under its own prefix, because one graph
@@ -23,9 +13,9 @@ home, so a five-tile publish transfers a few hundred kilobytes of JSON.
 Two steps, separately runnable, because the first is reversible and the second
 is the one that changes a public address:
 
-    uv run publish_catalog.py plan   --runs <uri> --dest <uri>
-    uv run publish_catalog.py copy   --runs <uri> --dest <uri>
-    uv run publish_catalog.py finish --dest <uri>
+    uv run lst-publish-catalog plan   --runs <uri> --dest <uri>
+    uv run lst-publish-catalog copy   --runs <uri> --dest <uri>
+    uv run lst-publish-catalog finish --dest <uri>
 
 `plan` lists what `copy` would write and what it would replace, and writes
 nothing. `copy` moves each tile's item directory into place. `finish` rebuilds
@@ -42,10 +32,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent
-sys.path.insert(0, str(REPO))
-
-import cog_catalog  # noqa: E402
+from lst import cog_catalog
 
 ITEM_FILES = ("lst_p95.tif", "qa_count.tif")
 

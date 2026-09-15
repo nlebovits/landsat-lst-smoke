@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#   "numpy", "rasterio", "shapely",
-# ]
-# ///
 """The WRS seam, and the two corrections that remove it.
 
 A composite pixel draws on whichever scenes overlap it. Two things make that
@@ -44,7 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lst_qa import LST_SCALE, LST_VALID_MAX_C, LST_VALID_MIN_C
+from lst.lst_qa import LST_SCALE, LST_VALID_MAX_C, LST_VALID_MIN_C
 
 # --------------------------------------------------------------------------
 # De-striping constants. Calibrated in `nlebovits/landsat-lst` ADR-007 against
@@ -52,6 +46,17 @@ from lst_qa import LST_SCALE, LST_VALID_MAX_C, LST_VALID_MIN_C
 # mid-latitude agricultural AOI, so a humid tropical tile is owed its own
 # calibration before a global build.
 # --------------------------------------------------------------------------
+
+#: Version of the prep artifact. A composite refuses a prep file it does not
+#: recognise rather than running against a layout it is guessing at.
+#:
+#: Here rather than in `tile_prep`, which writes the file, because this module
+#: owns `Prep` and `load_prep`, which read it. It lived there, and
+#: `shard_lst_p95` reached it through a deferred `import tile_prep` whose
+#: docstring said "read lazily, because `tile_prep` imports this module". That
+#: was a cycle, acknowledged in a comment and enforced nowhere. The version of
+#: a format belongs with the code that parses it.
+PREP_SCHEMA_VERSION = 1
 
 #: Discard a scene whose absolute offset exceeds this. Measured: the offset
 #: distribution is not a bell curve. It is a tight core holding 82.7% of scenes
@@ -971,7 +976,7 @@ def load_prep(path) -> Prep:
 
 def prep_transform(prep: Prep):
     """The affine of the swath grid `prep.weight` rests on."""
-    from masks import transform_for
+    from lst.masks import transform_for
 
     return transform_for(prep.bbox, prep.pixels_per_degree // prep.swath_factor)
 

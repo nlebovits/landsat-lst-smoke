@@ -61,7 +61,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from lst_qa import (
+from lst.lst_qa import (
     LST_MAX_DN,
     LST_MIN_DN,
     LST_NODATA_DN,
@@ -71,7 +71,7 @@ from lst_qa import (
     LST_SCALE,
     MIN_TOTAL_OBSERVATIONS,
 )
-from stac_window import DEFAULT_COLLECTION, DEFAULT_PLATFORMS
+from lst.stac_window import DEFAULT_COLLECTION, DEFAULT_PLATFORMS
 
 #: Bumped when the catalog's shape or the encoding changes. Recorded in the
 #: collection so a reader can tell which writer produced a tree it finds.

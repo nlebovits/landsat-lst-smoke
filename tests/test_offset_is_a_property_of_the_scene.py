@@ -28,16 +28,14 @@ says so, and so that nobody has to rediscover the defect from a picture.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from lst import destripe
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
-import destripe  # noqa: E402
 
 PAIR = Path.home() / "Documents/dev/radiant-earth/lst-tiles/seam"
 TOLERANCE_C = 0.01  # the output encoding step, `lst_qa.LST_SCALE`
@@ -65,7 +63,7 @@ def shared():
     if not (a.is_file() and b.is_file()):
         pytest.skip(
             "needs the prep artifacts of two adjacent tiles. Rebuild with "
-            "`uv run fleet/launch.py --tiles S30W070 ...` and PREP_ONLY=1, "
+            "`uv run lst-fleet-launch --tiles S30W070 ...` and PREP_ONLY=1, "
             "then fetch both `prep/tile-prep.npz`."
         )
     left, right = offsets(a), offsets(b)

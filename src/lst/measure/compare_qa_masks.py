@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "odc-stac", "odc-geo", "pystac", "pystac-client", "xarray", "dask",
-#   "numpy", "rasterio", "matplotlib",
-# ]
-# ///
 """What the QA and nodata change does to one real window of the archive.
 
 Runs one fixed window twice over the same scenes, the same bounds, and the same
@@ -20,7 +13,7 @@ the earlier measurements used, so the year change cannot be confused with the
 masking change. Run the year change as its own dry run and report its scene
 count separately.
 
-    uv run compare_qa_masks.py --max-scenes 120 --out ./qa-parity
+    uv run lst-measure-qa-masks --max-scenes 120 --out ./qa-parity
 
 The window is one block, and the graph runs under the synchronous scheduler in
 this process, so the comparison stays one process and no cluster starts. Both
@@ -43,8 +36,8 @@ from pathlib import Path
 
 import numpy as np
 
-import destripe
-from lst_qa import (
+from lst import destripe
+from lst.lst_qa import (
     LST_MAX_DN,
     LST_MIN_DN,
     LST_NODATA_DN,
@@ -296,13 +289,13 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     import dask
 
-    import composite
-    from shard_lst_p95 import configure_read_env
+    from lst import composite
+    from lst.shard_lst_p95 import configure_read_env
 
     # The catalogue query lives in stac_reference now. This is a measurement
     # tool, so it describes what the old runtime did; the runtime itself reads
     # the precomputed inventory and opens no catalogue.
-    from stac_reference import search_items
+    from lst.stac_reference import search_items
 
     configure_read_env(args.source)
     bbox = tuple(float(v) for v in args.bbox.split(","))

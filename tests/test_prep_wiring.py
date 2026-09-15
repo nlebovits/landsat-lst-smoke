@@ -14,18 +14,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import composite
-import destripe
-import shard_lst_p95
-import tile_prep
+from lst import composite
+from lst import destripe
+from lst import shard_lst_p95
+from lst import tile_prep
 
 TILE = "S30W065"
 BBOX = (-66.0, -36.0, -59.0, -29.0)
@@ -68,7 +66,7 @@ def write_prep(directory: Path, item_dicts, **overrides) -> Path:
     scene_ids = [destripe.scene_id_of(d) for d in item_dicts]
     window = overrides.pop("window", WINDOW)
     meta = {
-        "schema_version": tile_prep.PREP_SCHEMA_VERSION,
+        "schema_version": destripe.PREP_SCHEMA_VERSION,
         "scene_digest": destripe.scene_digest(scene_ids, window),
         "tile": TILE,
         "bbox": list(BBOX),

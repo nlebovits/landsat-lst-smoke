@@ -15,11 +15,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from lst.fleet import cost_report
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import cost_report  # noqa: E402
 
 #: The CLI under test, located through the module rather than spelled as a root
 #: filename, so that moving the module moves this with it.

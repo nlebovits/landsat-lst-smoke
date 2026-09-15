@@ -1,11 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "frisky>=0.7.2", "dask", "odc-stac", "odc-geo", "xarray", "numpy",
-#   "pystac", "psutil", "boto3", "botocore", "affine", "pyarrow>=16",
-#   "rasterio", "shapely", "geopandas", "pyogrio",
-# ]
-# ///
 """One coarse pass over a tile, for everything a shard cannot work out alone.
 
 A shard holds its own scenes and nothing else, so two quantities are out of its
@@ -24,7 +16,7 @@ So this runs once per tile and writes one artifact the slices read. The cost is
 one extra traversal, taken at `1/prep_factor` of the output resolution through
 the source COGs' internal overviews.
 
-    uv run tile_prep.py --tile S30W065 --prep-factor 4 --out-dir ./tile-prep
+    uv run lst-prep --tile S30W065 --prep-factor 4 --out-dir ./tile-prep
 
 **One pass, not two.** `nlebovits/landsat-lst` needs two: a spatial median does
 not decompose across blocks, so it computes the climatology in one phase and
@@ -65,36 +57,28 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-import composite
-import destripe
-import observe
-import staging
-from land_tiles import tile_bounds
-from lst_qa import masked_celsius
-from shard_lst_p95 import (
+from lst import composite, destripe, observe, staging
+from lst.land_tiles import tile_bounds
+from lst.lst_qa import masked_celsius
+from lst.shard_lst_p95 import (
     DEFAULT_INVENTORY_URI,
     DEFAULT_STAGE_DIR,
     READ_SOURCES,
     configure_read_env,
 )
-from stac_window import (
+from lst.stac_window import (
     DEFAULT_CLOUD_COVER_LT,
     DEFAULT_END,
     DEFAULT_PLATFORMS,
     DEFAULT_START,
 )
-from tile_inventory import (
+from lst.tile_inventory import (
     INVENTORY_SCHEMA_VERSION,
     check_manifest,
     items_for_tile,
     provenance,
     read_manifest,
 )
-
-#: Version of the artifact this module writes. A slice refuses a prep file it
-#: does not recognise rather than compositing against a layout it is guessing
-#: at.
-PREP_SCHEMA_VERSION = 1
 
 #: Default resolution divisor for the pass. The offset is one scalar per scene,
 #: and a constant has no resolution, so it does not need the output grid to
@@ -278,7 +262,7 @@ def check_swath_grid(height: int, width: int, ratio: int) -> None:
 
 
 def swath_transform(bbox, pixels_per_degree: int, swath_factor: int):
-    from masks import transform_for
+    from lst.masks import transform_for
 
     return transform_for(bbox, pixels_per_degree // swath_factor)
 
@@ -834,7 +818,7 @@ def main(argv=None) -> int:
             "inside": inside,
         },
         {
-            "schema_version": PREP_SCHEMA_VERSION,
+            "schema_version": destripe.PREP_SCHEMA_VERSION,
             # The scene set these offsets were fitted over. A slice recomputes
             # it from its own item list and refuses a prep file that does not
             # match, because two prep files built from different scene lists

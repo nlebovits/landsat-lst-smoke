@@ -75,9 +75,8 @@ from typing import Any
 
 import numpy as np
 
-import destripe
-import observe
-from lst_qa import (
+from lst import destripe, observe
+from lst.lst_qa import (
     LST_NODATA_DN,
     encode_celsius,
     masked_celsius,
@@ -1107,7 +1106,7 @@ def finalize_block(
 
     Returns `(y, x, flag)` uint8 in the order of `FLAGS`.
     """
-    from masks import apply_output_mask
+    from lst.masks import apply_output_mask
 
     lst = np.array(lst, dtype="uint16", copy=True)
     qa = np.ascontiguousarray(np.moveaxis(np.asarray(qa), -1, 0)).astype("uint8")
@@ -1159,7 +1158,7 @@ def staging_writes(
     import dask.array as da
     import xarray as xr
 
-    from masks import transform_for
+    from lst.masks import transform_for
 
     ydim, xdim = dims
     out_dir = Path(out_dir)
@@ -1610,7 +1609,7 @@ def finish_staging(path: Path, *, scale, offset, descriptions, nodata) -> list[d
     Returns the per-band statistics it wrote, for the summary.
     """
     import rasterio
-    from cog_catalog import statistics_tags
+    from lst.cog_catalog import statistics_tags
 
     statistics = file_statistics(path, nodata)
     with rasterio.Env(GDAL_PAM_ENABLED="NO"), rasterio.open(path, "r+") as dst:
@@ -1645,7 +1644,7 @@ def item_for_files(scene_id: str, bands: dict, *, datetime: str, path: str, row:
     absolute path, because `odc.stac` refuses a relative one.
     """
     import rasterio
-    from tile_inventory import ASSET_TEMPLATES
+    from lst.tile_inventory import ASSET_TEMPLATES
 
     bands = {band: str(Path(href).resolve()) for band, href in bands.items()}
     from rasterio.warp import transform_bounds
@@ -1696,7 +1695,7 @@ def rehearsal_items(bbox, n: int, directory: Path, *, seed: int = 0):
     import rasterio
     from rasterio.transform import from_origin
 
-    from lst_qa import LWIR_OFFSET_C, LWIR_SCALE
+    from lst.lst_qa import LWIR_OFFSET_C, LWIR_SCALE
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)

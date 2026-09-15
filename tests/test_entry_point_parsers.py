@@ -28,13 +28,11 @@ from __future__ import annotations
 
 import ast
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 #: Directories that hold no first-party source: virtualenvs, agent worktrees,
 #: and the retained measurement evidence.

@@ -34,24 +34,22 @@ so both bands go.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from lst import masks
+from lst.land_tiles import read_land_tiles, tile_bounds
+from lst.lst_qa import LST_NODATA_DN
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
-import masks  # noqa: E402
 from conftest import (  # noqa: E402
     FULL_LAND_GEOMETRY,
     needs_full_land_geometry,
     needs_land_geometry,
     write_numobs,
 )
-from land_tiles import read_land_tiles, tile_bounds  # noqa: E402
-from lst_qa import LST_NODATA_DN  # noqa: E402
 
 LAND_TILES = ROOT / "artifacts" / "land_tiles.parquet"
 
@@ -335,7 +333,7 @@ class TestTheEmissivityRule:
         """
         import numpy as np
 
-        import aster_ged
+        from lst import aster_ged
 
         rows, cols = aster_ged.mosaic_shape(60)
         manifest = aster_ged.build_manifest(

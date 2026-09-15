@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "numpy", "rasterio", "h5py", "earthaccess",
-#   "geopandas", "shapely", "pyogrio", "pyarrow",
-# ]
-# ///
 """ASTER GED observation counts, as one artifact the fleet can read.
 
 Landsat Collection 2 Level-2 Surface Temperature needs a land surface
@@ -39,7 +32,7 @@ granule is the grid the mask wants. AG100 is a hundred times the download and
 would then have to be decimated to the same answer.
 
     uv run python -c "import earthaccess; earthaccess.login(persist=True)"
-    uv run aster_ged.py --out artifacts/aster_numobs.tif
+    uv run lst-aster-ged --out artifacts/aster_numobs.tif
 """
 
 from __future__ import annotations
@@ -52,7 +45,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from land_tiles import (
+from lst.land_tiles import (
     COASTAL_BUFFER_METERS,
     DEFAULT_CACHE_DIR,
     LATITUDE_LIMIT,
@@ -317,7 +310,9 @@ def fetch_granules(
 # --------------------------------------------------------------------------
 
 
-def placeable_granules(granules: dict, *, lat_limit: int = LATITUDE_LIMIT) -> dict:
+def placeable_granules(
+    granules: dict[tuple[int, int], Path], *, lat_limit: int = LATITUDE_LIMIT
+) -> dict[tuple[int, int], Path]:
     """The granules whose cell lands wholly inside the mosaic.
 
     A granule cache can hold cells from a build at another latitude limit, and
@@ -443,7 +438,7 @@ def read_manifest(path: Path | str) -> dict:
             f"no ASTER GED observation counts at {path}. Build them with:\n"
             f'  uv run python -c "import earthaccess; '
             f'earthaccess.login(persist=True)"\n'
-            f"  uv run aster_ged.py --out {path}"
+            f"  uv run lst-aster-ged --out {path}"
         )
         raise GedError(msg)
     try:
@@ -519,7 +514,7 @@ def check_manifest(
         joined = "\n  ".join(problems)
         msg = (
             f"the ASTER GED artifact does not match this run:\n  {joined}\n"
-            f"Rebuild both, land_tiles.py first, then aster_ged.py. Artifact "
+            f"Rebuild both, lst-land-tiles first, then lst-aster-ged. Artifact "
             f"generated {manifest.get('generated_utc')} from "
             f"{manifest.get('granule_count')} granules."
         )
@@ -677,7 +672,6 @@ def cell_window_for_bbox(path: Path | str, bbox, *, pad_cells=0, bands=(NUMOBS_B
         GedError: if the artifact is absent, or does not cover the bbox.
     """
     import rasterio
-    from rasterio.windows import Window
 
     path = Path(path)
     if not path.exists():
@@ -690,7 +684,19 @@ def cell_window_for_bbox(path: Path | str, bbox, *, pad_cells=0, bands=(NUMOBS_B
         col0 = int(round((west - ds.bounds.left) * CELLS_PER_DEGREE)) - pad_cells
         n_rows = int(round((north - south) * CELLS_PER_DEGREE)) + 2 * pad_cells
         n_cols = int(round((east - west) * CELLS_PER_DEGREE)) + 2 * pad_cells
-        window = Window(col0, row0, n_cols, n_rows)
+        # Rows then columns, as pairs of bounds. This was a
+        # `Window(col0, row0, n_cols, n_rows)`, whose positional order
+        # transposes every other shape in this module. The pair form reads in
+        # the same order as the rest of the file, and it is a plain tuple, so
+        # it type-checks: `Window` is an attrs class and rasterio ships no
+        # `py.typed`, so ty sees no generated `__init__` and rejects every
+        # argument to it. That was invisible while this module sat outside
+        # `ty.toml`'s include list.
+        #
+        # Both offsets can be negative, which is what `boundless` is for: the
+        # pad runs past the mosaic edge at the poles and the antimeridian, and
+        # the missing cells come back as `fill_value`.
+        window = ((row0, row0 + n_rows), (col0, col0 + n_cols))
         return tuple(
             ds.read(band, window=window, boundless=True, fill_value=0) for band in bands
         )
@@ -821,7 +827,7 @@ def build_manifest(
 
 
 def main(argv=None) -> int:
-    from land_tiles import land_geometry_checksum, load_land_polygons
+    from lst.land_tiles import land_geometry_checksum, load_land_polygons
 
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--out", type=Path, default=DEFAULT_NUMOBS_URI)

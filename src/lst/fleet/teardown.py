@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = []
-# ///
 """Terminate a run, then price it. In that order, because the order matters.
 
 `cost_report.py` reads `StateTransitionReason` for the end of an instance's
@@ -26,8 +22,6 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-
-HERE = Path(__file__).resolve().parent
 
 
 def terminate_argv(cfg: dict, ids: list[str]) -> list[str]:
@@ -104,10 +98,15 @@ def main() -> int:
         )
 
     report = a.manifest.with_suffix(".cost.txt")
+    # Still a subprocess, and still `-m`: the cost report has to survive this
+    # process failing, and its output is captured verbatim into a file beside
+    # the manifest. `-m` rather than a file path, because the module no longer
+    # sits at a path this one can name relatively.
     out = subprocess.run(
         [
             sys.executable,
-            str(HERE.parent / "cost_report.py"),
+            "-m",
+            "lst.fleet.cost_report",
             "--tag",
             f"purpose={cfg['tags']['purpose']}",
             "--region",

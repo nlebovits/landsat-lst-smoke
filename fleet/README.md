@@ -10,22 +10,22 @@ existed.
 ```bash
 SHA=$(git rev-parse origin/fleet-sizing)
 
-uv run fleet/launch.py --dry-run --tiles N40W080 --commit "$SHA"
-uv run fleet/launch.py --tiles N40W080 --commit "$SHA"
+uv run lst-fleet-launch --dry-run --tiles N40W080 --commit "$SHA"
+uv run lst-fleet-launch --tiles N40W080 --commit "$SHA"
 
 fleet/drive.sh ~/.landsat-lst-run/run-<id>.json N40W080
 
-uv run fleet/watch.py --manifest ~/.landsat-lst-run/run-<id>.json
-uv run fleet/teardown.py --manifest ~/.landsat-lst-run/run-<id>.json
+uv run lst-fleet-watch --manifest ~/.landsat-lst-run/run-<id>.json
+uv run lst-fleet-teardown --manifest ~/.landsat-lst-run/run-<id>.json
 
-uv run publish_catalog.py plan --runs s3://.../runs --dest s3://.../landsat-lst
-uv run publish_catalog.py copy --runs s3://.../runs --dest s3://.../landsat-lst
-uv run publish_catalog.py finish --dest s3://.../landsat-lst
+uv run lst-publish-catalog plan --runs s3://.../runs --dest s3://.../landsat-lst
+uv run lst-publish-catalog copy --runs s3://.../runs --dest s3://.../landsat-lst
+uv run lst-publish-catalog finish --dest s3://.../landsat-lst
 ```
 
 `--dry-run` prints the `run-instances` call and creates nothing. Run it first.
 `AGENTS.md` also asks for a rehearsal with the real flags before any EC2
-minute: `uv run shard_lst_p95.py --rehearse 6 --tile N40W080 ...`.
+minute: `uv run lst-shard --rehearse 6 --tile N40W080 ...`.
 
 ## The credential model
 

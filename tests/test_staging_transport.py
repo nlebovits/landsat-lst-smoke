@@ -19,17 +19,15 @@ network, and none of them needs credentials that exist.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
+from lst.measure import stage_bench
+from lst import staging
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 import local_s3  # noqa: E402
-import stage_bench  # noqa: E402
-import staging  # noqa: E402
 
 #: Small enough that a whole test module of objects costs a few megabytes, and
 #: still large enough to need several `COPY_BUFFER_BYTES` reads per part.

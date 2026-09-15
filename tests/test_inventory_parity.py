@@ -28,21 +28,19 @@ These tests reach the network. Run them with:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from usgs_inventory import (  # noqa: E402
+from lst.usgs_inventory import (
     NO_THERMAL_DATA_TYPES,
     asset_hrefs,
     derive_projection,
     scan_bulk,
     stac_item_id,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
+
 
 # The oracle fixture makes 60 catalogue searches, and the derived fixture
 # scans 1.46 million rows. Neither fits the 60 s the rest of the suite uses.
@@ -108,7 +106,7 @@ def _bulk_path():
     oldest could answer for an artifact built from the newest and the parity
     run would compare the wrong archive against the catalogue.
     """
-    from usgs_inventory import DEFAULT_CACHE_DIR
+    from lst.usgs_inventory import DEFAULT_CACHE_DIR
 
     found = sorted(
         Path(DEFAULT_CACHE_DIR).glob("LANDSAT_OT_C2_L2-*.parquet"),
@@ -196,7 +194,7 @@ def oracle():
     Sorted by id before truncating, so the sample does not depend on the order
     the catalogue happens to page results in.
     """
-    from stac_reference import search_items
+    from lst.stac_reference import search_items
 
     items = {}
     for bbox in SAMPLE_AREAS.values():
@@ -352,7 +350,7 @@ SET_PARITY_END = "2023-08-31T23:59:59Z"
 @pytest.fixture(scope="module")
 def catalogue_sets():
     """Item ids Earth Search returns for each region, over one interval."""
-    from stac_reference import search_items
+    from lst.stac_reference import search_items
 
     out = {}
     for name, region in SET_PARITY_REGIONS.items():
@@ -394,8 +392,8 @@ class TestSetParity:
         import pyarrow as pa
         from shapely.geometry import Polygon, box, shape
 
-        from stac_reference import fetch_items_by_id
-        from usgs_inventory import filter_to_window, footprint_arrays
+        from lst.stac_reference import fetch_items_by_id
+        from lst.usgs_inventory import filter_to_window, footprint_arrays
 
         bounds = SET_PARITY_REGIONS[region]
         table = scan_bulk(_bulk_path(), start=SET_PARITY_START, end=SET_PARITY_END)
@@ -467,7 +465,7 @@ class TestSetParity:
     def test_the_antimeridian_regions_actually_hold_wrapping_scenes(self):
         """Otherwise the regions above prove nothing about the wrap."""
         table = scan_bulk(_bulk_path(), start=SET_PARITY_START, end=SET_PARITY_END)
-        from usgs_inventory import footprint_arrays
+        from lst.usgs_inventory import footprint_arrays
 
         _, _, crossing = footprint_arrays(table)
         assert crossing.any(), "no wrapping footprint in the interval"

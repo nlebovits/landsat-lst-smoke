@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = ["boto3"]
-# ///
 """Report where each tile of a run has got to, from object storage alone.
 
 It polls the bucket, not SSH. The uploader is already pushing `markers.txt`
@@ -214,7 +210,9 @@ def main() -> int:
                     f"billing until teardown:",
                     flush=True,
                 )
-                print(f"  uv run fleet/teardown.py --manifest {a.manifest}", flush=True)
+                print(
+                    f"  uv run lst-fleet-teardown --manifest {a.manifest}", flush=True
+                )
             return 1 if bad else 0
         time.sleep(a.interval)
 

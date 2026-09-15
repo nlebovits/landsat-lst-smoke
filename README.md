@@ -24,8 +24,8 @@ prep file.
 Build the prep file once per tile, then composite against it:
 
 ```bash
-uv run tile_prep.py --tile S30W065 --out-dir ./tile-prep
-uv run shard_lst_p95.py --tile S30W065 --tile-prep ./tile-prep \
+uv run lst-prep --tile S30W065 --out-dir ./tile-prep
+uv run lst-shard --tile S30W065 --tile-prep ./tile-prep \
     --stage-dir /mnt/nvme/stage --out-dir ./run
 frisky observe overview ./run/spans.json
 ```

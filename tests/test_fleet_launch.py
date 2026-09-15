@@ -14,13 +14,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from lst.fleet import launch, teardown, watch
 
 ROOT = Path(__file__).resolve().parents[1]
+
+#: The one `sys.path` insert this suite still needs. `fleet/upload.py` is not
+#: part of the package and must not be: `fleet/drive.sh` copies it to an
+#: instance outside the checkout and runs it there, so a box whose clone is
+#: broken still uploads what it produced. It has no importable home, so the
+#: directory holding it goes on the path.
 sys.path.insert(0, str(ROOT / "fleet"))
 
-import launch  # noqa: E402
 import upload  # noqa: E402
-import watch  # noqa: E402
 
 SHA = "9e2b703abec9756945686d5e8037788a666d28e6"
 
@@ -196,7 +201,7 @@ class TestTheWatcherNamesTheState:
 
 class TestTeardownPricesBeforeItTerminates:
     def test_the_terminate_call_names_every_instance(self, cfg):
-        import teardown
+        from lst.fleet import teardown
 
         argv = teardown.terminate_argv(cfg, ["i-1", "i-2"])
         assert argv[:3] == ["aws", "ec2", "terminate-instances"]
@@ -402,7 +407,8 @@ class TestTeardownTerminatesBeforeItPrices:
         out = sp.run(
             [
                 sys.executable,
-                str(ROOT / "fleet" / "teardown.py"),
+                "-m",
+                teardown.__name__,
                 "--manifest",
                 str(manifest),
                 "--dry-run",
@@ -416,5 +422,5 @@ class TestTeardownTerminatesBeforeItPrices:
     def test_it_waits_for_the_state_to_settle(self):
         """`StateTransitionReason` carries the timestamp the report prices
         against, and it is not set the instant the call returns."""
-        source = (ROOT / "fleet" / "teardown.py").read_text()
+        source = Path(teardown.__file__).read_text()
         assert "instance-terminated" in source

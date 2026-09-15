@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = ["pyarrow>=16"]
-# ///
 """Read one tile's scenes out of the precomputed inventory.
 
 This is the runtime half. It opens a Parquet file, reads the row group that
@@ -102,8 +98,8 @@ def read_manifest(path: Path | str) -> dict:
     if not path.exists():
         msg = (
             f"no inventory at {path}. Build it with:\n"
-            f"  uv run land_tiles.py --out artifacts/land_tiles.parquet\n"
-            f"  uv run usgs_inventory.py --out {path}"
+            f"  uv run lst-land-tiles --out artifacts/land_tiles.parquet\n"
+            f"  uv run lst-inventory --out {path}"
         )
         raise InventoryError(msg)
     try:
