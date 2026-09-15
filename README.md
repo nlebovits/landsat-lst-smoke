@@ -1,9 +1,9 @@
 # Landsat land surface temperature
 
 This repository turns Landsat Collection 2 Level-2 science products into a
-high-temperature land surface temperature (LST) composite. Each output pixel
-represents surface skin temperature at the satellite overpass time. Air
-temperature and daily maxima lie outside the product definition.
+high-temperature land surface temperature (LST) composite. Each pixel records
+surface skin temperature at the satellite overpass time, not air temperature or
+a daily maximum.
 
 DERIVED from the current production constants, the composite uses Landsat 8 and
 Landsat 9 acquisitions from 2021-01-01 through 2025-12-31T23:59:59Z. It covers
@@ -48,16 +48,13 @@ their own correction rule.
 
 ## Data access
 
-The public catalog is not online yet. MEASURED on 2026-09-15, the configured
-catalog URL returned HTTP 404:
+MEASURED on 2026-09-15, the pending public catalog URL returned HTTP 404:
 
 ```text
 https://data.source.coop/nlebovits/landsat-lst/catalog.json
 ```
 
-Published catalogs retain the paths that a local run creates beneath that root.
-Do not build a production dependency on the public address until it serves the
-catalog.
+The public paths will match the local catalog paths below.
 
 A local run writes the relevant outputs under its output directory:
 
@@ -113,50 +110,40 @@ nodata points to the evidence floor or a temperature bound. A zero cannot
 separate source fill, rejected observations, missing coverage, land masking, or
 water masking.
 
-Sharp rectangular gaps can occur where scene bounding boxes cover ground that
-the rotated Landsat image never photographed. `qa_count` cannot distinguish
-that source fill from observations rejected by QA. The product does not yet
-publish the source-presence reduction needed to separate them.
+Sharp rectangular gaps occur where scene bounding boxes extend beyond the
+rotated Landsat image. `qa_count` cannot distinguish that source fill from a QA
+rejection. The product has no source-presence band.
 
 ### Cloud and emissivity limit coverage
 
-Persistent cloud can leave land without a usable observation across the whole
-window. A longer window cannot recover ground that no scene imaged.
+Some pixels have no observations due to persistent cloud cover.
 
-Gaps in the Advanced Spaceborne Thermal Emission and Reflection Radiometer
-(ASTER) Global Emissivity Dataset (GED) identify regions with interpolated
-emissivity. The United States Geological Survey (USGS) supplies that
-interpolation. Some source pixels remain empty or produce failed retrievals.
-The pipeline reports the gap region on each STAC item but does not mask it.
+USGS interpolates emissivity where the ASTER Global Emissivity Dataset (GED)
+lacks coverage. Some source pixels remain empty or fail retrieval. Each STAC
+item reports the affected region without masking it.
 
 ### Seam correction changes the statistic
 
-A corrected tile does not carry the same statistic as an uncorrected pooled
-percentile. The correction moves each scene to a baseline fitted against its
-calendar month before the percentile runs. Comparing unlike correction rules
-can measure the processing difference instead of a change on the ground.
+Corrected and pooled tiles measure different statistics. The correction shifts
+each scene to a baseline fitted against its calendar month before calculating
+the percentile.
 
-The prep pass fits each tile independently. UNKNOWN: how corrected neighbouring
-tiles agree at their shared border because this repository has not inspected a
-merged corrected pair. Check each item's lineage before mosaicking or
-differencing tiles.
+Check `processing:lineage` before comparing tiles. UNKNOWN: agreement between
+corrected neighbours because each tile receives an independent prep pass.
 
 ### Water screening favours retaining land
 
-The buffered land geometry reaches offshore and cannot identify rivers. The
+The buffered land geometry includes coastal water and misses rivers. The
 pipeline also classifies water from the Landsat observations.
 
-DERIVED from the current rule, the classifier requires the QA water flag in at
-least 90% of usable observations. It also requires a percentile no warmer than
-34 C. The conservative temperature condition protects dark roofs and asphalt,
-but it can leave warm water in the land product.
+DERIVED from the current rule, water classification requires a 90% QA-flag
+share and a percentile no warmer than 34 C. The temperature test avoids masking
+dark roofs and asphalt but retains some warm water.
 
 ### Full-fleet operation remains unproven
 
-UNKNOWN: production behaviour at complete fleet scale because this repository
-records no complete fleet run. Existing whole-tile runs establish the pipeline
-path and guide its resource guards, but they do not establish global completion
-or cost.
+UNKNOWN: fleet-scale reliability and cost. The repository records no complete
+fleet run.
 
 ## Development and usage
 
@@ -188,9 +175,9 @@ uv run lst-shard \
   --out-dir ./rehearsal
 ```
 
-The command prefixes its log lines with `REHEARSAL:`, and `summary.json`
-records `"synthetic": true`. A rehearsal checks the execution path without
-verifying real-data output, capacity, runtime, or cost.
+The command prefixes output with `REHEARSAL:`, and `summary.json` records
+`"synthetic": true`. A rehearsal proves only the execution path, not real-data
+output, capacity, runtime, or cost.
 
 ### Prepare production inputs
 
@@ -211,8 +198,7 @@ uv run lst-inventory \
   --out artifacts/tile_scene_inventory.parquet
 ```
 
-The ASTER GED build needs a National Aeronautics and Space Administration
-(NASA) Earthdata login:
+The ASTER GED build needs a NASA Earthdata login:
 
 ```bash
 uv run python -c "import earthaccess; earthaccess.login(persist=True)"
