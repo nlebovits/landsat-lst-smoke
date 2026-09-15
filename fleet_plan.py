@@ -14,14 +14,18 @@ the inventory's identity attached.
 Everything here happens before a single instance starts. That is the whole
 design: a window mismatch found after launch has already bought 895 machines.
 
-Two artifacts come out. `fleet_plan.json` is the launch list and the artifact
-identities that justify it. `fleet_plan.jsonl` is the coverage screen: one line
-per land tile with its strict-land pixel count and its ASTER GED gap share,
-for a scheduler deciding what to run and in what order. The screen removes no
-tile, and neither of its fields predicts swath coverage or what the prep run
-will find.
+`fleet_plan.json` is the launch list and the artifact identities that justify
+it. `--coverage` adds `fleet_plan.jsonl`, one line per land tile with its
+strict-land pixel count and its ASTER GED gap share, for a scheduler deciding
+what to run and in what order. The screen removes no tile, and neither of its
+fields predicts swath coverage or what the prep run will find.
+
+The screen is opt-in because it reads the unbuffered land geometry, and
+`fleet/config.toml` does not ship that file to an instance. A workstation with
+the full artifact set writes it; a fleet instance plans without it.
 
     uv run fleet_plan.py --out artifacts/fleet_plan.json
+    uv run fleet_plan.py --coverage
 """
 
 from __future__ import annotations
@@ -490,9 +494,12 @@ def main(argv=None) -> int:
         "25 km out to sea",
     )
     p.add_argument(
-        "--no-coverage",
+        "--coverage",
         action="store_true",
-        help="skip the coverage screen, which rasterises 895 tiles",
+        help="also screen every land tile for strict land and ASTER GED gap, "
+        "and write --out-coverage. Off by default, because it rasterises 895 "
+        "tiles and reads the unbuffered land geometry, which a fleet instance "
+        "does not carry",
     )
     args = p.parse_args(argv)
 
@@ -574,7 +581,12 @@ def main(argv=None) -> int:
     args.out.write_text(json.dumps(plan, indent=2) + "\n")
     print(f"plan written  {args.out}")
 
-    if args.no_coverage:
+    # Opt-in, and the default is off for a reason the artifact list settles.
+    # `fleet/config.toml` ships six files to an instance and the unbuffered
+    # geometry is not among them, so an instance and a fresh checkout both run
+    # this script without one. Screening by default made the planner exit 1
+    # there, on a run whose plan had already been written.
+    if not args.coverage:
         return 0
 
     print("coverage      screening every land tile for land and emissivity gap")
