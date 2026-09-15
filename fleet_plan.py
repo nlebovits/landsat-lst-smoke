@@ -14,6 +14,13 @@ the inventory's identity attached.
 Everything here happens before a single instance starts. That is the whole
 design: a window mismatch found after launch has already bought 895 machines.
 
+Two artifacts come out. `fleet_plan.json` is the launch list and the artifact
+identities that justify it. `fleet_plan.jsonl` is the coverage screen: one line
+per land tile with its strict-land pixel count and its ASTER GED gap share,
+for a scheduler deciding what to run and in what order. The screen removes no
+tile, and neither of its fields predicts swath coverage or what the prep run
+will find.
+
     uv run fleet_plan.py --out artifacts/fleet_plan.json
 """
 
@@ -47,6 +54,16 @@ from tile_inventory import (
 #: is recorded so a finished tile can be checked against the grid its plan
 #: assumed, the way `emissivity_rule` records the pixel rule.
 DEFAULT_PIXELS_PER_DEGREE = 3600
+
+#: The grid the coverage screen rasterises on, and the only thing in this
+#: module that rasterises at all.
+#:
+#: A 5 degree tile is 500 by 500 pixels here against 18,000 by 18,000 at the
+#: compositing resolution, so the screen costs 1/1296 of the pixels. The
+#: figures it produces are shares, and a scheduler reading "this tile is 3%
+#: land" does not care about the third decimal place. Raising this would buy
+#: precision nothing uses and turn a few minutes into a few hours.
+PLANNING_PIXELS_PER_DEGREE = 100
 
 
 def check_land_parameters(manifest: dict, land_provenance: dict) -> None:
@@ -165,6 +182,128 @@ def classify_tiles(parquet_file, tiles) -> tuple[dict, dict, list, list]:
         rows_by_tile[name] = sum(meta.row_group(g).num_rows for g in groups)
         thermal_by_tile[name] = thermal
     return rows_by_tile, thermal_by_tile, empty, no_thermal
+
+
+def coverage_row(
+    tile_id: str,
+    *,
+    numobs_uri,
+    strict_land_geometry_uri=None,
+    pixels_per_degree: int = PLANNING_PIXELS_PER_DEGREE,
+) -> dict:
+    """What one tile holds, for a scheduler deciding what to run and when.
+
+    Two numbers, both measured on the same grid in one place.
+
+    `strict_land_pixels` counts the unbuffered land geometry, the definition a
+    published `lst:land_pixels` divides by. The buffered geometry reaches 25 km
+    out to sea, so it answers a different question and would rank an island
+    chain like a continent.
+
+    `ged_gap_share` divides the ASTER GED gap region by the strict land of the
+    same tile. Over land is the only denominator that ranks tiles: GED has no
+    observation over sea either, so a share of the whole tile would mostly
+    measure how much sea the tile holds.
+
+    Neither field removes a tile. The emissivity rule takes a pixel for reading
+    70 C or hotter inside the gap region, not for being in it, so a tile of
+    nothing but gap cells still publishes every ordinary temperature it holds.
+
+    Neither field predicts swath coverage, and neither predicts what the prep
+    run will find. A swath is counted from valid observations on the ground,
+    over the scene set this tile's window selects. The gap region is a property
+    of an emissivity mosaic built from different granules for a different
+    purpose. A tile with no gap at all can still hold a WRS path that reaches
+    no swath cell.
+
+    Returns:
+        One JSON-ready row. Every count is an int and every share a float in
+        `[0, 1]`, so a reader can sort on either without a special case.
+    """
+    bbox = tile_bounds(tile_id)
+    land = masks.land_mask(
+        bbox,
+        pixels_per_degree,
+        strict_land_geometry_uri or masks.STRICT_LAND_GEOMETRY_URI,
+    )
+    gap = masks.emissivity_gap(bbox, pixels_per_degree, numobs_uri)
+    total = int(land.size)
+    land_pixels = int(land.sum())
+    gap_on_land = int((gap & land).sum())
+    return {
+        "tile_id": tile_id,
+        "bbox": [float(v) for v in bbox],
+        "planning_pixels_per_degree": int(pixels_per_degree),
+        "planning_pixels": total,
+        "strict_land_pixels": land_pixels,
+        "strict_land_share": land_pixels / total if total else 0.0,
+        "ged_gap_pixels_on_land": gap_on_land,
+        "ged_gap_share": gap_on_land / land_pixels if land_pixels else 0.0,
+    }
+
+
+def coverage_rows(
+    plan: dict,
+    *,
+    numobs_uri,
+    strict_land_geometry_uri=None,
+    pixels_per_degree: int = PLANNING_PIXELS_PER_DEGREE,
+    say=print,
+) -> list[dict]:
+    """One row per land tile, in tile order, with what the plan knows about it.
+
+    Every land tile gets a row, including the ones `classify_tiles` took out of
+    the launch list. A tile with no scene in this window is a tile the schedule
+    still has to account for, and a row that appears only when a tile is
+    runnable makes the artifact's length depend on the window.
+
+    Ordered by tile id and built from the tile list alone, so two runs over the
+    same three artifacts write the same bytes.
+
+    Returns:
+        The rows. `runnable` says whether the fleet would launch a machine, and
+        `scenes` and `thermal_scenes` are None for a tile it would not.
+    """
+    known = {t["tile_id"]: t for t in plan["tiles"]}
+    names = sorted(
+        set(known)
+        | set(plan["tiles_without_scenes"])
+        | set(plan["tiles_without_thermal"])
+    )
+    rows = []
+    for index, name in enumerate(names, start=1):
+        row = coverage_row(
+            name,
+            numobs_uri=numobs_uri,
+            strict_land_geometry_uri=strict_land_geometry_uri,
+            pixels_per_degree=pixels_per_degree,
+        )
+        planned = known.get(name)
+        rows.append(
+            row
+            | {
+                "runnable": planned is not None,
+                "scenes": None if planned is None else planned["scenes"],
+                "thermal_scenes": (
+                    None if planned is None else planned["thermal_scenes"]
+                ),
+            }
+        )
+        if index % 100 == 0 or index == len(names):
+            say(f"              screened {index} of {len(names)} tiles")
+    return rows
+
+
+def write_coverage_rows(path: Path, rows) -> Path:
+    """The screen as JSON Lines, one tile per line.
+
+    JSON Lines rather than one array, because the consumer is a scheduler that
+    filters and sorts 895 rows, and because a line-oriented file diffs by tile
+    when a run changes one of them.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    return path
 
 
 def build_plan(
@@ -321,6 +460,29 @@ def main(argv=None) -> int:
         "finished tile can be checked against it; nothing here rasterises",
     )
     p.add_argument("--out", type=Path, default=Path("artifacts/fleet_plan.json"))
+    p.add_argument(
+        "--out-coverage",
+        type=Path,
+        default=Path("artifacts/fleet_plan.jsonl"),
+        help="one JSON line per land tile with its strict-land pixel count and "
+        "its ASTER GED gap share. Scheduling information: nothing here removes "
+        "a tile, and neither field predicts swath coverage or what the prep "
+        "run will find",
+    )
+    p.add_argument(
+        "--strict-land-geometry-uri",
+        type=Path,
+        default=masks.STRICT_LAND_GEOMETRY_URI,
+        help="the unbuffered land geometry the coverage screen counts, written "
+        "by land_tiles.py --write-strict-geometry. This is the definition a "
+        "published lst:land_pixels divides by; the buffered geometry reaches "
+        "25 km out to sea",
+    )
+    p.add_argument(
+        "--no-coverage",
+        action="store_true",
+        help="skip the coverage screen, which rasterises 895 tiles",
+    )
     args = p.parse_args(argv)
 
     try:
@@ -400,7 +562,61 @@ def main(argv=None) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(plan, indent=2) + "\n")
     print(f"plan written  {args.out}")
+
+    if args.no_coverage:
+        return 0
+
+    print("coverage      screening every land tile for land and emissivity gap")
+    try:
+        rows = coverage_rows(
+            plan,
+            numobs_uri=args.numobs_uri,
+            strict_land_geometry_uri=args.strict_land_geometry_uri,
+        )
+    except (masks.MaskError, aster_ged.GedError) as exc:
+        print(f"coverage not written\n{exc}")
+        return 1
+    write_coverage_rows(args.out_coverage, rows)
+    report_coverage(rows)
+    print(f"screen written {args.out_coverage}")
     return 0
+
+
+def report_coverage(rows, say=print) -> None:
+    """What the screen found, as the shares a scheduler would sort on.
+
+    Reported and not acted on. No tile is removed for its gap share, and the
+    share does not predict swath coverage or what the prep run will find.
+    """
+    if not rows:
+        return
+    gaps = sorted(row["ged_gap_share"] for row in rows)
+    land = sum(row["strict_land_pixels"] for row in rows)
+    heavy = [row for row in rows if row["ged_gap_share"] > 0.40]
+    heavy_land = sum(row["strict_land_pixels"] for row in heavy)
+
+    def under(limit: float) -> int:
+        return sum(1 for gap in gaps if gap < limit)
+
+    bare = [row for row in rows if row["strict_land_pixels"] == 0]
+    say(f"              {len(rows)} tiles, {land:,} strict-land pixels")
+    if bare:
+        say(
+            f"              {len(bare)} tiles hold no strict-land pixel at this "
+            f"resolution. They are in the list because the 25 km buffer reaches "
+            f"them, and their islands are under one pixel across"
+        )
+    say(
+        f"              GED gap over land: "
+        f"{100 * under(0.05) / len(rows):.0f}% of tiles under 5%, "
+        f"{100 * under(0.20) / len(rows):.0f}% under 20%, "
+        f"p50 {100 * gaps[len(gaps) // 2]:.1f}%"
+    )
+    say(
+        f"              {len(heavy)} tiles above 40%, holding "
+        f"{100 * heavy_land / land if land else 0:.1f}% of the land. Reported, "
+        f"not excluded"
+    )
 
 
 if __name__ == "__main__":

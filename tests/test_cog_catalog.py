@@ -570,6 +570,10 @@ CORRECTION_RULE: dict[str, Any] = {
     "destripe": True,
     "feather": True,
     "paths": ["228", "229"],
+    "paths_without_swath": {},
+    "pooled_share": 0.0,
+    "n_pooled_fallback_retained": 0,
+    "retained_pixels": 1_000_000,
 }
 
 
@@ -618,6 +622,53 @@ class TestTheCorrectionExplainsItself:
         feather_only = correction_lineage(CORRECTION_RULE | {"destripe": False})
         assert "Per-path percentiles:" in feather_only
         assert "Scene offsets:" not in feather_only
+
+    def test_every_feathered_tile_states_its_pooled_share(self):
+        """Zero included. A share stated only when non-zero is one a reader has
+        to guess at, and the guess that silence means zero fails on the tile
+        where the field went missing for another reason."""
+        lineage = correction_lineage(CORRECTION_RULE)
+        assert "Pooled fallback: 0.00% of the retained pixels" in lineage
+        assert "0 of 1,000,000" in lineage
+
+    def test_the_share_is_stated_against_the_retained_count(self):
+        rule = CORRECTION_RULE | {
+            "pooled_share": 0.125,
+            "n_pooled_fallback_retained": 125,
+            "retained_pixels": 1000,
+        }
+        lineage = correction_lineage(rule)
+        assert "12.50% of the retained pixels" in lineage
+        assert "125 of 1,000" in lineage
+        assert "after the output mask" in lineage
+
+    def test_a_swathless_path_is_named_with_its_scene_count(self):
+        rule = CORRECTION_RULE | {"paths_without_swath": {"230": 47}}
+        lineage = correction_lineage(rule)
+        assert "No swath was found for WRS path 230 (47 scenes)" in lineage
+        assert "took no part in the per-path blend" in lineage
+
+    def test_every_swathless_path_is_named(self):
+        rule = CORRECTION_RULE | {"paths_without_swath": {"230": 47, "231": 12}}
+        lineage = correction_lineage(rule)
+        assert "230 (47 scenes), 231 (12 scenes)" in lineage
+
+    def test_an_ordinary_tile_says_nothing_about_swathless_paths(self):
+        lineage = correction_lineage(CORRECTION_RULE)
+        assert "No swath was found" not in lineage
+
+    def test_a_pooled_tile_states_no_share_because_it_has_no_cross_fade(self):
+        """`--no-feather` and an absent prep both read as the pooled paragraph,
+        which already says every pixel is pooled. A share of 100% beside it
+        would be a second way of saying one thing."""
+        rule = CORRECTION_RULE | {"feather": False, "destripe": False}
+        assert "Pooled fallback:" not in correction_lineage(rule)
+
+    def test_an_item_written_before_the_share_existed_still_reads(self):
+        rule = {k: v for k, v in CORRECTION_RULE.items() if "pooled" not in k}
+        rule.pop("retained_pixels")
+        rule.pop("paths_without_swath")
+        assert "Pooled fallback: 0.00%" in correction_lineage(rule)
 
     def test_the_item_carries_it_beside_the_mask_lineage(self, tmp_path):
         _lst = encode_celsius(np.full((SIZE, SIZE), 30.0, dtype="float32"))

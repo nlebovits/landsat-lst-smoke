@@ -21,12 +21,17 @@ the expensive way:
   cannot call `ec2-instance-connect`, `ssm`, or the serial console.
 - Every instance carries the tags `cost_report.py --tag` needs. An untagged
   instance cannot be priced and cannot be found by teardown.
+- The manifest is rewritten after every step of every instance, not once at the
+  end. A four-tile launch that lost its third tile to capacity used to exit
+  before writing anything, leaving two running instances that teardown could
+  not read and nobody had a key path for.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -36,6 +41,22 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SHA = re.compile(r"^[0-9a-f]{40}$")
+
+#: The one AWS error a launch may answer by moving to another zone.
+CAPACITY_ERROR = "InsufficientInstanceCapacity"
+
+#: The error code out of an AWS CLI failure. Matched at the position the CLI
+#: prints it, not anywhere in the text: a message that merely mentions capacity
+#: is not a capacity failure, and treating one as such would retry a malformed
+#: request in four zones and report the region as full.
+ERROR_CODE = re.compile(r"An error occurred \(([A-Za-z0-9.]+)\)")
+
+#: The tile grid, repeated from `land_tiles.py` rather than imported. This
+#: script declares no dependencies so that the laptop launching a fleet needs
+#: no environment, and importing the grid would pull in geopandas.
+TILE_ID = re.compile(r"^([NS])(\d{2})([EW])(\d{3})$")
+TILE_SIZE_DEGREES = 5
+LATITUDE_LIMIT = 60
 
 
 def load_config(path: Path | None = None) -> dict:
@@ -69,6 +90,106 @@ def resolve_commit(value: str, repo: Path | None = None) -> str:
         f"A branch tip moves, and a published tile has to name the code that "
         f"built it."
     )
+
+
+def parse_tiles(values) -> list[str]:
+    """The tiles to launch, from either spelling, checked against the grid.
+
+    `--tiles S45W075 S50W075` and `--tiles S45W075,S50W075` mean the same
+    thing, and so does any mixture of the two. The comma form is what a person
+    copies out of a ticket, and argparse's `nargs="+"` turned it into one token
+    that reached `run-instances` as a key name and a tag.
+
+    A tile id is checked, not trusted. Every wrong id here costs a full
+    instance: the box launches, clones, downloads the artifacts, and fails in
+    `tile_bounds` or against the inventory, several minutes into billing. The
+    grammar and the 5 degree grid are both cheap to check before that.
+
+    A repeat is refused rather than collapsed. Two machines on one tile write
+    the same prefix from two runs, and the second upload wins by arriving
+    later. Someone who names a tile twice meant something else.
+
+    Returns:
+        The ids in the order given, upper-cased.
+
+    Raises:
+        SystemExit: on an empty list, a malformed id, an off-grid id, or a
+            repeat, naming the token as it was typed.
+    """
+    tokens = [
+        part.strip()
+        for value in values
+        for part in str(value).split(",")
+        if part.strip()
+    ]
+    if not tokens:
+        raise SystemExit("--tiles named no tile.")
+
+    tiles: list[str] = []
+    for token in tokens:
+        tile = token.upper()
+        match = TILE_ID.fullmatch(tile)
+        if not match:
+            raise SystemExit(
+                f"{token!r} is not a tile id. The form is N40W080 or S45W075: "
+                f"N or S, two digits of latitude, E or W, three digits of "
+                f"longitude."
+            )
+        ns, lat, ew, lon = match.groups()
+        north = int(lat) * (1 if ns == "N" else -1)
+        west = int(lon) * (1 if ew == "E" else -1)
+        if north % TILE_SIZE_DEGREES or west % TILE_SIZE_DEGREES:
+            raise SystemExit(
+                f"{token!r} is off the {TILE_SIZE_DEGREES} degree grid. A tile "
+                f"names its north edge and its west edge, and both are "
+                f"multiples of {TILE_SIZE_DEGREES}."
+            )
+        if not -LATITUDE_LIMIT + TILE_SIZE_DEGREES <= north <= LATITUDE_LIMIT:
+            raise SystemExit(
+                f"{token!r} lies outside the latitude limit. North edges run "
+                f"from {LATITUDE_LIMIT} down to "
+                f"{-LATITUDE_LIMIT + TILE_SIZE_DEGREES}."
+            )
+        if not -180 <= west <= 180 - TILE_SIZE_DEGREES:
+            raise SystemExit(
+                f"{token!r} lies outside the grid. West edges run from -180 to "
+                f"{180 - TILE_SIZE_DEGREES}, and no tile crosses the "
+                f"antimeridian."
+            )
+        if tile in tiles:
+            raise SystemExit(
+                f"{token!r} is named twice. Two instances on one tile write "
+                f"the same prefix and the later upload wins, so a repeat is "
+                f"refused rather than collapsed."
+            )
+        tiles.append(tile)
+    return tiles
+
+
+def subnet_candidates(cfg: dict) -> list[tuple[str, str]]:
+    """The subnets a launch may try, in order, each with its zone name.
+
+    `instance.subnet` goes first, because it is the one every published tile
+    ran in and the one the dry run prints. The configured zones follow in the
+    order the config lists them, and the subnet already tried is not tried
+    twice.
+
+    A config with no zone list yields the one subnet, which is what the
+    launcher did before the fallback existed.
+    """
+    inst = cfg["instance"]
+    zones = list(inst.get("availability_zones", ()))
+    named = {z["subnet"]: z["zone"] for z in zones}
+    first = inst["subnet"]
+    out = [(named.get(first, "the configured subnet"), first)]
+    out.extend((z["zone"], z["subnet"]) for z in zones if z["subnet"] != first)
+    return out
+
+
+def error_code(text: str) -> str | None:
+    """The AWS error code in a CLI failure, or None if the text has no code."""
+    match = ERROR_CODE.search(text or "")
+    return match.group(1) if match else None
 
 
 def key_path(key_dir: str, name: str) -> Path:
@@ -113,9 +234,17 @@ def render_user_data(cfg: dict, out_dir: Path) -> Path:
     return out
 
 
-def run_instances_argv(cfg: dict, name: str, tile: str, user_data: Path) -> list[str]:
-    """The exact call. Built in one place so `--dry-run` cannot drift from it."""
+def run_instances_argv(
+    cfg: dict, name: str, tile: str, user_data: Path, subnet: str | None = None
+) -> list[str]:
+    """The exact call. Built in one place so `--dry-run` cannot drift from it.
+
+    `subnet` overrides the configured one for a capacity retry. Everything else
+    is identical between attempts, so a tile that lands in the fourth zone ran
+    the same request as one that landed in the first.
+    """
     inst, aws = cfg["instance"], cfg["aws"]
+    subnet = subnet or inst["subnet"]
     return [
         "aws",
         "ec2",
@@ -133,7 +262,7 @@ def run_instances_argv(cfg: dict, name: str, tile: str, user_data: Path) -> list
         "--security-group-ids",
         inst["security_group"],
         "--subnet-id",
-        inst["subnet"],
+        subnet,
         "--associate-public-ip-address",
         "--block-device-mappings",
         f"DeviceName=/dev/sda1,Ebs={{VolumeSize={inst['root_volume_gb']},"
@@ -153,33 +282,141 @@ def run_instances_argv(cfg: dict, name: str, tile: str, user_data: Path) -> list
     ]
 
 
-def aws(argv: list[str]) -> str:
-    """One AWS call, with its error message intact.
+def aws_try(argv: list[str]) -> tuple[int, str, str]:
+    """One AWS call that may fail. Returns `(returncode, stdout, stderr)`.
+
+    The caller decides what a failure means. `run-instances` answers a capacity
+    refusal by moving to another zone, and everything else stops the run.
+    """
+    out = subprocess.run(argv, capture_output=True, text=True)
+    return out.returncode, out.stdout.strip(), out.stderr.strip()
+
+
+def fail(argv: list[str], code: int, detail: str) -> SystemExit:
+    """Put the AWS message on stderr and build the exit that carries it.
 
     `check=True` under `capture_output` raises a `CalledProcessError` whose
     text is the argv and nothing else, so the reason a call failed is lost
     exactly when it is needed. A dry run validates the request but not capacity
     or quota, so the message is often the only way to tell a malformed call
     from a full region. Twice on 2026-09-14 this swallowed the answer.
+
+    The message goes to stderr here as well as into the exception, so it is
+    visible under a driver that reports only the exit status.
     """
-    out = subprocess.run(argv, capture_output=True, text=True)
-    if out.returncode != 0:
-        raise SystemExit(
-            f"aws {' '.join(argv[1:3])} failed with {out.returncode}:\n"
-            f"{out.stderr.strip() or out.stdout.strip()}"
+    print(detail, file=sys.stderr, flush=True)
+    return SystemExit(f"aws {' '.join(argv[1:3])} failed with {code}:\n{detail}")
+
+
+def aws(argv: list[str]) -> str:
+    """One AWS call whose failure stops the run, with its message intact."""
+    code, stdout, stderr = aws_try(argv)
+    if code != 0:
+        raise fail(argv, code, stderr or stdout)
+    return stdout
+
+
+def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -> dict:
+    """One instance, trying each configured zone while capacity is the reason.
+
+    Only `InsufficientInstanceCapacity` moves the launch along. Any other error
+    stops the run at the first zone with its message on stderr, because
+    retrying a wrong security group or an expired token in four zones turns one
+    clear failure into four and reports the region as full.
+
+    Returns:
+        `{instance_id, zone, subnet, capacity_refusals}`, where the refusals
+        are the zones that had no room. The manifest keeps them, so a run that
+        took an hour to place four instances says why.
+
+    Raises:
+        SystemExit: on any non-capacity error, or when every zone is full.
+    """
+    refusals = []
+    candidates = subnet_candidates(cfg)
+    for zone, subnet in candidates:
+        argv = run_instances_argv(cfg, name, tile, user_data, subnet=subnet)
+        code, stdout, stderr = aws_try(argv)
+        if code == 0:
+            return {
+                "instance_id": stdout,
+                "zone": zone,
+                "subnet": subnet,
+                "capacity_refusals": refusals,
+            }
+        detail = stderr or stdout
+        if error_code(detail) != CAPACITY_ERROR:
+            raise fail(argv, code, detail)
+        refusals.append(zone)
+        say(
+            f"{tile}  {zone} has no {cfg['instance']['type']} capacity, "
+            f"trying the next zone",
         )
-    return out.stdout.strip()
+    zones = ", ".join(zone for zone, _ in candidates)
+    raise SystemExit(
+        f"every configured zone refused a {cfg['instance']['type']} for "
+        f"{tile} with {CAPACITY_ERROR}: {zones}. Nothing was launched for this "
+        f"tile. Instances already launched are in the manifest."
+    )
+
+
+class RunManifest:
+    """The record of what exists, rewritten after every step of every instance.
+
+    The previous launcher built the whole entry list and wrote the file once,
+    after the last tile. A capacity failure on the third of four tiles exited
+    before that line, so two running instances existed with their ids on stdout
+    and nowhere else. `watch.py` and `teardown.py` both read the manifest, so
+    neither could see them, and the keys were named in a scrollback.
+
+    Every write is a temporary file and an `os.replace`, which is atomic on one
+    filesystem. A reader either sees the previous complete manifest or the next
+    one, and a launcher killed mid-write leaves neither truncated.
+    """
+
+    def __init__(self, path: Path, header: dict):
+        self.path = Path(path)
+        self.header = dict(header)
+        self.instances: list[dict] = []
+        self.write()
+
+    def add(self, entry: dict) -> dict:
+        """Record one instance and flush. Returns the entry, to be mutated."""
+        self.instances.append(entry)
+        self.write()
+        return entry
+
+    def write(self) -> None:
+        payload = dict(self.header) | {"instances": self.instances}
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=1))
+        os.replace(tmp, self.path)
 
 
 def launch_one(
-    cfg: dict, tile: str, run_id: str, dry_run: bool, user_data: Path
+    cfg: dict,
+    tile: str,
+    run_id: str,
+    dry_run: bool,
+    user_data: Path,
+    manifest: RunManifest | None = None,
 ) -> dict:
+    """One key pair and one instance, recorded at every step that creates one.
+
+    The order is the whole point. The entry reaches the manifest as soon as the
+    key exists, the instance id lands in it before anything waits on the
+    instance, and each later fact is another flush. A run killed at any line
+    after `run-instances` leaves a manifest naming a billing instance and the
+    key that opens it.
+    """
     name = f"lst-{tile}-{run_id}"
     pem = key_path(cfg["paths"]["key_dir"], name)
-    argv = run_instances_argv(cfg, name, tile, user_data)
     if dry_run:
+        argv = run_instances_argv(cfg, name, tile, user_data)
         print(f"\n# {tile}: key -> {pem}")
         print(" ".join(argv))
+        zones = ", ".join(zone for zone, _ in subnet_candidates(cfg))
+        print(f"# {tile}: capacity fallback would try {zones}")
         return {"tile": tile, "name": name, "pem": str(pem), "dry_run": True}
 
     a = cfg["aws"]
@@ -208,7 +445,21 @@ def launch_one(
             f"{pem} is empty. Refusing to launch an instance there is no way back into."
         )
 
-    instance_id = aws(argv)
+    entry = {"tile": tile, "name": name, "pem": str(pem), "state": "key_created"}
+    if manifest is not None:
+        manifest.add(entry)
+
+    placed = run_instances(cfg, name, tile, user_data)
+    entry |= {
+        "instance_id": placed["instance_id"],
+        "zone": placed["zone"],
+        "subnet": placed["subnet"],
+        "capacity_refusals": placed["capacity_refusals"],
+        "state": "launched",
+    }
+    if manifest is not None:
+        manifest.write()
+
     aws(
         [
             "aws",
@@ -220,7 +471,7 @@ def launch_one(
             "--region",
             a["region"],
             "--instance-ids",
-            instance_id,
+            entry["instance_id"],
         ]
     )
     ip = aws(
@@ -233,26 +484,32 @@ def launch_one(
             "--region",
             a["region"],
             "--instance-ids",
-            instance_id,
+            entry["instance_id"],
             "--query",
             "Reservations[0].Instances[0].PublicIpAddress",
             "--output",
             "text",
         ]
     )
-    print(f"{tile}  {instance_id}  {ip}  key {pem}", flush=True)
-    return {
-        "tile": tile,
-        "name": name,
-        "pem": str(pem),
-        "instance_id": instance_id,
-        "ip": ip,
-    }
+    entry |= {"ip": ip, "state": "running"}
+    if manifest is not None:
+        manifest.write()
+    print(
+        f"{tile}  {entry['instance_id']}  {ip}  {placed['zone']}  key {pem}",
+        flush=True,
+    )
+    return entry
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--tiles", nargs="+", required=True)
+    p.add_argument(
+        "--tiles",
+        nargs="+",
+        required=True,
+        help="tile ids, space separated or comma separated or both. Checked "
+        "against the 5 degree grid before anything launches",
+    )
     p.add_argument(
         "--commit", required=True, help="full 40-character SHA the instances check out"
     )
@@ -266,38 +523,42 @@ def main() -> int:
     a = p.parse_args()
 
     cfg = load_config(a.config)
+    tiles = parse_tiles(a.tiles)
     commit = resolve_commit(a.commit, repo=HERE.parent)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
     print(
-        f"run {run_id}  commit {commit}  {len(a.tiles)} tile(s) "
+        f"run {run_id}  commit {commit}  {len(tiles)} tile(s) "
         f"on {cfg['instance']['type']}"
     )
     a.manifest_dir.mkdir(parents=True, exist_ok=True)
     user_data = render_user_data(cfg, a.manifest_dir)
-    entries = [launch_one(cfg, t, run_id, a.dry_run, user_data) for t in a.tiles]
 
     if a.dry_run:
+        for tile in tiles:
+            launch_one(cfg, tile, run_id, True, user_data)
         print(
             f"\nDry run. Nothing was created. Deadline would be "
             f"{cfg['instance']['deadline_minutes']} minutes per instance."
         )
         return 0
 
-    manifest = a.manifest_dir / f"run-{run_id}.json"
-    manifest.write_text(
-        json.dumps(
-            {"run_id": run_id, "commit": commit, "config": cfg, "instances": entries},
-            indent=1,
-        )
+    # The manifest exists before the first key pair does, and is named now
+    # rather than at the end. A launch that dies on the third tile has already
+    # written the first two, and the operator has the path to read.
+    path = a.manifest_dir / f"run-{run_id}.json"
+    manifest = RunManifest(
+        path, {"run_id": run_id, "commit": commit, "tiles": tiles, "config": cfg}
     )
-    print(f"\nmanifest {manifest}")
+    print(f"manifest {path}")
+    entries = [launch_one(cfg, t, run_id, False, user_data, manifest) for t in tiles]
+
     print(
-        f"next: uv run fleet/drive.sh per tile, then "
+        f"\nnext: uv run fleet/drive.sh per tile, then "
         f"uv run fleet/watch.py --run {run_id}"
     )
     for e in entries:
-        print(f"  fleet/drive.sh {manifest} {e['tile']}")
+        print(f"  fleet/drive.sh {path} {e['tile']}")
     return 0
 
 

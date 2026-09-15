@@ -1394,6 +1394,41 @@ _POOLED_LINEAGE = (
 )
 
 
+def pooled_fallback_sentence(correction_rule: dict[str, Any]) -> str:
+    """How much of this raster the cross-fade could not describe, and why.
+
+    Every feathered item carries this, zero included. A share stated only when
+    it is non-zero is a share a reader has to guess at, and the guess that
+    silence means zero is the one that fails on the tile where the field was
+    dropped for another reason.
+
+    A swath-less path is named with its scene count. Those scenes reached
+    `qa_count` and the pooled fallback and took no part in the blend, so a
+    reader comparing evidence against temperature can see the gap rather than
+    infer it. The prep run used to refuse such a tile. Stating it here is what
+    replaced the refusal.
+    """
+    percent = 100.0 * float(correction_rule.get("pooled_share") or 0.0)
+    pooled = int(correction_rule.get("n_pooled_fallback_retained") or 0)
+    retained = int(correction_rule.get("retained_pixels") or 0)
+    text = (
+        f"Pooled fallback: {percent:.2f}% of the retained pixels took the "
+        f"pooled percentile rather than the cross-fade, {pooled:,} of "
+        f"{retained:,}. The share counts pixels present in this raster, after "
+        f"the output mask, so it divides by the same count the coverage "
+        f"figures use."
+    )
+    absent = correction_rule.get("paths_without_swath") or {}
+    if not absent:
+        return text
+    named = ", ".join(f"{path} ({count} scenes)" for path, count in absent.items())
+    return (
+        f"{text} No swath was found for WRS path {named}, so those scenes fed "
+        f"qa_count and the pooled fallback and took no part in the per-path "
+        f"blend."
+    )
+
+
 def correction_lineage(correction_rule: dict[str, Any] | None) -> str:
     """What produced each value, for a consumer who cannot see it in the pixels.
 
@@ -1438,6 +1473,7 @@ def correction_lineage(correction_rule: dict[str, Any] | None) -> str:
             "produced a valid observation. A pixel outside every swath takes "
             "the pooled percentile of whatever observed it."
         )
+        sentences.append(pooled_fallback_sentence(correction_rule))
     if not sentences:
         return _POOLED_LINEAGE
 

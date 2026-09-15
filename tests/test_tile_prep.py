@@ -394,44 +394,56 @@ class TestSplittingTheGrid:
             assert np.abs(other - answers[0]).max() <= destripe.ANOMALY_BIN_C
 
 
-class TestEveryPathNeedsASwath:
-    """A path with no swath cell would load its scenes and composite none.
+class TestASwathlessPathIsReportedNotRefused:
+    """A path with no swath cell is counted, named, and composited anyway.
 
     `feathered_percentile` reduces one subset per path the prep file names. A
     scene whose path is not on that list enters no subset, so its observations
-    reach `qa_count` and not the temperature, and where another path covers the
-    same ground the value is fitted without them. That is a wrong number rather
-    than a missing one, so the prep run stops instead.
+    reach `qa_count` and the pooled fallback rather than the blend. The prep
+    run used to raise here and tell the operator to pass `--no-feather`, which
+    made a whole tile wait on someone reading a message. It now returns the
+    fact, and the composite reports it on the item and in the summary.
     """
 
-    def test_a_path_with_no_swath_cell_stops_the_run(self):
+    def test_one_swathless_path_is_named_with_its_scene_count(self):
         items = make_items()
-        with pytest.raises(SystemExit, match="reached no swath cell"):
-            tile_prep.check_every_path_has_a_swath(items, (WEST,))
+        assert tile_prep.paths_without_a_swath(items, (WEST,)) == {EAST: 6}
 
-    def test_the_message_names_every_missing_path(self):
+    def test_every_swathless_path_is_named(self):
         items = make_items()
-        with pytest.raises(SystemExit) as caught:
-            tile_prep.check_every_path_has_a_swath(items, ())
-        assert WEST in str(caught.value)
-        assert EAST in str(caught.value)
-        assert "--no-feather" in str(caught.value)
+        assert tile_prep.paths_without_a_swath(items, ()) == {WEST: 6, EAST: 6}
 
-    def test_every_path_present_passes(self):
+    def test_it_never_raises(self):
+        """The whole point of the change. No tile stops here any more."""
         items = make_items()
-        assert tile_prep.check_every_path_has_a_swath(items, (WEST, EAST)) is None
+        for paths in ((), (WEST,), (EAST,), (WEST, EAST)):
+            tile_prep.paths_without_a_swath(items, paths)
 
-    def test_a_path_the_scenes_never_carry_is_not_required(self):
-        """The check is one-way. A prep file may name more paths than it needs.
+    def test_every_path_present_reports_nothing(self):
+        items = make_items()
+        assert tile_prep.paths_without_a_swath(items, (WEST, EAST)) == {}
+
+    def test_a_path_the_scenes_never_carry_is_not_reported(self):
+        """The report is one-way. A prep file may name more paths than it needs.
 
         `swath_masks` only ever returns paths it saw, so this cannot happen
-        today. Asserting it keeps the check from becoming an equality test,
-        which would fail a tile whose margin caught a path the tile did not.
+        today. Asserting it keeps the report from becoming a set difference in
+        the other direction, which would name a path the tile never held.
         """
         items = make_items()
-        assert (
-            tile_prep.check_every_path_has_a_swath(items, (WEST, EAST, "999")) is None
-        )
+        assert tile_prep.paths_without_a_swath(items, (WEST, EAST, "999")) == {}
+
+    def test_the_counts_are_the_scenes_behind_each_path(self):
+        """A scene count is what tells a large exclusion from a trivial one."""
+        items = make_items()
+        counts = tile_prep.paths_without_a_swath(items, ())
+        assert sum(counts.values()) == len(items)
+
+    def test_the_order_is_the_path_order(self):
+        """Deterministic output. The same tile writes the same lineage twice."""
+        items = make_items()
+        counts = tile_prep.paths_without_a_swath(items, ())
+        assert list(counts) == sorted(counts)
 
 
 class TestTheArtifact:

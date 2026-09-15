@@ -27,6 +27,36 @@ uv run publish_catalog.py finish --dest s3://.../landsat-lst
 `AGENTS.md` also asks for a rehearsal with the real flags before any EC2
 minute: `uv run shard_lst_p95.py --rehearse 6 --tile N40W080 ...`.
 
+## Tiles, zones, and a partial launch
+
+`--tiles` takes either spelling and any mixture of the two.
+
+```bash
+uv run fleet/launch.py --tiles S45W075,S50W075 --commit "$SHA"
+uv run fleet/launch.py --tiles S45W075 S50W075 --commit "$SHA"
+```
+
+The launcher checks every id against the 5 degree grid before anything
+launches. A malformed id, an off-grid id, and a repeated id each stop the run.
+One wrong id costs a whole instance otherwise. That box launches and clones the
+repository. It downloads the artifacts and fails several minutes into billing.
+
+A launch that meets `InsufficientInstanceCapacity` tries the next availability
+zone, in the order `config.toml` lists under `instance.availability_zones`. The
+configured subnet goes first. Every other AWS error stops the run at the first
+zone and puts the message on stderr. Retrying a wrong security group in four
+zones turns one clear failure into four and reads as a full region.
+
+The launcher writes the manifest before the first key pair exists. It rewrites
+the file after each step that creates something. A key, an instance id, and an
+address are all on disk as soon as they exist. Every write goes to a temporary
+file and an atomic rename.
+
+So a launch that stops on its third tile leaves the first two readable by
+`watch.py` and `teardown.py`, with their key paths. The previous launcher wrote
+the file once, after the last tile. A capacity refusal then left two running
+instances whose ids existed only in a scrollback.
+
 ## The credential model
 
 The account has two identities and they are not interchangeable.

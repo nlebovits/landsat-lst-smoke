@@ -36,6 +36,38 @@ root_volume_gb = 150
 # own compute.
 deadline_minutes = 75
 
+# Where a launch goes when the first subnet has no capacity. `instance.subnet`
+# is tried first and these follow in this order, each one skipped if it names a
+# subnet already tried.
+#
+# Only `InsufficientInstanceCapacity` moves a launch down the list. Every other
+# AWS error stops the run with its message on stderr, because a wrong security
+# group or an expired token would otherwise be retried four times and reported
+# as a full region.
+#
+# An m6id.16xlarge is 64 vCPU and the account holds one zone's worth of quota
+# at a time. A zone that refuses one tile often takes the next, so the fallback
+# is per instance rather than per run.
+#
+# These blocks come last in the file on purpose. A `[[instance.x]]` array
+# written above the scalar keys of `[instance]` captures every key after it,
+# and `deadline_minutes` silently became a field of the fourth zone.
+[[instance.availability_zones]]
+zone = "us-west-2a"
+subnet = "subnet-016d236cc30caf7de"
+
+[[instance.availability_zones]]
+zone = "us-west-2b"
+subnet = "subnet-01c63ebdb73672acd"
+
+[[instance.availability_zones]]
+zone = "us-west-2c"
+subnet = "subnet-07907d608259168a1"
+
+[[instance.availability_zones]]
+zone = "us-west-2d"
+subnet = "subnet-0bb0dc44a35231652"
+
 [tags]
 # `cost_report.py --tag Key=Value` finds instances by exactly one of these, so
 # the keys are load bearing, not decoration.
