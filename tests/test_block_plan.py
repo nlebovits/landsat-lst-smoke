@@ -771,13 +771,21 @@ class TestTheDriverBranch:
         assert all(out.keep.shape == (40, 40) for out in outs)
         assert all(out.cut for out in outs)
 
-    def test_the_engine_flag_defaults_to_the_graph(self):
+    def test_the_engine_flag_defaults_to_the_fused_one(self):
+        """The default is what production runs, and it was not for a while.
+
+        `fleet/run.sh` has passed `--engine fused` since the fleet existed, and
+        every run FINDINGS.md publishes used it, while the default stayed
+        `graph`. Anyone running the command without the flag got the engine
+        whose build cost scales with the tile's time axis: MEASURED at 62.9 s
+        against 27 ms at 4,776 items.
+        """
         from lst import shard_lst_p95
 
-        assert shard_lst_p95.parse_args(["--tile", "S30W065"]).engine == "graph"
+        assert shard_lst_p95.parse_args(["--tile", "S30W065"]).engine == "fused"
         assert (
-            shard_lst_p95.parse_args(["--tile", "S30W065", "--engine", "fused"]).engine
-            == "fused"
+            shard_lst_p95.parse_args(["--tile", "S30W065", "--engine", "graph"]).engine
+            == "graph"
         )
 
 

@@ -260,7 +260,7 @@ class TestTheRunScriptKeepsTheLoadBearingFlags:
     @pytest.mark.parametrize(
         "flag,why",
         [
-            ("--engine fused", "not the default; changes speed and the memory model"),
+            ("--engine fused", "the default now, and stated so a run names its engine"),
             ("--stage-dir /mnt/nvme/stage", "the default is the 150 GB root volume"),
             ("--keep-staged", "without it the two passes pay for every object twice"),
             ("--tile-prep", "omitted, it composites pooled and leaves the WRS seam"),

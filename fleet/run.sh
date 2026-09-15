@@ -87,10 +87,14 @@ if [ "${PREP_ONLY:-}" = "1" ]; then
   exit 0
 fi
 
-# Four flags whose defaults are wrong for an instance. `--engine fused` is not
-# the default and changes both the speed and the memory model. `--tile-prep`
-# omitted composites the pooled percentile and leaves the WRS seam in a
-# finished, wrong raster. `--keep-staged` lets the two passes share one fetch.
+# Three flags whose defaults are wrong for an instance. `--tile-prep` omitted
+# composites the pooled percentile and leaves the WRS seam in a finished, wrong
+# raster. `--keep-staged` lets the two passes share one fetch. `--stage-dir`
+# points at the instance store rather than the root volume.
+#
+# `--engine fused` is stated rather than assumed. It is the default now, and
+# this line is what a reader checks to see which engine produced a published
+# tile. Passing it costs nothing and removes a question.
 mark composite_start
 uv run lst-shard --tile "$TILE" \
     --tile-prep "$RUN/prep" \

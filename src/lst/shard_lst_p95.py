@@ -1,14 +1,24 @@
-"""The p95 LST composite of one tile, as one lazy dask-xarray graph on frisky.
+"""The p95 LST composite of one tile, on frisky.
 
-`composite.build_graph` opens every scene of the tile once, chunked in space
-and never in time, and reduces each block to its p95 and its monthly counts
-inside one task. The blocks stream from the workers into two staging
-GeoTIFFs, which become the two COGs the catalog publishes. Nothing larger
-than a block returns to this process, and nothing else is written to disk.
+`composite.submit_blocks` plans the tile's blocks and sends one task per
+block, each reading only the scenes whose footprint reaches it and reducing
+them to a p95 and a set of monthly counts. The blocks stream from the workers
+into two staging GeoTIFFs, which become the two COGs the catalog publishes.
+Nothing larger than a block returns to this process, and nothing else is
+written to disk.
 
-This driver does everything around that graph: it resolves the tile, checks
-the mask artifacts and the prep artifact, stages the scene objects to local
-disk, starts the frisky cluster, computes, collects the trace, and writes the
+`--engine graph` selects the other implementation, one lazy dask-xarray graph
+for the whole tile. It applies the same numeric rules through the same
+`reduce_block` and `finalize_block`, and `tests/test_composite_fused.py`
+asserts the two write identical bytes. It is not what a run should use: its
+build cost scales with the tile's time axis rather than with what a block
+reads, MEASURED at 9.6 s for 1,000 items and 62.9 s for 4,776 against 9 ms
+and 27 ms for the block plan. It stays because a second implementation is
+what makes the first one checkable.
+
+This driver does everything around that: it resolves the tile, checks the
+mask artifacts and the prep artifact, stages the scene objects to local disk,
+starts the frisky cluster, computes, collects the trace, and writes the
 catalog. Every phase is a frisky client phase, so the dashboard shows what the
 driver is doing while it does it.
 
@@ -496,10 +506,11 @@ def parse_args(argv=None):
     p.add_argument(
         "--engine",
         choices=("graph", "fused"),
-        default="graph",
-        help="graph: one lazy dask-xarray graph for the tile, whose build "
-        "cost scales with the time axis. fused: one submitted task per "
-        "block, each reading only the scenes whose footprint reaches it",
+        default="fused",
+        help="fused (default): one submitted task per block, each reading "
+        "only the scenes whose footprint reaches it. graph: one lazy "
+        "dask-xarray graph for the tile, whose build cost scales with the "
+        "time axis rather than with what a block reads",
     )
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--threads-per-worker", type=int, default=4)

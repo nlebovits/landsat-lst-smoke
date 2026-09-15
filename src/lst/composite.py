@@ -49,8 +49,16 @@ task per block at the workers with only that block's scenes and vectors
 aboard. MEASURED on the same shape and the real inventory footprints: the
 plan, the vectors, and every block's subset together take 9 ms at 1,000 items
 and 27 ms at 4,776, against 9.6 s and 62.9 s for `build_graph` on this
-laptop. `--engine fused` selects that path; `--engine graph` is the default
-and stays the tested one.
+laptop. That path is `--engine fused`, and it is the default: every run
+`FINDINGS.md` publishes used it, and `fleet/run.sh` has passed it since the
+fleet existed. The default was `graph` until the numbers above were in, and
+then stayed `graph` for long enough that a run without the flag got the slow
+engine.
+
+`--engine graph` still selects `build_graph`. It is not dead code and it is
+not a fallback. It is the second implementation the first one is checked
+against, which is the only reason anyone can say what `fused` produces is
+right.
 
 The task those blocks run is `fused_block`: one task that reads its own two
 bands through `read_block`, resamples its own weights through
