@@ -1,15 +1,13 @@
 extends: existence
 message: "'%s' is passive. Name the agent that does the action."
-level: suggestion
+level: error
 ignorecase: true
 raw:
   - '\b(?:am|are|were|being|is|been|was|be)\b\s*'
 tokens:
-  - '[\w]+ed'
+  - '(?!un)[\w]+ed'
   - awoken
   - beaten
-  - become
-  - begun
   - bound
   - broken
   - brought
@@ -17,14 +15,12 @@ tokens:
   - bought
   - caught
   - chosen
-  - come
   - cut
   - dealt
   - done
   - drawn
   - driven
   - eaten
-  - fallen
   - fed
   - felt
   - fought
@@ -32,7 +28,6 @@ tokens:
   - forgotten
   - frozen
   - given
-  - gone
   - grown
   - held
   - hidden
@@ -60,7 +55,6 @@ tokens:
   - spent
   - split
   - spread
-  - stood
   - taken
   - taught
   - thought

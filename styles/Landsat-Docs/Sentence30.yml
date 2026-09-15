@@ -1,6 +1,6 @@
 extends: existence
 message: "This sentence runs past 30 words. Split it."
-level: warning
+level: error
 scope: sentence
 nonword: true
 raw:
