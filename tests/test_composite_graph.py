@@ -274,7 +274,7 @@ class TestTheTimeAxis:
             graph([{} for _ in range(N_TIME)])
 
     def test_quantile_is_not_used(self):
-        source = (ROOT / "composite.py").read_text()
+        source = Path(composite.__file__).read_text()
         assert ".quantile(" not in source
 
 

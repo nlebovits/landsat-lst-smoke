@@ -40,6 +40,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import composite  # noqa: E402
+import shard_lst_p95  # noqa: E402
+
 TILE = "S30W065"
 
 #: 1,800 px of tile in 200 px blocks: 81 of them. Enough that the cluster is
@@ -59,7 +62,7 @@ def argv(out_dir, *extra):
     """
     return [
         sys.executable,
-        str(ROOT / "shard_lst_p95.py"),
+        shard_lst_p95.__file__,
         "--tile",
         TILE,
         "--rehearse",
@@ -206,7 +209,10 @@ class TestABlockErringFailsTheRun:
         for script in ROOT.glob("*.py"):
             shutil.copy2(script, work / script.name)
 
-        target = work / "composite.py"
+        # Located through the module rather than spelled as a root filename, so
+        # that a module which moves takes this path with it. A missing file
+        # here fails loudly; a name that happens to exist would not.
+        target = work / Path(composite.__file__).relative_to(ROOT)
         source = target.read_text()
         marker = "def reduce_block("
         # Past the signature's closing paren and past the docstring, so the
@@ -222,7 +228,9 @@ class TestABlockErringFailsTheRun:
         proc = subprocess.run(
             [
                 sys.executable,
-                "shard_lst_p95.py",
+                # Relative, because it names the copy under `work`, not the
+                # checkout. Derived so that it tracks the module's real place.
+                str(Path(shard_lst_p95.__file__).relative_to(ROOT)),
                 *argv(out)[2:],
                 # Small: the run is expected to die on the first block, so
                 # there is nothing to be gained by writing 200 scenes first.

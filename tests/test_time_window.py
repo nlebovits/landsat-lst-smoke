@@ -147,13 +147,21 @@ class TestCacheIdentity:
 
 
 def test_no_entry_point_still_carries_the_old_window():
-    root = Path(__file__).resolve().parent.parent
-    scripts = [
-        root / "shard_lst_p95.py",
-        root / "composite.py",
-        root / "measure_s3_requests.py",
-        root / "stac_window.py",
-        root / "tile_prep.py",
+    # Module objects, so that `__file__` locates each source. Naming the files
+    # under a fixed root instead would stop finding them the moment one moves,
+    # and a list of unreadable paths reads as a pass.
+    import composite
+    import stac_window
+    import tile_prep
+
+    modules = [
+        shard_lst_p95,
+        composite,
+        measure_s3_requests,
+        stac_window,
+        tile_prep,
     ]
-    offenders = [p.name for p in scripts if '"2020-01-01"' in p.read_text()]
+    offenders = [
+        m.__name__ for m in modules if '"2020-01-01"' in Path(m.__file__).read_text()
+    ]
     assert offenders == []
