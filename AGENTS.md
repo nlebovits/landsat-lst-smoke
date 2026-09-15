@@ -52,6 +52,34 @@ the seam correction. Read `composite.py`'s module docstring first.
 - `frisky.LocalCluster(processes=True, memory_limit=<bytes>)`. Bytes, not a
   string. `client.close()` before `cluster.close()`.
 
+## Prose
+
+`docs/PROSE.md` has the full rules. Before you finish any change that touches
+a Markdown file, run the gate on it:
+
+```bash
+vale --minAlertLevel=error README.md FINDINGS.md docs/PROSE.md
+```
+
+Anything it reports blocks the commit and CI. The findings you will hit most:
+
+- **Passive voice is an error.** Say which component acts. Write "the graph
+  reduces the block", not "the block is reduced".
+- **A sentence over 30 words is an error.** Split it.
+- **`, so X does Y` is an error.** End the sentence at the comma and state the
+  effect as its own claim.
+- **Do not grade a mechanism's character.** No benign default, no brittle
+  parser, no noisy target. Say what it does or measures.
+- **Do not give a tool a mind.** A spec does not want, a release does not
+  teach, a parser does not get confused. Say what it checks or produces.
+- **No merit clichés.** Nothing pays for itself, pulls its weight, does the
+  heavy lifting, or deserves a closer look.
+- **No hype words, no filler, no chatbot closings.** The rules name them.
+
+Never suppress a finding to make the check pass. If a rule is wrong for this
+domain, disable it in `.vale.ini` with a stated reason and add a test to
+`tests/test_prose_styles.py`, the way the four existing domain disables do.
+
 ## Working habits
 
 - Run anything over 30 seconds in the background and keep talking.

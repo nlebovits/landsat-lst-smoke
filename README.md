@@ -4,21 +4,21 @@
 
 One tile is one lazy dask-xarray graph. `odc.stac.load` opens every scene of
 the tile once, chunked in space and never in time, because a percentile over
-time needs every scene of a pixel in one block. Each block is masked,
-corrected, reduced and encoded inside one task, and the blocks stream from
-the workers into the two COGs the catalog publishes. The driver receives
+time needs every scene of a pixel in one block. One task masks,
+corrects, reduces, and encodes each block, and the blocks stream from the
+workers into the two COGs the catalog publishes. The driver receives
 nothing larger than one block. Every phase the driver runs around that graph
-is a frisky client phase, so the dashboard shows the current phase and its
+is a frisky client phase. The dashboard shows the current phase and its
 elapsed time while it runs.
 `--rehearse N` runs the whole pipeline over N synthetic scenes on local disk,
 with no S3 reads, and tags every line and every artifact `REHEARSAL:`.
 
 ## Removing the WRS seam
 
-A composite pixel is reduced from the scenes overlapping it, so the value jumps
-where that set of scenes changes. The jumps trace WRS-2 footprints
+The graph reduces a composite pixel from the scenes overlapping it, so the
+value jumps where that set of scenes changes. The jumps trace WRS-2 footprints
 across the raster at about 10 degrees from vertical. A scene offset and a
-per-path cross-fade remove them, and neither runs unless the run is given a
+per-path cross-fade remove them, and neither runs unless you give the run a
 prep file.
 
 Build the prep file once per tile, then composite against it:
@@ -35,18 +35,19 @@ writes two things a block cannot work out for itself.
 
 **One offset per scene.** Landsat Collection 2 surface temperature is
 atmospherically corrected one scene at a time, with a published error of 1 to
-5 K that applies to the whole scene. Each scene is compared against a per-pixel
-median for its own calendar month, pooled across every year in the window, and
-shifted by its bulk deviation. The month is what makes the reference safe to
-subtract. An annual reference absorbs the seasonal cycle, and
-`nlebovits/landsat-lst` measured that failure at 40.6 C down to 29.8 C. A scene
-whose offset exceeds 15 C is discarded rather than clamped, which also means
+5 K that applies to the whole scene. `tile_prep.py` compares each scene against a
+per-pixel median for its own calendar month, pooled across every year in the
+window, then shifts the scene by its bulk deviation. The month is what makes the reference safe to
+subtract. An annual reference hides the seasonal cycle, and
+`nlebovits/landsat-lst` measured that failure at 40.6 C down to 29.8 C. `tile_prep.py`
+discards a scene whose offset exceeds 15 C rather than clamping it, which also
+means
 `qa_count` reports the evidence behind the P95 instead of raw availability.
 
-**One swath per WRS path, and cross-fade weights on it.** The offset is fitted
-at the median and the product is a P95, so a tail difference between paths
+**One swath per WRS path, and cross-fade weights on it.** `tile_prep.py` fits the offset
+at the median, and the product is a P95, so a tail difference between paths
 survives it. Building one percentile per path and blending them on distance to
-each swath edge removes that step. A pixel one path reaches is untouched.
+each swath edge removes that step. A pixel that only one path covers takes that path's estimate unchanged.
 
 The swath comes from the pixels rather than from the item footprints. This
 repository reads the USGS bulk metadata, whose corner columns describe the
@@ -59,7 +60,7 @@ and still carries temperatures. Those pixels take the pooled percentile. The
 cross-fade weights one path's estimate against another, and outside every swath
 there is one estimate to weigh, so the blend is the pooled value already. The
 run summary counts them as `n_pooled_fallback`. A nodata pixel keeps the meaning
-it had: nothing was observed there.
+it had. No scene imaged that ground.
 
 Both corrections run inside the block the graph has already loaded, so neither
 adds a read and neither adds a pass. The prep file is the extra traversal,
@@ -67,13 +68,13 @@ taken once per tile and shared by every block of it.
 
 Turn either off with `--no-destripe` or `--no-feather`. Add `--emit-pooled` to
 write `lst_p95_pooled.tif` beside the product. It comes out of the same blocks
-after the offsets are applied, so it isolates the cross-fade and says nothing
-about the offsets. It also costs 2 bytes per output pixel, which
+after the graph applies the offsets, so it isolates the cross-fade and says
+nothing about the offsets. It also costs 2 bytes per output pixel, which
 `composite.block_bytes` counts against the machine before the cluster starts.
 
 **Not yet measured here.** Every number above comes from
-`nlebovits/landsat-lst` on its own grid. No tile in this repository has been
-prepped and no block has been composited with a correction on. See "What is
+`nlebovits/landsat-lst` on its own grid. This repository has prepped no tile,
+and it has composited no block with a correction on. See "What is
 not settled" in `FINDINGS.md`.
 
 ## Known issues
@@ -89,9 +90,9 @@ one measures the rule rather than the ground.
 a 21.8% scene rejection.
 
 Every published item states its rule in `processing:lineage`, beside the mask
-rules and naming the scene set the offsets were fitted over. Read it before
-comparing two tiles. One graph composites one tile under one rule, so a tile
-cannot be built under two. A collection can still hold tiles built under
+rules, and names the scene set the fit covered. Read it before
+comparing two tiles. One graph composites one tile under one rule, so no tile
+carries two. A collection can still hold tiles built under
 several, so the item is where the claim belongs.
 
 ### Evidence, plausibility, and water
@@ -108,9 +109,9 @@ describes the place.
 | Water | outside the buffered land geometry | never this product's subject |
 
 The water rule zeroes `qa_count` with the temperature, so a count of 0 beside a
-nodata pixel is the signature of sea. The other two leave `qa_count` standing,
-so a count of 1 to 4 beside a nodata pixel is the evidence rule, and a count
-above 5 beside one is a value outside the bounds. Sum the 12 bands to read it.
+nodata pixel is the signature of sea. The other two leave `qa_count` standing.
+A count of 1 to 4 beside a nodata pixel is the evidence rule. A count above 5
+beside one is a value outside the bounds. Sum the 12 bands to read it.
 
 The evidence rule cuts a thin tail. MEASURED across the five audited tiles: it
 removes 0.0003% of N30E075, 0.0005% of S30W065, 0.0069% of N40W080, 0.5965% of
@@ -130,22 +131,22 @@ a decoded value after `lst_qa.in_trusted_range` has passed it. MEASURED on
 N30E075, 205 published pixels read above 80 C and the bound removes them, which
 takes the tile maximum from 82.99 C to 80.00 C.
 
-The ceiling stays at 80 C on purpose, and the pixels between 60 C and 80 C
-that pass it were measured rather than assumed. Some are broad hot ground with
+The ceiling stays at 80 C on purpose. This repository measured the pixels
+between 60 C and 80 C that pass it rather than assuming them. Some are broad hot ground with
 a spatial gradient. MEASURED: rural Rajasthan holds 56 C across 28 km, and the
 Baltimore urban core and the South Kalimantan coal belt each decay by 5 C over
-8 km. The rest are isolated pixels 25 C above everything within a kilometre, on
-a flat radial profile, in the Haryana brick-kiln belt and industrial Cordoba.
+8 km. The rest are single pixels, 25 C above everything within a kilometre, on a flat
+radial profile, in the Haryana brick-kiln belt and industrial Cordoba.
 
 A P95 over N observations is near the 0.05N-th hottest value. These pixels have
-a median of 190 observations, so a P95 of 70 C needs about ten separate
-observations at or above 70 C across five years, which no one-off artifact can
-produce. Persistent sub-pixel thermal sources explain them. A 60 C ceiling would
+a median of 190 observations. A P95 of 70 C then needs about ten separate
+observations at or above 70 C across five years. No one-off artifact produces
+that. Persistent sub-pixel thermal sources explain them. A 60 C ceiling would
 cost under 0.02% of every audited tile and would also delete rural Rajasthan.
 UNKNOWN: the ground truth of the isolated spikes. A VIIRS active-fire or gas
 flare inventory read against their coordinates would settle it.
 
-### The ASTER GED gap region is reported, not masked
+### `output_mask` reports the ASTER GED gap region rather than masking it
 
 Where ASTER GED caught no clear sky between 2000 and 2008, USGS interpolates
 emissivity from the neighbouring cells and retrieves a temperature anyway, and
@@ -155,8 +156,8 @@ a tile rests on interpolated emissivity. A pixel inside it keeps its
 temperature.
 
 Masking the region alone removes far more than it should. MEASURED on S30W065:
-524 of the 605 gap cells have no pixel at or above 70 C, and masking the
-geometry alone removes 701,839 valid pixels to remove 4,588 bad ones.
+524 of the 605 gap cells have no pixel at or above 70 C. Masking the geometry
+alone removes 701,839 valid pixels to remove 4,588 bad ones.
 `nlebovits/landsat-lst` applied the geometry alone, measured 2,799,286 pixels
 removed for 2,582 artifacts, and replaced it with a pair: the region and a 70 C
 threshold together. This repository shipped that pair and has now withdrawn it.
@@ -220,34 +221,38 @@ through.
 ASTER GED predicts where this happens, which is useful before a run rather than
 after one. A GED gap cell is ground ASTER caught no clear sky over between 2000
 and 2008, and Landsat fails on the same ground for the same reason. MEASURED,
-land pixels with no clear observation that fall outside a GED gap: 0 of 289,580
-on `N40W080`, 0 of 35,754,489 on `S25E030`, 5,895 of 105,608,892 on `N00E110`,
-and 77 of 85,489 on `S30W065`. `N30E075` has no gap cells and also has almost
+land pixels with no clear observation that fall outside a GED gap:
+
+- 0 of 289,580 on `N40W080`
+- 0 of 35,754,489 on `S25E030`
+- 5,895 of 105,608,892 on `N00E110`
+- 77 of 85,489 on `S30W065`
+ `N30E075` has no gap cells and also has almost
 no empty land, 27,915 pixels of 324 million. The gap is the wider mask: 78.7%
 of `N00E110`'s land sits in one against the 45.2% that came back empty.
 
 So `artifacts/aster_numobs.tif`, a static 43 MB global raster this repository
-already builds, bounds how much of a tile can exist before any scene is
-read.
+already builds, bounds how much of a tile can exist before the graph reads any
+scene.
 
 ### A scene's footprint is its file, not the ground it photographed
 
 Sharp-edged rectangles of nodata appear inside fully observed farmland, a few
-hundred pixels across, with `qa_count` at zero in all twelve months while the
-ground on every side has 125 to 200 observations. They are neither cloud
+hundred pixels across. Their `qa_count` reads zero in all twelve months while
+the ground on every side has 125 to 200 observations. They are neither cloud
 nor a pipeline defect.
 
 A Landsat scene is a rotated parallelogram written into an axis-aligned
 GeoTIFF, and the corners of that file are fill. The USGS bulk metadata describes
 that file: its `corner_*` columns are the product bounding rectangle, which
-exceeds the imaged area by about 46%. So the stated footprint of hundreds of scenes can cover a pixel that none of
-them photographed.
+exceeds the imaged area by about 46%. So the stated footprint of hundreds of
+scenes can cover a pixel that none of them photographed.
 
 MEASURED at 26.49 S 61.64 W on `S25W065` and 30.08 S 58.73 W on `S30W060`. The
 inventory reports 295 and 212 scenes under 20% cloud whose footprint contains
 the point. Reading 30 source pixels at each, across three WRS rows: **60 of 60
-are source fill.** None was imaged, none was clear, and the QA mask rejected
-nothing, because there was nothing to reject.
+are source fill.** No scene imaged them and none came back clear, so the QA
+mask rejected nothing. Nothing was there to reject.
 
 The rectangles run 320 by 673, 752 by 641, and 631 by 817 pixels, and their
 edges fall nowhere near the 360 pixel block grid the composite writes on. They

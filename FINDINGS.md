@@ -10,10 +10,15 @@ document got wrong.
 
 This is the measurement record, not the design record. Every figure was true of
 the run that produced it, and the configuration around it has moved since. The
-merged pull requests are the current record: #6 precomputed the inventory, #7
-made staging the default, #8 replaced the emissivity rule, #9 added the seam
-correction, and #16 replaced the shard loop with one lazy graph per tile. Where
-a PR and this document disagree, read the PR.
+merged pull requests are the current record:
+
+- #6 precomputed the inventory
+- #7 made staging the default
+- #8 replaced the emissivity rule
+- #9 added the seam correction
+- #16 replaced the shard loop with one lazy graph per tile
+
+Where a PR and this document disagree, read the PR.
 
 - **Start at `Five tiles, end to end`.** That section is the current pipeline,
   measured on 2026-09-13 over five whole tiles at four latitudes, with the seam
@@ -22,7 +27,7 @@ a PR and this document disagree, read the PR.
   exists.
 - **No section here is a recommended configuration.** The `Headline` run below
   is four unstaged `c6i.16xlarge` at a 512 px shard under the old QA mask. It
-  is kept because its defects are instructive, not because it is a target.
+  stays because its defects are instructive, not because it is a target.
 - **No figure here is a per-tile price except in `Cost`.** The $4.27 below
   bought one tile on four machines that read every shard from S3. A staged tile
   on the recommended instance is **$1.43 and about 35 minutes**.
@@ -62,7 +67,7 @@ Read the two ends of that range as evidence of a defect, not as temperatures.
 The run used a mask that let cirrus, dilated cloud, and snow through, and an
 encoder whose floor was DN 1. Under the mask the pipeline now applies, -49.7 C
 sits below the trusted minimum and 90.6 C sits above any land skin temperature,
-so both become nodata. The figures stand as what was measured. They are not what
+so both become nodata. The figures stand as what the run measured. They are not what
 the pipeline would write today.
 
 S3 requester-pays requests are 54% of that $4.27 and EC2 is 45%. That run read
@@ -102,10 +107,10 @@ byte for byte, so their digest is the `land_geometry_sha256` the tile list
 already records. The tile list, the inventory, and the ASTER GED mosaic each
 record that same digest, and every gate compares them.
 
-At 16 MB the geometry is gitignored, like the inventory before it, and
+At 16 MB `.gitignore` excludes the geometry, like the inventory before it, and
 `tests/make_land_slice.py` cuts the committed fixture: the same polygons
 clipped to the four tiles `tests/make_slice.py` covers, 148 KB.
-`masks.land_mask` rasterises only inside one tile's bbox, so the clip gives the
+`masks.land_mask` rasterises only inside one tile's bbox. The clip gives the
 same mask there, and `test_masks.py` asserts that pixel for pixel rather than
 assuming it. The checksum tie and the sweep over all 895 tiles both read the
 full file, and both skip without it.
@@ -183,11 +188,11 @@ Nothing about the pipeline needs a control channel once it starts, and the one
 run that lost its SSH key proved how much that matters. Three rules, each
 bought the expensive way:
 
-- The private key goes somewhere a reboot does not clear. A key written to a
-  session scratchpad under `/tmp` was cleared by a workstation restart while
-  its instance kept running. This account's SSO role cannot call
-  `ec2-instance-connect`, `ssm`, or the serial console, so there is no way back
-  in and the run is unrecoverable.
+- The private key goes somewhere a reboot does not clear. A workstation restart
+  cleared a key written to a session scratchpad under `/tmp` while its instance
+  kept running. This account's SSO role cannot call `ec2-instance-connect`,
+  `ssm`, or the serial console, so there is no way back in and the run is
+  unrecoverable.
 - The instance pushes its own results, continuously, to object storage. Both
   the instance and the bucket are in `us-west-2`. A run that stops halfway then
   still leaves its prep artifact, its logs, and its markers behind.
@@ -205,8 +210,8 @@ MEASURED on 2026-09-13, one `m6id.16xlarge` per tile in us-west-2, commit
 seam corrections on, output mask on. `S30W065` ran alone. The other four ran at
 the same time, on four instances.
 
-This is the first time any tile in this repository has been composited with a
-correction on, with the mask on, or over the full 2021-2025 window. Every
+This run is the first in this repository to composite a tile with a correction
+on and with the mask on. It is also the first over the full 2021-2025 window. Every
 figure above this section that describes the numpy shard path describes
 something that no longer runs.
 
@@ -313,7 +318,7 @@ the same 64 threads. The sweep establishes only the shape: throughput peaks at
 indices, stage_dir)` with no thread argument, so every prep took the
 `min(64, 4 x cores)` default. `--stage-threads` now passes through, defaulting
 to None so a run without it stays comparable to every run measured above.
-Staging is 45% of a tile, so the flag is worth about 17% of the fleet's wall
+Staging is 45% of a tile. The flag saves about 17% of the fleet's wall
 clock. No tile has yet run at 128.
 
 ## Study area, grid, and data
@@ -381,7 +386,7 @@ values the composite held, and they treat `qa_count` differently.
 
 The water rule zeroes `qa_count` with the temperature, so the two bands cannot
 disagree. A count above zero beside a nodata pixel would say the pixel had
-observations and lost them to the reduction, and over sea it was never this
+observations and lost them to the reduction. Over sea the pixel was never this
 product's subject at all.
 
 The emissivity rule leaves `qa_count` alone. Zero observations is data, the
@@ -389,18 +394,18 @@ count is the evidence behind every surviving p95, and it remains correct
 whatever the retrieval did with the observations it counted.
 
 A consumer that needs the three apart has the tile's `summary.json`, which
-counts each of them, and the mask's own inputs, which are named in it.
+counts each of them, and the mask's own inputs, which it names.
 
 The published item states the rules instead of the counts. `processing:lineage`
 names both output rules, the one-cell buffer, and the 70 C threshold, and
-`sci:publications` cites the ASTER GED DOI. The inputs are identified by
-checksum rather than by path: an absolute path on the machine that masked a part
-tells a reader of the catalog nothing, and it would carry the operator's home
-directory into a public file. `summary.json` keeps the paths, because an operator
+`sci:publications` cites the ASTER GED DOI. A checksum identifies each input rather than
+a path. An absolute path on the machine that masked a part tells a reader of
+the catalog nothing. It would also carry the operator's home directory into a
+public file. `summary.json` keeps the paths, because an operator
 rerunning one slice does want them. Because a raster cannot contain its own
-digest, that field is empty whenever the sidecar holding it is absent, and an
-empty string still reads as a checksum a consumer could compare against, so the
-writer omits the digest instead of publishing a blank one.
+digest, that field is empty whenever the sidecar holding it is absent. An empty
+string still reads as a checksum a consumer could compare against. The writer
+omits the digest instead of publishing a blank one.
 
 The generated `AGENTS.md` used to say a nodata pixel meant no observation
 survived cloud, shadow, snow, cirrus, and range masking. Over the ocean that was
@@ -435,7 +440,7 @@ validator, reports an error on.
 The writer reopens every COG it produces and checks the block size, the
 overviews, the statistics, and the decoding rule against what it asked for. A
 scale the driver dropped is the one failure that leaves a file which reads as
-valid and decodes to nonsense, so it is checked rather than assumed.
+valid and decodes to nonsense. The writer checks it rather than assuming it.
 
 The STAC says the same thing through the extensions that already define it. The
 item declares raster v2.0.0 and render v2.0.0, and the band states the decoding
@@ -459,7 +464,7 @@ it.
 
 ## Architecture: shard, do not tune
 
-### The catalogue is read once for the whole fleet
+### One process reads the catalogue for the whole fleet
 
 Every tile VM used to open Earth Search and page the same catalogue. The answer
 never differed, and the cost was 38.1 s of instance time plus one dependency on
@@ -479,29 +484,29 @@ Collection 2 Level 2, `LANDSAT_OT_C2_L2.parquet.gz`, updated daily.
 
 Both inventories describe the same archive. Over 2021 to 2025 inside +/-60
 degrees, with `eo:cloud_cover < 100` and Landsat 8 and 9, the bulk file yields
-**1,460,446** scenes, of which **1,457,559** reach a land tile and go into the
+**1,460,446** scenes. Of those, **1,457,559** reach a land tile and go into the
 artifact. `tests/test_inventory_parity.py` enumerates the two sets over three
 bounded regions, one of them across the antimeridian, and every item Earth
 Search returns is present in the inventory.
 
-The reverse does not hold, and the reason is worth stating. The bulk file's
+The reverse does not hold. The bulk file's
 corner columns describe the **product bounding rectangle**. Earth Search
 publishes the **imaged parallelogram**, which the rectangle contains and
 exceeds by about 46% of its area. `derive_projection` wants the rectangle and
-reconstructs `proj:shape` from it exactly. Tile assignment gets a superset:
-measured over 670 non-crossing scenes in three regions, the rectangle produces
-**7.7% more tile-scene pairs** than the published footprints do, and the worst
+reconstructs `proj:shape` from it exactly. Tile assignment gets a superset.
+Measured over 670 non-crossing scenes in three regions, the rectangle produces
+**7.7% more tile-scene pairs** than the published footprints do. The worst
 single scene gained two tiles.
 
-Those extra scenes are read and contribute nodata over the tile, so they cost
+The graph reads those extra scenes and they contribute nodata over the tile, so they cost
 S3 requests and change no output pixel. No column in the bulk file gives the
 imaged footprint, so matching Earth Search exactly would mean modelling the
 scene rotation rather than reading it. A superset errs on the safe side:
-nothing is missed, because the containment runs one way.
+it misses nothing, because the containment runs one way.
 
 The bulk file has no STAC assets and no `proj:*` fields. Each one is an
-exact function of columns it does carry, and each rule is checked against Earth
-Search across both platforms, both hemispheres, eight or more UTM zones, the
+exact function of columns it does carry. The tests check each rule against
+Earth Search across both platforms, both hemispheres, eight or more UTM zones, the
 antimeridian, and all five years:
 
 | field | rule | agreement |
@@ -515,7 +520,7 @@ antimeridian, and all five years:
 | `eo:cloud_cover` | `Scene Cloud Cover L1` | exact |
 | `datetime` | centre of the acquisition | within 0.89 s |
 
-Two of those rules are worth stating plainly, because both are easy to get
+Two of those rules need a plain statement, because both are easy to get
 wrong in a way that produces a plausible answer.
 
 USGS writes **every** scene in a northern UTM zone. A southern scene uses a
@@ -524,13 +529,13 @@ negative northing rather than the 10,000,000 m false northing, so choosing
 wrong for 112 of 400 scenes.
 
 The transform is **exact, not close**. The corner columns hold five decimal
-places, about 1 m, so a reprojected corner lands about a metre from the true
+places, about 1 m. A reprojected corner lands about a metre from the true
 origin. Landsat Level 2 products sit on a 30 m lattice offset by half a pixel,
 so snapping to that lattice recovers the origin exactly. Across the 1,457,559
 scenes the artifact holds, the largest snap moved a corner **0.68 m**, against
 a 15 m half-pixel.
-`MAX_SNAP_METERS` stops the build at 7.5 m, so the reconstruction is checked on
-every row rather than argued for.
+`MAX_SNAP_METERS` stops the build at 7.5 m. The build checks the
+reconstruction on every row rather than arguing for it.
 
 The one tolerance is the acquisition time, and stating it correctly took
 measurement. The centre here is the midpoint of the bulk file's acquisition
@@ -538,27 +543,28 @@ start and stop. Earth Search publishes the scene centre from the product
 metadata. A definitional gap separates the two, and rounding in the source
 widens it; `measure_scene_centre.py` reports each apart from the other.
 
-Timestamp precision in the bulk file is mixed, which is what makes that
+Timestamp precision in the bulk file varies, which is what makes that
 possible. Landsat 8 2021 carries microseconds on both timestamps, Landsat 8
 2022 is 53% whole-second, and everything later is whole-second. On the
-untruncated rows the midpoint is exact, so the residual against Earth Search is
-the definitional difference by itself: a systematic **4.24 ms** over 401
-scenes, with the median equal to the worst case to four decimal places. On the
+untruncated rows the midpoint is exact. The residual against Earth Search is
+then the definitional difference by itself. That is a systematic **4.24 ms**
+over 401 scenes, with the median equal to the worst case to four decimal
+places. On the
 truncated rows, truncating both timestamps moves their midpoint by strictly
 under a second, and the worst of 199 was **0.89 s**.
 
 So the bound is a second and change, derived rather than assumed. An earlier
 version of this document asserted 1.117 s and attributed all of it to
-truncation, which no truncation argument allows, and it described the whole
+truncation, which no truncation argument allows. It also described the whole
 file as whole-second when a sixth of the window is not.
 
-The runtime reads only the month, so the tolerance matters only at a month
+The runtime reads only the month. The tolerance matters only at a month
 boundary. `MONTH_BOUNDARY_GUARD_SECONDS` is 30 s, 34 times the worst case
 measured. Over the window, 4 scenes fall within 2 s of a month boundary, 7
-within 5 s, and 52 within 30 s. `usgs_inventory` fetches every scene inside the
+within 5 s, and 52 within 30 seconds. `usgs_inventory` fetches every scene inside the
 band from Earth Search and writes its exact time. Those are the only catalogue
-requests the whole build makes, and widening the band from 2 s to 30 s bought
-the margin for 48 more of them on one laptop.
+requests the whole build makes. Widening the band from 2 s to 30 s bought the
+margin for 48 more of them on one laptop.
 
 ### What a single-tile read costs
 
@@ -574,8 +580,9 @@ compares that name against the statistics and reads one group.
 | `N05E010` | 4,187 | 1 of 895 | 2.46 MB of 1,781 MB (0.138%) | 114 ms |
 
 Against the 38.1 s Earth Search baseline that is about 310x, but the wall clock
-is not the point. `tests/test_no_stac_at_runtime.py` blocks every socket in the
-process and runs the read to completion, which is the property worth having.
+is not what this test asserts. `tests/test_no_stac_at_runtime.py` blocks every
+socket in the process and runs the read to completion. That property is what
+matters.
 
 There is no fallback. A missing, unreadable, or mismatched artifact raises
 before the cluster starts, and the driver refuses to launch. A silent fallback
@@ -719,7 +726,7 @@ memory-optimised instance rented RAM the job never touched.
 
 ### Submission carried the scene list, once per shard
 
-Compute is saturated. Staging and submission, on either side of it, were not.
+Compute runs at capacity. Staging and submission, on either side of it, did not.
 The issue proposed fixing both. Submission held. Staging did not.
 
 **The submission cost is the payload, not the pickling.** The issue attributed
@@ -760,7 +767,7 @@ the stage directory instead and every worker parses it once, 7.89 MB and about
 
 The second half of the issue proposed overlapping the fetch with the shards it
 feeds, on the premise that staging is network-bound and compute is
-processor-bound. It was built, run, and **falsified**.
+processor-bound. This repository built it, ran it, and **falsified** it.
 
 MEASURED on an `m6id.16xlarge`, us-west-2, the identical workload in both rows:
 
@@ -772,8 +779,8 @@ MEASURED on an `m6id.16xlarge`, us-west-2, the identical workload in both rows:
 **3.9x.** Not a scale artifact and not the 922 MB/s figure failing: same
 objects, same bytes, same instance type. Staging spends its time on TLS, HTTP
 and the copy loop, and all three want a core. At 25 Gbps the instance was using
-30% of its network at 922 MB/s, so the fetch was never network-bound in the
-first place, and the premise the overlap rested on was wrong.
+30% of its network at 922 MB/s. The fetch was never network-bound. The premise
+the overlap rested on was wrong.
 
 The arithmetic on a 250-shard slice, with 256 fetch threads and
 `--read-threads 1`, which is the overlap at its best:
@@ -785,13 +792,14 @@ serial       357 s   (stage  91.9 s + compute 264.7 s)
 
 The overlap pays 267 s of extra staging to save 220 s of wall clock. It loses
 by about 90 s, and it loses by more as a tile gets deeper, because the fetch
-slows in proportion to how busy the workers are. The implementation is removed
-rather than kept behind a flag: a second ordering that is slower in every
-measured case is a maintenance cost with no case to answer for it.
+slows in proportion to how busy the workers are. This repository removed the
+implementation rather than keeping it behind a flag. A second ordering that is
+slower in every measured case is a maintenance cost with no case to answer for
+it.
 
 `worker.paused` does not appear at all in that run, against 4,463 s in the
-64-core quarter tile, once workers are sized to one thread each and given a real
-memory limit. `worker.exec.deserialize` falls to 30.7 ms across 128 tasks from
+64-core quarter tile, once the launcher sizes workers to one thread each and
+gives them a real memory limit. `worker.exec.deserialize` falls to 30.7 ms across 128 tasks from
 48.5 s, which is the item table: workers no longer unpack 400 item dicts per
 task.
 
@@ -799,14 +807,13 @@ task.
 
 The 64-shard wave that opens a run reports about **59 s per shard**. The next
 39 shards report **6.6 s**, and a staged shard settles near **11 s**. The
-difference is page-cache warmup on first touch. The effect was recorded once in
-a pull request body and then walked into twice from this document, so it is
-named here.
+difference is page-cache warmup on first touch. A pull request body recorded the effect
+once, and this document then walked into it twice, so it gets a name here.
 
 The progress line was part of the trap. It printed a running mean, which hides
 the decay: it reads as a slow cluster for most of a run and as a rate for none
 of it. It now prints the rate over the last 25 shards beside the mean, so the
-number that misleads has been replaced rather than annotated.
+number that misleads is gone rather than annotated.
 
 ### The tails are the thinly observed pixels
 
@@ -817,7 +824,7 @@ number that misleads has been replaced rather than annotated.
 
 p1 is 29.7 C, p50 is 46.4 C, and p99 is 53.3 C. The extremes fall on pixels with
 about six observations against 173 elsewhere, where the p95 conveys nothing.
-`qa_count` lets a consumer drop them, so the writer emits it without a nodata
+`qa_count` lets a consumer drop them. The writer emits it without a nodata
 value.
 
 ## Tuning results that still hold
@@ -879,7 +886,7 @@ US West (Oregon), Linux, on demand.
 
 Slot counts come from the measured 1.35 GiB per slot plus 6.8 GiB of driver and
 about 4 GiB of operating system. Disk is the other constraint: the largest tile
-is 5,663 scenes and `disk_guard` reserves **637 GiB**, so every candidate needs
+is 5,663 scenes and `disk_guard` reserves **637 GiB**. Every candidate needs
 950 GB or more of instance store.
 
 | machine | cores | slots | RAM needed | RAM | $/hr | fleet | hours | per tile |
@@ -892,8 +899,9 @@ is 5,663 scenes and `disk_guard` reserves **637 GiB**, so every candidate needs
 | `c6id.4xlarge` | 8 | 14 | 30 GiB | 32 | 0.8064 | $2,095 | 2,578 | $2.34 |
 
 The `m` family is the wrong shape. It sells 4 GiB per vCPU and this workload
-uses 1.35 GiB per slot, so half the memory on an `m6id.16xlarge` is paid for
-and idle. Moving to `c6id` at the same core count saves 15% for identical work.
+uses 1.35 GiB per slot, so half the memory on an `m6id.16xlarge` costs money
+and never holds a block. Moving to `c6id` at the same core count saves 15% for
+identical work.
 
 Going smaller stops paying. `c6id.4xlarge` costs 64% **more** than
 `c6id.12xlarge`, because 26 minutes of every tile is staging and fixed setup
@@ -957,7 +965,7 @@ from each shard's item list.
 
 All 4,176 responses were `206 Partial Content`, every one came back with
 `x-amz-request-charged: requester`, and nothing retried or failed. A retry would
-inflate the count, so the script counts 4xx, 5xx, and retries, and marks any run
+inflate the count. The script counts 4xx, 5xx, and retries, and marks any run
 that has them. At the 512 px shard the full tile ran on, 605,617 reads x 2 bands
 x 4.77 gives **5,777,586 GETs** and **$2.31**.
 
@@ -992,9 +1000,9 @@ MEASURED on one `m6id.16xlarge` in us-west-2, 64 shards of `S30W065` at a
 One GET per object, on the wire, at fleet width.
 
 Staging also moves compute. MEASURED in PR #7, commit `c771f27`, over four
-shards run twice in one process: **11 s staged against 21 s unstaged**, so
-reading local files runs about twice as fast as `/vsis3` for the same pixels.
-That is four shards, not a tile, and no staged tile has been timed end to end.
+shards run twice in one process: **11 s staged against 21 s unstaged**. Reading
+local files runs about twice as fast as `/vsis3` for the same pixels. That is
+four shards, not a tile, and nobody has timed a staged tile end to end.
 
 DERIVED from `shard_bytes`, and printed by the same run: a worst shard of
 **0.88 GiB**, or 56.6 GiB across 64 slots. That is the model's own output. An
@@ -1017,8 +1025,8 @@ What the superseded model would have predicted for the same configuration is
 
 The staging rate is the figure this run existed to produce, and it came in
 below the 1.0 to 3.0 GB/s the cost section had assumed. Reading whole objects
-over a 1 ms round trip is bounded by something other than the 200 ms round trip
-that bounds the laptop, and 922 MB/s is what that something costs.
+over a 1 ms round trip hits a different limit from the 200 ms round trip that
+bounds the laptop. That limit costs 922 MB/s.
 
 ### Staging: fetch each object once
 
@@ -1095,7 +1103,7 @@ correct composite and a larger bill.
 - **`get_object`, not `download_file`.** The transfer manager splits anything
   over 8 MB into several ranged GETs, which would give back three quarters of
   the saving and change nothing else a test would notice.
-- **No LIST and no HEAD.** Both are billed. Every key comes from the item href,
+- **No LIST and no HEAD.** AWS bills both. Every key comes from the item href,
   and the disk guard runs off a per-band size estimate rather than a HEAD.
 - **The manifest deduplicates before fetching.** One scene appearing in 155
   shards has to produce two objects, not 310.
@@ -1131,7 +1139,7 @@ decides which boxes hold the deepest slice a tile presents:
 
 DERIVED, and printed by the dry run: the 15-byte model summed over the 64 shard
 depths of a deep slice of S30W065, plus 4.83 GiB of client output arrays. The
-depths are measured, from the inventory. The slices are `shards[987:1051]` at
+depths are counts from the inventory. The slices are `shards[987:1051]` at
 360 px, 203 to 820 scenes deep, and `shards[690:754]` at 512 px, 198 to 802. The
 failed run was a `c6id.16xlarge` at 512 px.
 
@@ -1196,7 +1204,7 @@ Erring high is the safe direction: over-reserving costs worker slots an
 operator can add back, and under-reserving cost a fleet instance its workers.
 
 **What made 13 look safe for a week.** Two things, and both are properties of
-how it was measured rather than of the pipeline. The synthetic fixture writes
+the measurement rather than of the pipeline. The synthetic fixture writes
 one untiled raster at the shard's own edge and reads it whole, so it never
 allocates the intermediate, and it fits 12.68 to 12.97. And a staged sweep that
 stops shallow agrees with 13 as well, because the 0.25 GiB fixed term still
@@ -1205,7 +1213,7 @@ scenes. Every fleet shard runs 195 to 820.
 
 Both edges' slopes are least-squares fits, and the earlier figures of 12.73 and
 12.89 were not. They came from averaging consecutive differences, which agreed
-to 1.3% while the differences being averaged ran 10.9 to 16.4 bytes.
+to 1.3% while the underlying differences ran 10.9 to 16.4 bytes.
 
 #### The synthetic fixture is not the read the fleet does
 
@@ -1222,15 +1230,14 @@ MEASURED against 100 real staged scenes of `S30W065`, at four shard edges:
 | staged COGs | 14.48 | 13.59 | 13.25 | 10.47 |
 
 The model at 15 bytes plus 0.25 GiB bounds all 36 points of the eight committed
-sweeps, staged and synthetic, and under-predicts none of them. It is the slope
-that is not tightly determined: these shallow staged fits sit 0.9 to 1.2 bytes
-below the deep staged sweeps at the same two edges, and the 1024 px figure sits
-below every other. Real scenes make shard edge and how much data falls in the
-shard move together, which is the same confound the timing mode documents in
-the other direction.
+sweeps, staged and synthetic, and under-predicts none of them. The slope is
+what stays loose. These shallow staged fits sit 0.9 to 1.2 bytes below the deep
+staged sweeps at the same two edges. The 1024 px figure sits below every other.
+Real scenes make shard edge and how much data falls in the shard move together,
+which is the same confound the timing mode documents in the other direction.
 
 So the fixture understates the slope by 10% at 360 px and 12% at 512, measured
-against the deep sweeps, and the margin absorbs it. Read these four as the
+against the deep sweeps, and the margin covers it. Read these four as the
 shallow end they are. They stop at 100 scenes. Every fleet shard runs 195 to
 820, a range only the deep sweep above reaches.
 
@@ -1241,7 +1248,7 @@ another at 18, and they disagreed by 18% at 700 scenes,
 which is how an 18 reached this document for an hour.
 
 What it cost before the fix: a `c6id.16xlarge` reported a 25 GiB budget across
-64 slots for a real demand of 97, and lost ten worker processes to coredumps
+64 slots for a real demand of 97. It lost ten worker processes to coredumps
 three minutes into the run. Nothing said `MemoryError`.
 
 #### The model now refuses a run it cannot fit
@@ -1253,15 +1260,16 @@ a larger number and launched anyway.
 `worker_memory_guard` refuses it, and it runs before the first GET the way
 `staging.disk_guard` does, so a configuration that cannot fit does not buy its
 objects first. The demand is the sum of the slice's shard depths, deepest first
-up to the slot count, plus the client's arrays, which are `uint16` of p95,
-twelve `uint8` monthly counts, and the two boolean masks: 16 bytes an output
-pixel, or 4.83 GiB for an 18,000 px tile. The refusal states the demand, the
-machine's total, and the shard edge that would fit. `--force` spends the margin.
+up to the slot count, plus the client's arrays. Those arrays are `uint16` of
+p95, twelve `uint8` monthly counts, and the two boolean masks. That comes to 16
+bytes an output pixel, or 4.83 GiB for an 18,000 px tile. The refusal states
+the demand, the machine's total, and the shard edge that would fit. `--force`
+spends the margin.
 
 It summed nothing at first. It multiplied the worst shard by the slot count,
-which on the deep slice of S30W065 at 360 px over-reserves by **3.1x**. The two
-budget rows are recomputed here against the 15-byte model now in the code, and
-the third is the measurement they are checked against:
+which on the deep slice of S30W065 at 360 px over-reserves by **3.1x**. This section
+recomputes the two budget rows against the 15-byte model now in the code, and
+the third is the measurement that checks them:
 
 | | GiB |
 |---|---|
@@ -1308,17 +1316,17 @@ frisky's `worker.exec.call` spans give the real distribution:
 | per-shard seconds | min 39.5 | p50 59.9 | max 86.9 |
 |---|---|---|---|
 
-Worth stating because a 2.2x spread across shards of 203 to 820 scenes is the
-imbalance a fleet driver would want to see, and because the misreading briefly
-justified a change to the sampling interval that the measurement then refuted:
-a shard runs long enough that 0.5 s samples it about 120 times, and 0.05 s
-found the same peak from a file 6.6x larger. The default stays at 0.5 s and the
-progress line now says which figure it prints.
+A 2.2x spread across shards of 203 to 820 scenes is the imbalance a fleet
+driver needs to see. The misreading also justified a change to the sampling
+interval that the measurement then refuted. A shard runs long enough that 0.5 s
+samples it about 120 times, and 0.05 s found the same peak from a file 6.6x
+larger. The default stays at 0.5 s and the progress line now says which figure
+it prints.
 
 That guard reads the host it runs on, which is the right machine only once the
 run is already there. Planning happens somewhere else, so `--dry-run` takes
-`--target-memory-gib` and checks the budget against the machine the run is
-headed for. It exits 2 when the configuration would be refused, which prices a
+`--target-memory-gib` and checks the budget against the machine the run
+targets. It exits 2 on a configuration the launcher would refuse, which prices a
 fleet before an instance exists:
 
 ```bash
@@ -1341,7 +1349,7 @@ naive line counts 256 slots. The guard counts the 64 shards the slice holds.
 That is the configuration that killed the `c6id.16xlarge`, refused from a
 laptop before an instance starts.
 
-#### A slice is not the tile, and the light one was measured
+#### A slice is not the tile, and this measurement took the light one
 
 The dry run reports the slice's worst shard as well as the tile's. One machine
 runs one slice, so that slice's worst shard sets the memory it needs. On S30W065 at
@@ -1361,12 +1369,12 @@ needs 140.0 GiB, which fits that box and not a 128 GiB one.
 
 The number was already in this document. The quarter-tile run printed
 `memory 95.93 GiB / 102.40 GiB (94%)` across 64 workers, which is 1.50 GiB
-each, against a budget function reporting 0.39. It was written up as a tuning
-result.
+each, against a budget function reporting 0.39. A pull request wrote it up as a
+tuning result.
 
 ### Shard size is a memory decision once staging is on
 
-It used to be a request-cost lever worth 2.8x. Staging removed that: one GET
+It used to be a request-cost lever of 2.8x. Staging removed that: one GET
 per object whatever the shard edge. What remains is memory, which falls with
 the square of the edge, against compute, which does not.
 
@@ -1374,7 +1382,7 @@ A smaller shard would pull the lever the wrong way if a run could skip
 staging. MEASURED from the inventory by `--dry-run --search-in-dry-run` on
 `S30W065`: the 2,500-shard plan at 360 px makes **1,264,988** shard-scene reads
 against **690,659** for the 1,296-shard plan at 512 px. That is 265 opens per
-object against 145, and every open would be billed and pay a fresh round trip.
+object against 145, and AWS would bill every open at a fresh round trip.
 Pairing the memory-optimised edge with the unstaged request bill was the worst
 of the four pairings, and removing the flag removed the pairing.
 
@@ -1387,7 +1395,7 @@ MEASURED by `measure_shard_memory.py --mode timing` over ten staged scenes:
 | 448 px | 2.056 | +1% | 2.55 GiB |
 | 512 px | 2.030 | — | 3.25 GiB |
 
-The seconds are measured. The memory column is the 15-byte model at the deepest
+The seconds are measurements. The memory column is the 15-byte model at the deepest
 shard the inventory gives S30W065, which is 820 scenes.
 
 Read the +12% as a staged figure. A local open costs a file handle and a header
@@ -1396,12 +1404,12 @@ open costs a round trip and about four ranged GETs, and the 360 px plan issues
 1.83x as many of them.
 
 Read the penalty as an upper bound. These ran at ten scenes per shard, where
-the fixed per-shard cost is amortised over the least work; a fleet shard
-carries 195 to 820. The measurement needs real scenes, because a synthetic
-raster generated at the shard's own edge makes shard size and source layout
-move together and reports a 4.7x cliff at 512 px that does not exist.
+the fixed per-shard cost spreads over the least work. A fleet shard carries 195
+to 820. The measurement needs real scenes. A synthetic raster generated at the
+shard's own edge makes shard size and source layout move together. It then
+reports a 4.7x cliff at 512 px that does not exist.
 
-360 divides 3600 exactly, so its shards align to whole degrees with no partial
+360 divides 3600 exactly. Its shards align to whole degrees with no partial
 edge, 50 x 50 to a tile.
 
 ### Scenes with no thermal band
@@ -1526,20 +1534,19 @@ The output mask is what handles the second kind, and it reads ASTER GED's own
 observation count rather than inferring the gap from the composite. See "The
 output mask" below.
 
-`qa_count` cannot do that job alone, and the reason is worth stating.
-`masked_celsius` returns `not_fill & qa_clear`, so a zero there merges the
-ASTER gap with cloud. A pixel that was cloudy on every pass and a pixel that
-never had emissivity look identical, and they call for opposite advice: widen
-the window, or stop. The mask tells them apart by reading a static dataset
+`qa_count` cannot do that job alone.
+`masked_celsius` returns `not_fill & qa_clear`. A zero there merges the
+ASTER gap with cloud. Cloud on every pass and missing emissivity look
+identical there, and they call for opposite advice: widen the window, or stop. The mask tells them apart by reading a static dataset
 rather than by reading the composite.
 
-What that is worth depends on which path runs. Unstaged, each dropped row saves
+What that saves depends on which path runs. Unstaged, each dropped row saves
 739 requests, and the global line falls by **$105**. Staged, it saves one GET
 per row and the global line falls by 7 cents. The reason to keep the filter is
-the memory: each such scene adds one layer to the time axis of every shard it
-touches, and that axis is what pins the run at 94% of the worker memory limit.
+the memory. Each such scene adds one layer to the time axis of every shard it
+touches. That axis pins the run at 94% of the worker memory limit.
 
-The filter is defined in `staging.py`, not in `usgs_inventory.py`.
+`staging.py` defines the filter, not `usgs_inventory.py`.
 `test_inventory_parity.py` asserts the artifact matches Earth Search item for
 item, and Earth Search returns these products. Filtering at build time would
 break that parity and discard the evidence for it.
@@ -1593,7 +1600,7 @@ tile-scene pairs, and not on 895 copies of `S30W065`. That tile holds
 the S3 line by 13%. `Corrections` withdraws the $2,067 that did.
 
 A mean tile holds 3,445 scenes. MEASURED on an `m6id.16xlarge` in us-west-2,
-staging moves **922 MB/s**, so a mean tile writes about 278 GB in **302 s**.
+staging moves **922 MB/s**. A mean tile writes about 278 GB in **302 s**.
 That is below the 1.0 to 3.0 GB/s this document assumed before the run, and it
 adds about $100 across the fleet. The staged column prices `m6id.16xlarge` at
 $3.7968/hr and a 360 px shard, which is the configuration that fits the memory
@@ -1601,7 +1608,7 @@ a worst-case shard needs.
 
 Only **769** of the 895 land tiles hold a scene with a thermal band. The other
 126 would boot, stage, compute, and write an all-nodata composite, so both
-columns run 769 and the unstaged column is restated on the same basis.
+columns run 769, and this table restates the unstaged column on the same basis.
 
 | 769 land tiles | reading from S3 | **staged** |
 |---|---|---|
@@ -1614,10 +1621,10 @@ columns run 769 and the unstaged column is restated on the same basis.
 | **total, spot** | **$1,952 - $1,989** | **$377 - $420** |
 
 Read the EC2 rows as DERIVED. Measurement supplies the per-tile compute and the
-tile count. The tail is a bracket, and the staged column adds the 302 s a mean
-tile takes to fetch at the measured 922 MB/s, and prices the disk it writes to.
-The S3 rows are arithmetic over `tile_scene_rows`: 154.9 opens x 2 bands x 4.77 GETs unstaged,
-against 2 GETs staged.
+tile count. The tail is a bracket. The staged column adds the 302 s a mean tile
+takes to fetch at the measured 922 MB/s, and prices the disk it writes to. The
+S3 rows are arithmetic over `tile_scene_rows`: 154.9 opens x 2 bands x 4.77
+GETs unstaged, against 2 GETs staged.
 
 Per tile, the staged column is **$1.68 to $1.87** and **26 to 29 minutes** on
 one `m6id.16xlarge`. Divide either total by 769; the minutes follow from the
@@ -1628,9 +1635,9 @@ Staging cuts the total by **1.7x to 1.9x on demand and 4.6x to 5.3x on spot**.
 EC2 rises, on a larger instance, at a smaller shard, and for longer, and still
 rises by far less than the requests it removes.
 
-One term in the staged column stays a bracket. Per-tile compute is scaled from
-the 512 px full-tile run by the measured 12% penalty, because one 64-shard wave
-cannot be extrapolated: 25 shards took 59.3 s and the next 39 took 6.6,
+One term in the staged column stays a bracket. This table scales per-tile
+compute from the 512 px full-tile run by the measured 12% penalty. One 64-shard
+wave does not extrapolate: 25 shards took 59.3 s and the next 39 took 6.6,
 which is page-cache warmup on the staged files rather than a rate.
 
 Removing the per-tile search saves 38.1 s x 895 tiles, or 9.5 instance-hours.
@@ -1642,7 +1649,7 @@ S3 charges do not amortise, because they scale with reads rather than with
 instance time. Unstaged they cost more than twice the on-demand compute and more
 than six times the spot compute. Shard size moves them by a factor of 2.8, and
 staging moves them by a factor of 738, so shard size is no longer the lever
-worth spending memory on.
+to spend memory on.
 
 The department-scale phase, across five EC2 sessions, eight completed
 department runs, one 200-scene quarter-tile smoke run, and two quarter-tile
@@ -1661,19 +1668,19 @@ machine the fleet runs: a 512 px edge refuses four tiles.
 | N50E095 | 257.2 | 246.6 |
 | N50E115 | 256.1 | 245.1 |
 
-500 also divides an 18,000 px tile exactly, so a tile cuts into the same 1,296
-shards with no ragged edge where 512 leaves 71. The work barely moves: N50E100
-reads 3% more at 500 px and S30W065 reads 2% fewer, because a smaller shard
-sees fewer scenes and there are the same number of shards. 508 fits too and
-leaves 1.0 GiB on the worst tile, which is luck rather than margin.
+500 also divides an 18,000 px tile exactly. A tile cuts into the same 1,296
+shards with no ragged edge where 512 leaves 71. The work barely moves. N50E100
+reads 3% more at 500 px and S30W065 reads 2% fewer. A smaller shard sees fewer
+scenes, and the shard count stays the same. 508 fits too and leaves 1.0 GiB on
+the worst tile, which is luck rather than margin.
 
 One edge for the fleet rather than one per tile. Per-tile edges would save
-about 4% of the compute on the tiles that do not need the smaller one, against
-a per-shard depth pass over 895 tiles in `fleet_plan.py` and a field a launcher
-has to honour. A dropped field is worse than a default chosen for the worst
-tile.
+about 4% of the compute on the tiles that do not need the smaller one. The cost
+is a per-shard depth pass over 895 tiles in `fleet_plan.py`, plus a field a
+launcher has to honour. A dropped field is worse than a default chosen for the
+worst tile.
 
-The guard runs before staging, so a refused tile costs boot, install and search
+The guard runs before staging. A refused tile costs boot, install, and search,
 and buys no object. That is about 370 s, or $0.39. The cost of the old default
 was four machines exiting non-zero in a fleet of 769, which someone has to
 notice.
@@ -1699,7 +1706,7 @@ because `_fetch_one` unlinks on every failure path including a short read, so
 a file that is there is complete. A HEAD would confirm it and is billable,
 which is most of what skipping saves.
 
-`staging.json` gains `reused`, and `retries` is measured against the objects
+`staging.json` gains `reused`, and `retries` counts against the objects
 actually fetched rather than the whole manifest. Without that a warm rerun
 reports negative retries. `estimated_bytes` takes the stage directory and
 leaves out what is present, because the guard reserves the manifest before the
@@ -1723,12 +1730,12 @@ GETs are two per scene whatever the shard grid does. Unstaged, roughly 155
 shards open each scene and every open is 4.77 requests, which is about 739 per
 object. The S3 line then exceeds the EC2 line for the whole fleet.
 
-The speed row is MEASURED in PR #7, commit `c771f27`, over four shards run
+PR #7, commit `c771f27`, MEASURED the speed row over four shards run
 twice in one process. Reading local files runs about twice as fast as
 `/vsis3` for the same pixels, so the flag cost roughly half the wall clock as
 well as $1,679.
 
-A flag that cannot be set correctly is not an option, it is a way to lose a
+A flag nobody can set correctly is not an option. It is a way to lose a
 fleet run. `shard_lst_p95.py`, `tile_prep.py` and `measure_seam.py` no longer
 accept it, `staging.disk_guard` names a larger volume or a smaller slice
 instead of offering S3, and `tests/test_staging.py` asserts the parsers reject
@@ -1796,7 +1803,7 @@ confirms `c6i.16xlarge` at **$2.72/hr**, matching the pinned value.
 `cost_report.py` fetches it at run time and prints
 `VERIFIED from AWS public price list`. When the fetch fails it falls back to the
 pinned table, and says so. The equivalent S3, EBS, and IPv4 endpoints use
-different URL shapes that nobody has located, so those three rates remain
+different URL shapes that nobody has located. Those three rates remain
 published but unverified. Together they came to under 1% of this run.
 
 Reconciling against a real bill needs one read-only permission. With
@@ -1821,7 +1828,8 @@ That is the rule working as written. `masks.apply_output_mask` removes a pixel
 only where two things hold together: it reads 70 C or hotter, and its ASTER
 GED cell reports zero observations or sits one cell from such a cell. `N30E075`
 has no gap cells, so the second half never fires and the first half never acts
-alone. This document already said so: "a pixel above it outside a gap is kept."
+alone. This document already said as much. A pixel above the threshold and
+outside a gap keeps its value.
 `S30W065` could not show what that costs, because its own maximum was 77.3 C.
 
 The pairing exists for a good reason, measured on `S30W065`: the gap geometry
@@ -1886,9 +1894,9 @@ pooled percentile because there is only one estimate to blend.
 
 A quad's swath is the ground where at least half its scenes produced a valid
 observation. Under persistent cloud, half the scenes rarely see the same
-ground, so the swaths collapse and most of the tile falls outside all of them.
+ground. The swaths collapse and most of the tile falls outside all of them.
 On `N00E110` the cross-fade is inoperative over two thirds of the raster, and
-the tile is composited almost entirely pooled.
+the graph composites the tile almost entirely pooled.
 
 Those pixels keep the meaning the design gives them, and `n_pooled_fallback`
 reports the count, so the run is behaving as specified. The number shows that
@@ -1939,11 +1947,11 @@ edge. DN 5 decodes to -124.13 C. Nothing about it equals the fill value.
 Rejecting a decoded Celsius value outside `[-50, 80]` is what removes it.
 
 **The filter has to run before the percentile.** A range check on the finished
-P95 comes too late. The invalid samples were in the sample the percentile was
-drawn from, so they have already moved the answer, whatever the encoder does
+P95 comes too late. The invalid samples were in the sample the percentile drew
+from. They have already moved the answer, whatever the encoder does
 next.
 
-Invalid values are masked, never clipped. Clipping -124 C into range writes
+The mask removes invalid values and never clips them. Clipping -124 C into range writes
 -49.99 C, which reads as a real, cold, believable pixel. A gap does not.
 `LST_MIN_TRUSTED_DN` is 2 for the same reason: DN 0 means fill and DN 1 is
 reachable only from the encoding floor, so DN 1 marks a failed retrieval.
@@ -1955,9 +1963,9 @@ are the same objects in both.
 ### One shard, before and after the QA change
 
 MEASURED, 2026-09-09. `compare_qa_masks.py` ran shard r0 c0 of the quarter tile
-twice in one process, over one loaded stack. Everything except the mask was
-held fixed, the year window included, so nothing here is contaminated by the
-2021-2025 change.
+twice in one process, over one loaded stack. The run held everything except the
+mask fixed, the year window included. Both halves used the same year window, so
+the 2021-2025 change cannot explain the difference.
 
 | input | value |
 |---|---|
@@ -2004,7 +2012,7 @@ shard sits inside a WRS footprint, so it shows field-shaped differences and no
 scene boundary. A shard chosen on a footprint edge would show the boundary
 case. The image is diagnostic. The table is the measurement.
 
-The year change was measured on its own. A dry run of the same quarter tile
+A separate run measured the year change. A dry run of the same quarter tile
 over 2021-01-01 to 2025-12-31T23:59:59Z returns **1,984 scenes** against the
 1,765 the 2020-2024 window returned. Scenes per shard become min 199, P50 536,
 P95 797, max 798, which puts the worst 512 px shard at 0.78 GiB and 24.9 GiB
@@ -2015,7 +2023,7 @@ though only the mask had changed.
 
 A pixel over the sea, and a pixel where ASTER GED records no emissivity, are
 pixels this product has nothing to say about. Both stay that way at any window
-length, because the sea is the sea and the emissivity dataset is fixed.
+length, because the sea is the sea and the emissivity dataset never changes.
 `masks.py` applies the two rules and `shard_lst_p95.main` runs it once, over
 the assembled tile.
 
@@ -2056,16 +2064,15 @@ and records nothing about it:
 | bad pixels it removes | 4,588 |
 
 153 ordinary pixels lost for each bad one. The failures are a thin scatter
-inside a minority of cells, and the mask was applied at the resolution of the
-cell.
+inside a minority of cells, and the mask ran at the resolution of the cell.
 
 I looked for a static predictor of the 81 bad cells and found none. 602 of the
-605 gap cells are partly holed, so hole geometry selects everything, and the
-cells with no hot pixel average more missing pixels (140) than the cells with
-one (108). Temperature is the only thing that separates them.
+605 gap cells are partly holed. Hole geometry selects everything. The cells
+with no hot pixel average more missing pixels (140) than the cells with one
+(108). Temperature is the only thing that separates them.
 
 DERIVED, for the 89.53%: USGS resamples ASTER GED from 1 km to the 30 m product
-grid, so a 30 m pixel inside a zero cell can still take emissivity from its
+grid. A 30 m pixel inside a zero cell can still take emissivity from its
 neighbours. A zero cell becomes a hole only where the zero region is wider than
 that neighbourhood. This document has not checked either step against the
 algorithm.
@@ -2131,7 +2138,7 @@ which read the published COG pairs and regenerate nothing.
 
 The pair does not reach the damage. On N30E075, 207 published pixels sit at or
 above 80 C and every one of them falls outside the GED gap region and its
-one-cell buffer, so the rule that was supposed to catch failed retrievals
+one-cell buffer, so the rule meant to catch failed retrievals
 caught none of these. The region is now reported and masks nothing, and two
 rules that read the composite replaced it. `lst_qa.supported_output` holds
 both, and `composite.reduce_block` applies them where the percentile and the
@@ -2150,9 +2157,9 @@ scenes is an order statistic over four scenes.
 
 A higher floor costs more and buys nothing. MEASURED on N00E110, whose median
 is 56 observations: a floor of 10 removes 0.81%, of 25 removes 2.57%, and of 50
-removes 39.03%. S30W065, N40W080 and N30E075 have medians of 140 to 160, so
-their sparse pixels are a thin tail and the floor removes well under a
-hundredth of a percent of each.
+removes 39.03%. S30W065, N40W080, and N30E075 have medians of 140 to 160. Their
+sparse pixels are a thin tail, and the floor removes well under a hundredth of
+a percent of each.
 
 `LST_OUTPUT_MIN_C = -20.0` and `LST_OUTPUT_MAX_C = 80.0` are the plausibility
 rule, inclusive at both ends. The ceiling repeats `LST_VALID_MAX_C`, which the
@@ -2162,12 +2169,12 @@ survive: `destripe.subtract_offsets` shifts a decoded value after
 205 pixels and takes the tile maximum from 82.99 C to 80.00 C. A pixel reading
 exactly 80.00 C stays, which is what inclusive means, and N30E075 holds two.
 
-The cold bound removes nothing on any of the five tiles once the floor has run,
-and it is kept as a second line for a sparse pixel the floor lets through.
+The cold bound removes nothing on any of the five tiles once the floor has run.
+It stays as a second line for a sparse pixel the floor lets through.
 
 `qa_count` is untouched by either rule. It is the only evidence a consumer has
-for which rule removed a pixel: a count of 1 to 4 beside nodata is the floor, a
-count above it is a bound, and a count of 0 is the water rule, which zeroes
+for which rule removed a pixel. A count of 1 to 4 beside nodata is the floor,
+and a count above it is a bound. A count of 0 is the water rule, which zeroes
 both bands together.
 
 Read the table under two limits. `replay.py` applies the rules to the rounded
@@ -2187,7 +2194,7 @@ None of the explanations the pipeline could offer for them holds. They are well
 observed, at a median of 190 observations on N30E075 and 116 on S30W065. Their
 feather weight sum is 1.000, so they are not the pooled-fallback pixels at a
 swath edge. Their distribution over swath coverage matches the tile's own on
-every tile, so no WRS path is enriched.
+every tile, so no WRS path dominates.
 
 Two populations, separated by the radial profile of the ground around them.
 Broad hot ground decays with distance, in median C by ring:
@@ -2203,12 +2210,12 @@ median of 51.6 C against a 28 km median of 51.2 C, and a core p95 of 70.1 C. At
 31.35 S 63.00 W the core median is 45.9 C against 45.0 C, with a core p95 of
 69.6 C, and the radial medians read 45.8, 45.1, 44.8, 44.9, 44.8, 44.9.
 
-A P95 over N observations is near the 0.05N-th hottest value, so a P95 of 70 C
-behind 190 observations needs about ten separate observations at or above 70 C
-over five years. A one-off artifact cannot reach that, whatever its
+A P95 over N observations is near the 0.05N-th hottest value. A P95 of 70 C
+behind 190 observations then needs about ten separate observations at or above
+70 C over five years. A one-off artifact cannot reach that, whatever its
 source. The pixel has to be hot repeatedly, and persistent sub-pixel thermal
-sources are what fits: 28.87 N 76.04 E is the Haryana brick-kiln belt and
-3.66 S 114.62 E is the South Kalimantan coal field.
+sources are what fits: 28.87 N 76.04 E is the Haryana brick-kiln belt and 3.66
+S 114.62 E is the South Kalimantan coal field.
 
 So the ceiling stays at 80 C. A 60 C ceiling would cost under 0.02% of every
 tile and would also delete rural Rajasthan, 56 C over 28 km of it.
@@ -2233,11 +2240,11 @@ Not per shard. Rasterising the geometry inside `process_shard` would repeat the
 same work in each of 1,296 shards, inside the processes with the least memory
 to spare.
 
-Both masks are resident for the whole run, so the client budget accounts for
+Both masks are resident for the whole run. The client budget accounts for
 them. `CLIENT_BYTES_PER_OUTPUT_PIXEL` moves from 14 to 16: `lst_out` at uint16,
 `qa_out` at 12 uint8, one bool of water rule, and one bool of gap region. On
 the largest tile that is 0.6 GiB the model used to omit, and a fleet instance
-is sized from that model.
+takes its size from that model.
 
 The memory sampler stops after the mask, not before it. A sampler stopped
 earlier never observed the arrays the mask allocates while the two full-tile
@@ -2271,13 +2278,13 @@ of the 43,200 one-degree cells inside +/-60 degrees. AG1km v003 holds 24,873
 granules globally, so restricting the fetch to land avoids most of it.
 
 AG1km, not AG100. The ASTER GED User Guide V3 gives AG100 as 1000 by 1000 cells
-per degree and AG1km as 100 by 100, so AG1km's cell measures 0.01 degree exactly
+per degree and AG1km as 100 by 100. AG1km's cell measures 0.01 degree exactly,
 and its granule is already the grid this mask reads. AG100 is about a hundred
 times the download and would then need decimating to the same answer.
 
 Reading a granule converts it twice, and the manifest records both conversions,
 because a reader of the raster alone cannot recover either. The source count is
-int16 and the artifact is uint8, so the read clips at 255. The rule tests
+int16 and the artifact is uint8. The read clips at 255. The rule tests
 `== 0`, and clipping a large count cannot move a pixel. The source fill of -9999
 becomes 0, so a cell with no observation reads as gap.
 
@@ -2303,7 +2310,7 @@ million. Every one of those tiles has thermal scenes and a real composite.
 
 So the artifact gained a second band. Band 1 is the count, band 2 is 1 exactly
 where the build read a granule, and `masks.emissivity_gap` needs both: a pixel
-is a gap when its cell was read AND its count is zero. A cell with no granule
+is a gap when the build read its cell AND its count is zero. A cell with no granule
 keeps its pixels, and `output_mask` counts them as `pixels_land_unread` so a
 tile resting on absent granules says so.
 
@@ -2432,9 +2439,9 @@ covers the Bight of Benin, five degrees of water west of the Niger delta, and
 them. The decisive figure is the other one: of the 895 tiles that remain, every
 one holds scenes.
 
-The pixel mask still has both defects. A 25 km disc of ocean at Null Island
-and two globe-circling slivers of ocean are marked as land, so any pixel inside
-them is composited rather than masked. Fixing that belongs in the repository
+The pixel mask still has both defects. The mask marks a 25 km disc of ocean at
+Null Island and two globe-circling slivers of ocean as land. The graph
+composites any pixel inside them rather than masking it. Fixing that belongs in the repository
 that defines the mask.
 
 **The 25 km buffer is a Mercator buffer.** EPSG:3857 inflates distance by
@@ -2442,7 +2449,7 @@ that defines the mask.
 about 12.5 km at 60 degrees. That is the production rule and this tile list
 keeps it, because a tile list built on a different buffer than the pixel mask
 would select tiles the mask then blanks. `land_tiles.parquet` records
-`buffer_is_mercator`, so the artifact states the choice.
+`buffer_is_mercator`. The artifact states the choice.
 
 ### Rehearsal mode finds them on a laptop
 
@@ -2483,10 +2490,10 @@ pipeline from this instrumentation as the cause of the quarter-tile stall. The
 array path never completed a quarter tile. The sharded path completed one twice.
 
 **Frisky workers survive `pkill` by script name.** They spawn through
-multiprocessing, so their command line shows a bare `-c`. An RSS threshold
+multiprocessing. Their command line shows a bare `-c`. An RSS threshold
 misses the small ones. Orphans contaminated two measurements here. Eight held
 88 GB across two restarts and produced a wrong conclusion. Later, 26.6 GB of
-dead cluster made a healthy run look like a failing one, with two schedulers on
+dead cluster made a working run look like a failing one, with two schedulers on
 different dashboard ports. Match on the venv path, stop by process id, and
 confirm against `ss -tlnp` that one dashboard listens:
 
@@ -2504,7 +2511,7 @@ start past `cores * 6` threads.
 
 **`client.gather` on every future at once aborts the process.** With 324 futures
 and about 1 GB of results resident, frisky 0.7.2 raised a Rust panic across the
-PyO3 boundary at 90% completion. A panic cannot unwind, so the process aborts
+PyO3 boundary at 90% completion. A panic cannot unwind. The process aborts
 rather than raising, and 290 completed shards went with it. `frisky.as_completed`
 with one result assembled at a time completed 324 of 324 with no panics.
 
@@ -2523,7 +2530,7 @@ processor percentage and RSS, and by guessing.
 `--engine fused` aborted on any masked run, and the benchmark that established
 the two engines write identical bytes could not detect it.
 
-The mask planes were cut to a block at two call sites, and both ran.
+Both call sites that cut the mask planes to a block ran.
 `composite.submit_blocks` cut on the driver, so the wire carried a 360 px
 window rather than the tile's 18,000 px plane. `composite.fused_block` cut
 again on the worker, so a direct call holding the tile's planes still worked.
@@ -2535,7 +2542,7 @@ that aborted the process rather than raising.
 
 The 8x8 instance benchmark ran `--no-output-mask`. With no mask `keep` is None,
 `for_block` returns `self`, and neither call site cuts at all. So the
-comparison that established the two engines agree was made on the one
+comparison that established the two engines agree ran on the one
 configuration where the defect cannot appear, while every published tile
 carries the mask.
 
@@ -2572,7 +2579,7 @@ so GDAL's curl output never reaches stderr. It arrives as `rasterio._err` log
 records shaped `CURL_INFO_HEADER_OUT: GET ...`, and redirecting file descriptor
 2 does not catch them either. The script attaches a log handler instead. Left
 alone it would have reported 0 GETs. A zero reads like a pipeline that issues no
-requests rather than like a broken counter, so the script now exits non-zero on
+requests rather than like a broken counter. The script now exits non-zero on
 a zero count.
 
 ### A worker that aborts, and a shard that does not arrive
@@ -2603,7 +2610,7 @@ shards with no errors and exit 0. frisky reschedules a dead worker's task.
 `tests/test_run_survives_worker_death.py` is that experiment.
 
 **What does lose a tile quietly is a shard that raises.** `process_shard`
-exceptions are caught per shard so one bad shard cannot kill the tile, which is
+The driver catches exceptions per shard so one bad shard cannot kill the tile, which is
 right, and then `main` returned 0 regardless, which was not. A run that
 gathered one shard of 64 reported success and wrote a part file and a summary
 to match. A driver reading the exit code, or reading the summary without
@@ -2628,13 +2635,14 @@ records the same count for one that would rather read a file.
 - Workers start with `spawn` and read `FRISKY_TRACING_CAPACITY` from the
   environment, so set it before constructing the cluster.
 - Get the client from `cluster.get_client()`. `frisky.Client(cluster)` raises.
-- No public span context manager exists. Build one on `record_span` and `now_ns`.
+- No public span context manager exists. Build one on `record_span` and
+  `now_ns`.
 - Use `query_spans`, not `get_spans`. With `processes=True` the worker spans
   live in the worker processes.
 - `odc.loader.configure_rio(client=...)` accepts `client` and discards it, so
   GDAL settings must reach spawned workers through `os.environ`.
-- Planetary Computer Shared Access Signature (SAS) tokens last about an hour and
-  the catalogue signs them at search time, so the script signs immediately
+- Planetary Computer Shared Access Signature (SAS) tokens last about an hour
+  and the catalogue signs them at search time. The script signs immediately
   before building the graph. Earth Search needs no signing, because `s3://`
   hrefs authenticate per request from ambient AWS credentials with
   `AWS_REQUEST_PAYER=requester`.
@@ -2649,14 +2657,14 @@ records the same count for one that would rather read a file.
 - **No fleet has run.** The precomputed inventory has carried five whole tiles
   to completion, one alone and four at once on four instances, with no measured
   S3 contention between the concurrent four. Nothing has run at the scale of
-  895, and nothing has run the queueing, retry, and failure handling a
-  fleet needs, because none of that exists yet.
+  895, and nothing has run the queueing, retry, and failure handling a fleet
+  needs, because none of that exists yet.
 - **The 895-tile price rests on five measured tiles and one instance family.**
-  The per-tile phases are measured, the scene distribution is measured, and
-  their product is arithmetic. Every measurement behind it is an
-  `m6id.16xlarge`, while the table recommends `c6id.12xlarge`, so the compute
-  term assumes work divides by physical cores across a different cache and
-  memory bandwidth. One `c6id` tile would settle it.
+  The per-tile phases and the scene distribution are measurements, and their
+  product is arithmetic. Every measurement behind it is an `m6id.16xlarge`,
+  while the table recommends `c6id.12xlarge`. The compute term assumes work
+  divides by physical cores across a different cache and memory bandwidth. One
+  `c6id` tile would settle it.
 - **A worker aborting is survivable, and the panic is not the risk.** This
   entry used to say frisky aborts workers at teardown and leaves the exit code
   unknown. Both halves were wrong, and the section below has the measurements.
@@ -2666,36 +2674,36 @@ records the same count for one that would rather read a file.
   1.42x to 1.56x band. The shape is now right and the guard admits the
   instances in `Cost`. Whether `PRESENT_BYTES_PER_PIXEL_SCENE = 13` should come
   down is a separate question, and a guard is the wrong place to be tight, so
-  nothing has been trimmed on five points.
+  nothing came off on five points.
 
-- **The staged disk requirement is estimated per object, not checked.** The
-  guard reserves 95 MB for a thermal band and 10 MB for a QA band, from HEADs
-  over 30 scenes per platform. HEAD is billable, so nothing checks the real
-  size before fetching. A slice of larger-than-average scenes falls back on the
-  in-flight free-space floor.
+- **The staged disk requirement rests on a per-object estimate.** The guard
+  reserves 95 MB for a thermal band and 10 MB for a QA band, from HEADs over 30
+  scenes per platform. HEAD is billable, so nothing checks the real size before
+  fetching. A slice of larger-than-average scenes falls back on the in-flight
+  free-space floor.
 - **The pixel mask still carries both land defects.** The tile list here drops
   the Null Island placeholder and the antimeridian slivers. The mask in
-  `nlebovits/landsat-lst` does not, so a pixel inside either is composited
-  rather than masked.
-- **The 7.7% extra tile-scene pairs have not been priced.** The rectangle
-  overhang is measured on 670 scenes in three regions, and the extra reads it
-  implies scale with tile-boundary geometry rather than with scene count. No
-  run has paid for them, so the S3 line in `Cost` describes the scene list a
-  catalogue search returns rather than the larger one in the artifact.
-- **The scene-centre offset is measured on Landsat 8 only.** 4.24 ms is
-  systematic across 401 scenes of Landsat 8 2021, which is the block that
-  carries microsecond timestamps. Landsat 9 publishes none, so the same
-  separation cannot be run on it, and the offset is assumed to hold there.
+  `nlebovits/landsat-lst` does not. The graph composites a pixel inside either
+  rather than masking it.
+- **Nobody has priced the 7.7% extra tile-scene pairs.** The rectangle overhang
+  covers 670 scenes in three regions, and the extra reads it implies scale with
+  tile-boundary geometry rather than with scene count. No run has paid for
+  them, so the S3 line in `Cost` describes the scene list a catalogue search
+  returns rather than the larger one in the artifact.
+- **The scene-centre offset covers Landsat 8 only.** 4.24 ms is systematic
+  across 401 scenes of Landsat 8 2021, which is the block that carries
+  microsecond timestamps. Landsat 9 publishes none, so the same separation
+  cannot run on it, and this document assumes the same offset applies there.
   The 30 s guard covers 7,000 times the measured value either way.
 - **Landsat 7 is out of scope and untested.** The pipeline runs Landsat 8 and
   9, and the bulk file covers OLI/TIRS only. Adding Landsat 7 needs a second
   bulk file and a different thermal band.
 - **Nobody has run a tile at the 1024 px shard.** The 2.8x request saving rests
-  on three shards of a read measurement, and the 90.6 GiB working set it implies
-  has no run behind it, against a measured 26.5 GiB peak at 512 px.
-- **The request count came from the laptop, not from in region.** Every response
-  was a clean 206, so latency added nothing, but no in-region repeat exists. It
-  would cost about $0.05.
+  on three shards of a read measurement, and the 90.6 GiB working set it
+  implies has no run behind it, against a measured 26.5 GiB peak at 512 px.
+- **The request count came from the laptop, not from in region.** Every
+  response was a clean 206, so latency added nothing, but no in-region repeat
+  exists. It would cost about $0.05.
 - **The request count covers one area at one date range.** Requests per band
   read follows from where the shard window falls on the internal block grid, so
   a different grid origin or resolution can move it.
@@ -2705,54 +2713,54 @@ records the same count for one that would rather read a file.
 - **The department tuning covers one department at 711 scenes.** A different
   area or scene count moves the optimum, because the memory term scales with
   both.
-- **One assumption in `destripe.py` no synthetic loader can check.** Every
-  per-scene value reaches a loaded stack by matching
+- **One assumption in `destripe.py` no synthetic loader can check.**
+  Every per-scene value reaches a loaded stack by matching
   `destripe.timestamp_of(item)` against the `time` coordinate `odc.stac`
   produced. The unit tests replace `stac_load` with a fixture built to return
   those stamps, so they assert the assumption back at themselves.
-  `tests/test_time_axis_join.py` checks it against real scenes, and it is
-  `s3`-marked and has not been run. If odc-stac ever stops taking the item
+  `tests/test_time_axis_join.py` checks it against real scenes, and it carries
+  the `s3` mark and has never run. If odc-stac ever stops taking the item
   datetime as its group timestamp, `align_to_time` raises and every shard of
   the tile stops at once. That is the right failure and it is still a failure.
+
 - **The swath comes from the data, and that is a departure.**
   `nlebovits/landsat-lst` rasterises the imaged parallelogram Earth Search
   publishes. This repository reads the USGS bulk metadata, whose corner columns
   describe the product bounding rectangle and exceed the imaged area by about
   46%, so rasterising the ring would put the cross-fade tens of kilometres off
   the seam. Counting valid observations per `(path, row)` quad answers the same
-  question from the pixels instead. Comparing the two definitions on real ground
-  is still owed.
+  question from the pixels instead. Comparing the two definitions on real
+  ground is still owed.
 - **Neighbouring tiles can disagree about both an offset and a swath.** Both
-  are measured over one tile plus a 1 degree margin and no wider. So a scene that two
-  tiles share gets a different offset in each, because the median anomaly is
-  taken over different ground. A quad's swath moves for a second
-  reason: the inventory assigns only some of that quad's scenes to each tile,
-  so the half-the-scenes threshold has a different denominator. The margin
-  makes the swath edges inside a tile real acquisition edges. It does not make
-  two tiles agree about an edge near their shared border.
-  `nlebovits/landsat-lst` has the same limit, and no merged pair of tiles has
-  been inspected.
+  cover one tile plus a 1 degree margin and no wider. So a scene that two tiles
+  share gets a different offset in each, because each tile takes the median
+  anomaly over different ground. A quad's swath moves for a second reason: the
+  inventory assigns only some of that quad's scenes to each tile, so the
+  half-the-scenes threshold has a different denominator. The margin makes the
+  swath edges inside a tile real acquisition edges. It does not make two tiles
+  agree about an edge near their shared border. `nlebovits/landsat-lst` has the
+  same limit, and nobody has inspected a merged pair of tiles.
 - **The prep resolution factor has no measurement behind it.** It defaults to
   4. `nlebovits/landsat-lst` validated factor 2 at a median offset error of
   0.002 C and rejected factor 4 at a maximum of 0.546 C against a
   pre-registered 0.5 C gate, on a different grid and a different loader. This
   repository owes its own sweep.
 - **The sparse floor is a placeholder, and five tiles now show what it costs.**
-  `DESTRIPE_MIN_PREP_SAMPLES = 200` comes from `nlebovits/landsat-lst`, where it
-  screened a factor-2 grid over a 5 degree tile. `tile_prep` fits on a factor-4
-  grid holding roughly a fifth as many pixels per scene. Every one of the five
-  tiles returned the same one-sided offset tail: medians within 1.2 C of zero,
-  minima past -78 C, maxima never above 15.8 C. The 15 C cap catches them, so
-  nothing reaches a composite, but the cap is a backstop and the floor is the
-  screen. It needs a sweep of the rejected share against the floor on a real
-  tile.
-- **The 15 C offset cap was calibrated somewhere else, and the rejected share
-  now has five points.** One mid-latitude agricultural AOI at 21.8%. This
+  `DESTRIPE_MIN_PREP_SAMPLES = 200` comes from `nlebovits/landsat-lst`, where
+  it screened a factor-2 grid over a 5 degree tile. `tile_prep` fits on a
+  factor-4 grid holding roughly a fifth as many pixels per scene. Every one of
+  the five tiles returned the same one-sided offset tail: medians within 1.2 C
+  of zero, minima past -78 C, maxima never above 15.8 C. The 15 C cap catches
+  them, so nothing reaches a composite, but the cap is a backstop and the floor
+  is the screen. It needs a sweep of the rejected share against the floor on a
+  real tile.
+- **`nlebovits/landsat-lst` calibrated the 15 C offset cap, and the rejected
+  share now has five points.** One mid-latitude agricultural AOI at 21.8%. This
   repository measures 8.27% on Delhi, 8.73% on Durban, 11.87% on interior
   Argentina, 12.84% on Philadelphia, and 21.08% on Kalimantan. The tropical
   figure matches the original, the first independent agreement between the two
-  repositories, and the spread tracks cloud. Whether 15 C is
-  the right cap at either end is still unmeasured.
+  repositories, and the spread tracks cloud. Whether 15 C is the right cap at
+  either end is still unmeasured.
 - **A capped prep run counted its swaths against the wrong denominator.**
   `--max-blocks` truncates the work list before any coverage accumulates, and
   `swath_masks` still divides each quad's per-cell count by every scene the
@@ -2767,35 +2775,35 @@ records the same count for one that would rather read a file.
 - **The prep memory model is arithmetic, not a measurement.**
   `tile_prep.memory_model` names five resident terms and `--target-memory-gib`
   refuses a run that exceeds them, the way `worker_memory_guard` does for a
-  shard. The shard constant was calibrated against six committed sweeps. This
-  one counts array shapes and has never been checked against an RSS series. The
-  term worth watching is the histogram a block returns whole to the driver, at
-  104 KB a scene, so a block seeing 2,000 scenes hands back 208 MB.
+  shard. The shard constant comes from six committed sweeps. This one counts
+  array shapes, and no RSS series has ever checked it. The term to watch is the
+  histogram a block returns whole to the driver, at 104 KB a scene, so a block
+  seeing 2,000 scenes hands back 208 MB.
+
 - **The rule leaves 503 hot pixels on S30W065.** Each is in a cell with
-  observations, so the gap test excludes it. Extending the geometry to
-  `numobs <= 2` would take the tail to 98.30% and remove 11.4% of the tile, at
-  which point the rule stops being a screen. The 503 stay.
+  observations. The gap test excludes it. Extending the geometry to `numobs <=
+  2` would take the tail to 98.30% and remove 11.4% of the tile, at which point
+  the rule stops being a screen. The 503 stay.
 - **The QA comparison covers one 512 px shard at 120 scenes.** That shard sits
   inside a WRS footprint, so it measures the interior case and not the boundary
   case.
 - **The hot rule leaves the top of the scale unbounded outside a gap cell.**
-  `N30E075`
-  returned 83.0 C, above the published land-skin record, and masked 0 px
-  because the tile has no ASTER gap cells and the hot rule matches only on the
-  pair. The pairing is right: the gap geometry alone removes 701,839 valid
+  `N30E075` returned 83.0 C, above the published land-skin record, and masked 0
+  px because the tile has no ASTER gap cells and the hot rule matches only on
+  the pair. The pairing is right: the gap geometry alone removes 701,839 valid
   pixels to remove 4,588 bad ones on `S30W065`. What is missing is any ceiling
   that acts on gapless ground.
-- **`N00E110` returns -39.8 C and the mechanism is inferred, not measured.**
-  Cloud is the obvious candidate, and the 21.08% rejected share supports it,
-  but nothing has traced one -39.8 C pixel back to the scenes that
-  produced it. A P95 needs very few valid observations in a pixel for one cold
-  outlier to survive, so this probably shares a cause with the sparse floor
-  above. Probably is not measured.
-- **No tile has staged at 128 threads.** `tile_prep.py` takes
-  `--stage-threads` now, and `stage_bench.py` MEASURED 128 at 1.38x the
-  throughput of 64 with 192 and 256 both worse. That is one 200-object sample
-  on one instance, where ramp dominates a 25-second run, so the elbow at 128 is
-  a shape rather than a constant. Every tile measured above ran at 64.
+- **`N00E110` returns -39.8 C, and the mechanism is an inference.** Cloud is
+  the obvious candidate, and the 21.08% rejected share supports it, but nothing
+  has traced one -39.8 C pixel back to the scenes that produced it. A P95 needs
+  very few valid observations in a pixel for one cold outlier to survive, so
+  this probably shares a cause with the sparse floor above. Probably is not
+  measured.
+- **No tile has staged at 128 threads.** `tile_prep.py` takes `--stage-threads`
+  now, and `stage_bench.py` MEASURED 128 at 1.38x the throughput of 64 with 192
+  and 256 both worse. That is one 200-object sample on one instance, where ramp
+  dominates a 25-second run, so the elbow at 128 is a shape rather than a
+  constant. Every tile measured above ran at 64.
 
 - **The cross-fade's reach varies by two orders of magnitude and nothing sets a
   floor.** `n_pooled_fallback` ran 0.10% of the raster on Delhi and 67.3% on
@@ -2803,22 +2811,21 @@ records the same count for one that would rather read a file.
   collapses and the tile composites almost entirely pooled. The pixels keep the
   meaning the design gives them, and the run reports the count, so nothing here
   is wrong. What is unsettled is whether a tile that pooled two thirds of
-  itself should be published under the same `processing:lineage` as one that
-  pooled a tenth of a percent.
+  itself belongs under the same `processing:lineage` as one that pooled a tenth
+  of a percent.
 - **No `c6id` instance has run this pipeline.** The `Cost` table recommends one
   on memory and price arithmetic alone.
 
 ## Corrections to earlier versions of this document
 
 
-**The emissivity pair rule was priced on the one tile that flattered it.**
+**The emissivity pair rule got its price from the one tile that flattered it.**
 Every number behind `>= 70 C AND GED gap` came from S30W065, where the gap
 region and the hot tail do overlap. Four more tiles say they usually do not. On
-N30E075 the region and its buffer contain none of the 207 pixels at or above
-80 C, so the rule removed none of them, and the tile published 82.99 C as its
-maximum.
-The pricing was right about S30W065 and wrong as a rule. The threshold is now
-unconditional and the region removes nothing.
+N30E075 the region and its buffer contain none of the 207 pixels at or above 80
+C. The rule removed none of them, and the tile published 82.99 C as its
+maximum. The pricing was right about S30W065 and wrong as a rule. The threshold
+is now unconditional and the region removes nothing.
 
 **A benchmark run with the mask off validated an engine that fails with it on.**
 The 8x8 window comparison that established `--engine fused` and `--engine graph`
@@ -2860,7 +2867,7 @@ pixels carry a retrieval. The rule removed 701,839 real temperatures on
 S30W065. The measurement that disproves this was in the same document, twelve
 lines below the claim.
 
-**`numobs == 0` is the rule.** It was priced on its hot column alone: 77.30% of
+**`numobs == 0` is the rule.** Its price came from its hot column alone: 77.30% of
 the tile's pixels at or above 70 C, for 0.2167% of the valid ones. The column
 beside it says 701,839 pixels, and 524 of the 605 gap cells contain nothing
 wrong.
@@ -2877,7 +2884,7 @@ $2.31 measured on `S30W065`, which carries 4,776 scenes against a mean of 3,445.
 The global line scales on `tile_scene_rows`. Over the 3,083,129 tile-scene pairs
 the inventory holds it comes to $1,822. Over the 2,905,875 with a thermal band,
 which is what the 769 launched tiles read, it comes to **$1,718**, and that is
-the figure `Cost` uses. The dense tile was the one that had been run, and the
+the figure `Cost` uses. The dense tile was the one that ran, and the
 arithmetic used it as the mean without saying so.
 
 **Shard size is the largest cost lever in this pipeline.** True when written and
@@ -2905,7 +2912,7 @@ images open water. Coverage rules a cell out; it does not rule one in.
 
 **The bulk file truncates the acquisition start and stop to whole seconds, so
 the computed centre falls within 1.117 s of the published one.** Both halves
-fail. Precision is mixed: Landsat 8 2021 carries microseconds, 2022 is 53%
+fail. Precision varies: Landsat 8 2021 carries microseconds, 2022 is 53%
 whole-second, and everything later is whole-second. And truncating both
 timestamps moves their midpoint by strictly under a second, so 1.117 s cannot
 come from truncation and nothing reproduces it. Measured apart,
@@ -2932,8 +2939,8 @@ USGS bulk metadata Parquet and read in 123 ms per tile.
 **The full tile cost $10.70.** Wrong. That assumed each instance ran an hour.
 Each ran 642 s, so the fleet cost $1.94 of EC2 time.
 
-**QA_PIXEL bits 3 and 4 are the mask.** Wrong. The mask this workflow was
-ported from covers bits 1 to 5, and it also drops any decoded value outside
+**QA_PIXEL bits 3 and 4 are the mask.** Wrong. The mask this workflow came
+from covers bits 1 to 5, and it also drops any decoded value outside
 [-50, 80] C before the percentile runs. Bits 3 and 4 alone leave cirrus,
 dilated cloud, and snow in the stack, and an exact `dn != 0` test leaves the
 reprojected scene edge in it. On one 512 px shard over 120 scenes the wider
@@ -2944,10 +2951,10 @@ published above were all computed under the narrow mask.
 **The window is 2020-01-01 to 2025-01-01.** Wrong twice over. The asset spec
 asks for a five-year composite covering 2021 through 2025. That window included
 all of 2020, which is outside it, and excluded all of 2025, which is inside it.
-A STAC `datetime` range is closed at both ends, so the end also needed a time of
+A STAC `datetime` range closes at both ends. The end also needed a time of
 day: a bare `2025-12-31` drops every scene acquired that day. The default is now
 `2021-01-01/2025-12-31T23:59:59Z`, held in `stac_window.py` and read by every
-entry point. Cached STAC item lists are named after the query that produced
+entry point. Cached STAC item lists take their name from the query that produced
 them, window included, so a 2020-2024 cache cannot answer a 2021-2025 request.
 No measurement in this document has been rerun against the new window.
 
@@ -3019,7 +3026,7 @@ work in graph build and `dask.optimize`, over 6.3 million tasks.
 | `tile_inventory.py` | the runtime read of one tile, from one row group |
 | `fleet_plan.py` | the driver, and the checks that run before the fleet does |
 | `stac_reference.py` | Earth Search, kept only as a parity oracle |
-| `artifacts/` | `land_tiles.parquet`, the inventory, the buffered geometry, the ASTER GED counts, their manifests, and the committed slices of the three that are gitignored |
+| `artifacts/` | `land_tiles.parquet`, the inventory, the buffered geometry, the ASTER GED counts, their manifests, and the committed slices of the three that `.gitignore` excludes |
 | `compare_qa_masks.py` | one shard, run under both masks, in one process |
 | `qa-parity/` | that comparison, with both rasters and the difference image |
 | `sweep_throughput.py` | configuration sweep driver |

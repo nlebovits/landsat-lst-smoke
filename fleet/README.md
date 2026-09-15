@@ -36,12 +36,12 @@ The account has two identities and they are not interchangeable.
 | `radiant-earth` | SSO role | EC2, and `s3://usgs-landsat` which is requester-pays | about one hour |
 | `source-coop` | static IAM user | the results bucket | no |
 
-The role **cannot call `iam:PassRole`**, so an instance gets no instance
+The role **cannot call `iam:PassRole`**. An instance gets no instance
 profile and `drive.sh` copies both identities to the box. The SSO half expires
 in about an hour against a tile that takes most of one. So `drive.sh` copies
 credentials immediately before it starts the run, not during setup. A run that
-began 51 minutes after its credentials were minted stopped part way through
-with `The provided token has expired`.
+began 51 minutes after `drive.sh` issued its credentials stopped part way
+through with `The provided token has expired`.
 
 ## Guard the key: ssh is the only way into a running instance
 
@@ -50,12 +50,13 @@ the key and the instance is unreachable.** `fleet/launch.py` enforces both
 rules in code rather than trusting them:
 
 - The private key goes to `~/.ssh`, never a temp directory. A key under a
-  session scratchpad was cleared by a workstation restart while its instance
-  kept running, and nobody could reach the run again.
-- The key file must be non-empty before any instance is created.
+  session scratchpad vanished when the workstation restarted, and its instance
+  kept running with nobody able to reach it.
+- `fleet/launch.py` checks that the key file holds bytes before it creates any
+  instance.
 
-`pricing:GetProducts` and `ce:GetCostAndUsage` are also denied, so no figure
-here has ever been checked against a bill.
+`pricing:GetProducts` and `ce:GetCostAndUsage` are also denied, so nobody has
+ever checked a figure here against a bill.
 
 ## Terminating
 
@@ -102,8 +103,8 @@ whose artifacts disagree with each other. Rebuild them with the commands in
 billing after the other three self-terminated, and the watcher of the day
 reported nothing about it for eight minutes.
 
-Do not use `get-console-output`. It was polled eight times and returned nothing
-while three of four instances had already failed.
+Do not use `get-console-output`. The watcher polled it eight times and got
+nothing back while three of four instances had already failed.
 
 ## Where results go
 
