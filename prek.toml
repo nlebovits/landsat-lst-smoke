@@ -80,6 +80,7 @@ hooks = [
       "measure_land_defects.py",
       "measure_s3_requests.py",
       "measure_scene_centre.py",
+      "measure_water_share.py",
       "memory_sampler.py",
       "observe.py",
       "publish_catalog.py",

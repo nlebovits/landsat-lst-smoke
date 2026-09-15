@@ -46,7 +46,8 @@ jobs:
             cost_report.py destripe.py fleet_plan.py \
             land_tiles.py masks.py measure_ged_registration.py \
             measure_land_defects.py measure_s3_requests.py \
-            measure_scene_centre.py memory_sampler.py observe.py \
+            measure_scene_centre.py measure_water_share.py \
+            memory_sampler.py observe.py \
             publish_catalog.py shard_lst_p95.py \
             stac_reference.py stac_window.py staging.py \
             tile_inventory.py tile_prep.py usgs_inventory.py \

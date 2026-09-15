@@ -28,7 +28,14 @@ existed, and `TestOrdinaryOutputIsUntouched` asserts that against
 `qa_count` following the temperature out. The count is the only evidence a
 consumer has for which rule removed a pixel, so the rule leaves it standing. A
 nodata temperature beside a count of 4 says the floor reached it. A count of 0
-beside nodata says the water rule did.
+beside nodata says one of the two water rules did, or that the pixel was never
+usefully observed; the count alone does not separate those.
+
+`TestTheObservedWaterRule` covers the fifth rule, which this kernel decides and
+does not apply. `reduce_block` counts the share and returns a plane;
+`composite.finalize_block` writes it in through `masks.apply_output_mask`. The
+split is what keeps a retained pixel bit-identical to the same stack before the
+rule existed, and the first test here asserts exactly that.
 """
 
 from __future__ import annotations
@@ -51,6 +58,9 @@ from lst_qa import (  # noqa: E402
     LWIR_OFFSET_C,
     LWIR_SCALE,
     MIN_TOTAL_OBSERVATIONS,
+    MIN_WATER_OBSERVATIONS,
+    QA_WATER_BITS,
+    WATER_SHARE_THRESHOLD,
     encode_celsius,
     to_celsius,
 )
@@ -104,7 +114,7 @@ def reduce(lwir, qa, *, offset=None, month=None, feather=False):
     n = lwir.shape[0]
     offset = np.zeros(n, dtype="float32") if offset is None else np.asarray(offset)
     month = np.ones(n, dtype="int16") if month is None else np.asarray(month)
-    dn, counts, _fallback = composite.reduce_block(
+    dn, counts, _fallback, _water = composite.reduce_block(
         np.moveaxis(lwir, 0, -1),
         np.moveaxis(qa, 0, -1),
         offset,
@@ -117,6 +127,42 @@ def reduce(lwir, qa, *, offset=None, month=None, feather=False):
         emit_pooled=False,
     )
     return dn, np.moveaxis(counts, -1, 0)
+
+
+def classify(lwir, qa, *, month=None):
+    """`(dn, counts, water)`: the same call, keeping the classification plane.
+
+    `reduce` above drops the plane because the rules it covers do not produce
+    one. Everything else about the call is identical, so a difference between
+    the two is a difference the water rule made.
+    """
+    n = lwir.shape[0]
+    month = np.ones(n, dtype="int16") if month is None else np.asarray(month)
+    dn, counts, _fallback, water = composite.reduce_block(
+        np.moveaxis(lwir, 0, -1),
+        np.moveaxis(qa, 0, -1),
+        np.zeros(n, dtype="float32"),
+        np.ones(n, dtype=bool),
+        np.zeros(n, dtype="int16"),
+        month,
+        np.ones((NY, NX, 1), dtype="float32"),
+        n_paths=0,
+        feather=False,
+        emit_pooled=False,
+    )
+    return dn, np.moveaxis(counts, -1, 0), water
+
+
+def water_stack(depths, water_depths):
+    """A block where pixel `x` is seen `depths[x]` times, `water_depths[x]` wet.
+
+    The water observations come first along the time axis. Order cannot matter
+    to a count, and fixing it keeps the fixture readable.
+    """
+    lwir, qa = stack(depths)
+    for x, wet in enumerate(water_depths):
+        qa[:wet, 0, x] |= QA_WATER_BITS
+    return lwir, qa
 
 
 def stack(depths, dn=None):
@@ -341,6 +387,22 @@ class TestTheRuleIsStatedOnce:
         for literal in ("MIN_TOTAL_OBSERVATIONS", "LST_OUTPUT_MIN_C", "80.0"):
             assert literal not in source
 
+    def test_the_kernel_calls_the_water_predicates_rather_than_restating_them(
+        self,
+    ):
+        import inspect
+
+        source = inspect.getsource(composite.reduce_block)
+        assert "observed_water(" in source
+        assert "qa_water(" in source
+        for literal in (
+            "WATER_SHARE_THRESHOLD",
+            "MIN_WATER_OBSERVATIONS",
+            "QA_WATER_BITS",
+            "0.75",
+        ):
+            assert literal not in source
+
     def test_the_bounds_are_not_applied_to_the_diagnostic_pooled_band(self):
         """`--emit-pooled` exists to compare pooled against feathered.
 
@@ -352,7 +414,7 @@ class TestTheRuleIsStatedOnce:
         offset = np.full(self.DEPTH, HOT_OBSERVED_C - 95.0, dtype="float32")
         lwir, qa = stack((self.DEPTH,) * NX, dn=HOT_DN)
         n = lwir.shape[0]
-        dn, _counts, _fallback, pooled = composite.reduce_block(
+        dn, _counts, _fallback, _water, pooled = composite.reduce_block(
             np.moveaxis(lwir, 0, -1),
             np.moveaxis(qa, 0, -1),
             offset,
@@ -367,3 +429,111 @@ class TestTheRuleIsStatedOnce:
         assert out_dn(95.0) != LST_NODATA_DN
         assert (pooled == out_dn(95.0)).all()
         assert (dn == LST_NODATA_DN).all()
+
+
+class TestTheObservedWaterRule:
+    """The share of clear observations that called the pixel water.
+
+    `reduce_block` counts it and returns a plane. Nothing here asserts a
+    masked raster, because this kernel writes none: `finalize_block` does, and
+    `tests/test_composite_graph.py` and `tests/test_composite_fused.py` follow
+    the plane through to the file on both engines.
+    """
+
+    #: Deep enough that the observation floor decides nothing here.
+    DEPTH = 100
+
+    def wet(self, water_depths, depths=None):
+        """The classification plane for one block, as a list of three bools."""
+        depths = (self.DEPTH,) * NX if depths is None else depths
+        _dn, _counts, water = classify(*water_stack(depths, water_depths))
+        return [bool(v) for v in water[0]]
+
+    def test_a_dry_pixel_is_not_water(self):
+        assert self.wet((0, 0, 0)) == [False, False, False]
+
+    def test_an_all_water_pixel_is_water(self):
+        assert self.wet((self.DEPTH,) * NX) == [True, True, True]
+
+    def test_the_numerator_and_denominator_accumulate_over_the_stack(self):
+        # Three shares from one block: below, on, and above the threshold.
+        on = int(np.ceil(WATER_SHARE_THRESHOLD * self.DEPTH))
+        assert self.wet((on - 1, on, self.DEPTH)) == [False, True, True]
+
+    def test_a_pixel_no_scene_observed_is_unknown_rather_than_water(self):
+        # Every observation is source fill, so the denominator is 0. The
+        # comparison form would read `0 >= 0` without the floor.
+        lwir = np.zeros((self.DEPTH, NY, NX), dtype="uint16")
+        qa = np.full((self.DEPTH, NY, NX), QA_CLEAR | QA_WATER_BITS, dtype="uint16")
+        _dn, counts, water = classify(lwir, qa)
+        assert not water.any()
+        assert int(counts.sum()) == 0
+
+    def test_a_pixel_below_the_floor_is_unknown(self):
+        below = MIN_WATER_OBSERVATIONS - 1
+        assert self.wet((below,) * NX, depths=(below,) * NX) == [False] * NX
+
+    def test_a_pixel_on_the_floor_is_decided(self):
+        floor = MIN_WATER_OBSERVATIONS
+        assert self.wet((floor,) * NX, depths=(floor,) * NX) == [True] * NX
+
+    def test_a_cloudy_water_observation_counts_in_neither_half(self):
+        """Only usable clear observations enter the share.
+
+        A cloud over water sets both bits. Counting it in the numerator while
+        `masked_celsius` kept it out of the denominator would push the share
+        above 1 and call a cloudy land pixel water.
+        """
+        lwir, qa = water_stack((self.DEPTH,) * NX, (0,) * NX)
+        # Every observation of pixel 0 is cloud over water.
+        qa[:, 0, 0] |= QA_WATER_BITS | (1 << 3)
+        _dn, counts, water = classify(lwir, qa)
+        assert bool(water[0, 0]) is False
+        assert int(counts[:, 0, 0].sum()) == 0
+
+    def test_the_denominator_does_not_saturate_like_qa_count(self):
+        """What separates these counters from the published band.
+
+        `qa_count` clips at 255 in one month. A pixel observed more than that
+        in one month would have a share computed against 255 rather than
+        against what it saw, and a mostly dry pixel could tip over the
+        threshold. The counters here are unsaturated, so it cannot.
+        """
+        depth = 300
+        wet = 200  # a share of 0.667, below the threshold
+        lwir, qa = water_stack((depth,) * NX, (wet,) * NX)
+        _dn, counts, water = classify(lwir, qa)
+        assert int(counts[0, 0, 0]) == 255, "the published band still saturates"
+        assert wet / depth < WATER_SHARE_THRESHOLD
+        assert not water.any(), "the share was taken against the saturated count"
+
+    def test_a_retained_pixel_is_bit_identical_to_the_same_stack_dry(self):
+        """The rule moves no value it does not remove.
+
+        The same observations with and without the water flag have to encode
+        to the same DN and the same monthly counts, because bit 7 changes
+        nothing about the temperature the pixel retrieved.
+        """
+        lwir, qa = water_stack((self.DEPTH,) * NX, (0,) * NX)
+        dry_dn, dry_counts, dry_water = classify(lwir, qa)
+        # Below the threshold, so no pixel is classified and none is removed.
+        under = int(np.ceil(WATER_SHARE_THRESHOLD * self.DEPTH)) - 1
+        lwir, qa = water_stack((self.DEPTH,) * NX, (under,) * NX)
+        wet_dn, wet_counts, wet_water = classify(lwir, qa)
+        assert not dry_water.any()
+        assert not wet_water.any()
+        assert np.array_equal(dry_dn, wet_dn)
+        assert np.array_equal(dry_counts, wet_counts)
+
+    def test_the_kernel_leaves_the_bands_alone(self):
+        """A classified pixel still carries its percentile out of here.
+
+        The plane is the kernel's whole output about water. `finalize_block`
+        is what turns it into nodata, and a `reduce_block` that anticipated it
+        would break the accounting that separates the two water rules.
+        """
+        lwir, qa = water_stack((self.DEPTH,) * NX, (self.DEPTH,) * NX)
+        dn, counts, water = classify(lwir, qa)
+        assert water.all()
+        assert (dn != LST_NODATA_DN).all()
+        assert int(counts.sum()) == self.DEPTH * NX
