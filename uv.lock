@@ -929,7 +929,9 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "affine" },
     { name = "boto3" },
+    { name = "botocore" },
     { name = "dask" },
     { name = "duckdb" },
     { name = "earthaccess" },
@@ -945,6 +947,7 @@ dev = [
     { name = "pyarrow" },
     { name = "pyogrio" },
     { name = "pyproj" },
+    { name = "pystac" },
     { name = "pystac-client" },
     { name = "pytest" },
     { name = "pytest-timeout" },
@@ -964,7 +967,9 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "affine" },
     { name = "boto3" },
+    { name = "botocore" },
     { name = "dask", specifier = "==2026.8.0" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "earthaccess" },
@@ -980,6 +985,7 @@ dev = [
     { name = "pyarrow", specifier = ">=16" },
     { name = "pyogrio" },
     { name = "pyproj" },
+    { name = "pystac" },
     { name = "pystac-client" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-timeout", specifier = ">=2.3" },

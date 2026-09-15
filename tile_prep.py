@@ -1,8 +1,8 @@
 # /// script
 # requires-python = ">=3.12,<3.15"
 # dependencies = [
-#   "frisky>=0.7.2", "dask", "odc-stac", "xarray", "numpy",
-#   "pystac", "psutil", "boto3", "pyarrow>=16",
+#   "frisky>=0.7.2", "dask", "odc-stac", "odc-geo", "xarray", "numpy",
+#   "pystac", "psutil", "boto3", "botocore", "affine", "pyarrow>=16",
 #   "rasterio", "shapely", "geopandas", "pyogrio",
 # ]
 # ///
@@ -547,8 +547,9 @@ def parse_args(argv=None):
         help="objects in flight while staging. Defaults to min(64, 4 x cores), "
         "which is what every measured run used. MEASURED by stage_bench.py on "
         "an m6id.16xlarge over 200 objects: 64 threads 233 MB/s, 128 threads "
-        "321 MB/s, 192 threads 293, 256 threads 277. Staging is about 45% of a "
-        "tile, so this is the largest single knob on the fleet's wall clock",
+        "321 MB/s, 192 threads 293, 256 threads 277. Staging is about 45 "
+        "percent of a tile, so this is the largest single knob on the fleet's "
+        "wall clock",
     )
     p.add_argument(
         "--target-memory-gib",

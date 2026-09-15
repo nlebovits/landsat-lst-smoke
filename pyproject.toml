@@ -23,6 +23,12 @@ dev = [
   # measure_s3_requests.py and compare_qa_masks.py. cost_report.py is standard
   # library only.
   "rasterio",
+  # `destripe.py` imports `affine` directly, to build the swath transform. It
+  # arrives with rasterio today, so the import works and nothing declares it.
+  # deptry reports it as DEP001, which is correct: a rasterio release that
+  # stopped depending on affine would break de-striping and no gate would say
+  # why.
+  "affine",
   "frisky>=0.7.2",
   # Pinned: frisky 0.7.2 imports the private `dask._task_spec` and
   # `dask._expr` modules and declares no dask bound of its own.
@@ -31,6 +37,11 @@ dev = [
   # The graph reprojects the cross-fade weights and reads the tile geobox
   # through odc.geo, so it is a direct dependency and not odc-stac's.
   "odc-geo",
+  # `composite.py` and `tile_prep.py` call `pystac.Item.from_dict` on the item
+  # dicts the inventory hands them, so pystac is read directly and not only
+  # through pystac-client. Five inline blocks already declare it. This one did
+  # not, which is the drift the comment above this list claims cannot happen.
+  "pystac",
   "pystac-client",
   "planetary-computer",
   "xarray",
@@ -39,6 +50,11 @@ dev = [
   "rioxarray",
   # Staging fetches each scene object once, with one get_object per object.
   "boto3",
+  # `staging.py` builds its own `botocore.config.Config`, because the two
+  # defaults it has to override, the retry mode and the connection pool size,
+  # are set nowhere else. boto3 pulls botocore in, so the import works; the
+  # settings it configures are the reason `staging.json` can count requests.
+  "botocore",
   # The COG and catalog writer, cog_catalog.py. rasterio, listed above, writes
   # the GeoTIFF and drives GDAL's COG driver; stac-geoparquet writes the item
   # mirror.

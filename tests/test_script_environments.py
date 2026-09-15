@@ -205,6 +205,52 @@ class TestShardRuntimeResolves:
         assert "ModuleNotFoundError" not in proc.stderr
 
 
+class TestThePrepRuntimeResolves:
+    """`tile_prep.py` runs first on an instance and was covered by nothing.
+
+    `fleet/run.sh` runs it at line 67, before `shard_lst_p95.py` at line 91. It
+    was the only entry point without a packaging check, and it was the first one
+    an instance executes. A prep that cannot start wastes the whole box.
+
+    This covers the inline block and nothing else. It does not pin an
+    interpreter: `uv` picks 3.14 for this checkout from a plain shell and 3.12
+    when the suite itself was started under `uv run`, so which interpreter a
+    subprocess here gets depends on how pytest was launched. Anything that
+    varies by interpreter belongs in a check that does not run a subprocess. See
+    `tests/test_entry_point_parsers.py`.
+    """
+
+    def test_the_prep_path_runs_on_the_inline_block_alone(self, tmp_path):
+        """A window the artifact does not cover, so the run stops at the gate.
+
+        Same shape as the shard load-path test above: the manifest read pulls in
+        every import the prep needs before it touches S3, and then refuses the
+        artifact. The refusal is the expected end. What must not appear is an
+        undeclared module, or a parser that cannot build itself.
+        """
+        work = fresh_checkout(tmp_path)
+        proc = run_script(
+            work,
+            "tile_prep.py",
+            "--tile",
+            TILE,
+            "--inventory-uri",
+            "artifacts/inventory_slice.parquet",
+            "--start",
+            "2019-01-01",
+            "--out-dir",
+            str(tmp_path / "prep"),
+        )
+        assert "ModuleNotFoundError" not in proc.stderr, (
+            f"tile_prep.py cannot run on its own dependencies:\n"
+            f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        )
+        assert "InventoryError" in proc.stderr, (
+            f"the prep stopped somewhere other than the manifest gate:\n"
+            f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        )
+
+
 class TestTheFleetPlannerResolves:
     """`fleet_plan.py` runs before the fleet, so its failure is the cheap one.
 
