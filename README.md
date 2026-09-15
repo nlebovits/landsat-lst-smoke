@@ -246,7 +246,5 @@ measurements. Read `src/lst/__init__.py` before changing those boundaries.
 
 ## License
 
-| Material | License |
-|---|---|
-| Code | [Apache License 2.0](LICENSE) |
-| Data | `CC0-1.0`, based on USGS terms for Landsat Collection 2 products |
+The code uses the [Apache License 2.0](LICENSE). The data uses `CC0-1.0`,
+based on USGS terms for Landsat Collection 2 products.
