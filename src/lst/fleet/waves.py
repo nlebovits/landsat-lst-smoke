@@ -552,6 +552,24 @@ def uploaded_tiles(cfg: dict) -> set[str]:
     return done
 
 
+def terminate_one(cfg: dict, instance_id: str) -> tuple[int, str]:
+    """Stop one instance billing. Returns `(returncode, message)`."""
+    code, _, err = launch.aws_try(
+        [
+            "aws",
+            "ec2",
+            "terminate-instances",
+            "--profile",
+            cfg["aws"]["profile"],
+            "--region",
+            cfg["aws"]["region"],
+            "--instance-ids",
+            instance_id,
+        ]
+    )
+    return code, err
+
+
 def reap(run: dict, cfg: dict, states: list, reaped: set[str], say=say_now) -> set[str]:
     """Terminate each instance whose upload is proven, without waiting for the wave.
 
@@ -579,19 +597,7 @@ def reap(run: dict, cfg: dict, states: list, reaped: set[str], say=say_now) -> s
         instance_id = entry.get("instance_id")
         if not instance_id:
             continue
-        code, _, err = launch.aws_try(
-            [
-                "aws",
-                "ec2",
-                "terminate-instances",
-                "--profile",
-                cfg["aws"]["profile"],
-                "--region",
-                cfg["aws"]["region"],
-                "--instance-ids",
-                instance_id,
-            ]
-        )
+        code, err = terminate_one(cfg, instance_id)
         if code != 0:
             say(f"           {state.tile:9} could not terminate early: {err}")
             continue
@@ -609,6 +615,19 @@ RATE_LINE = re.compile(r"^\s*(\S+)\s+\d+s / 3600 x \$([0-9.]+)")
 #: Consecutive polls with nothing running and nothing placeable before the
 #: driver stops waiting. At the default 60 second poll this is 20 minutes.
 STALL_LIMIT = 20
+
+#: How long a failed tile's instance is left alive before it is terminated.
+#:
+#: `reap` deliberately leaves a failed instance alone, because its uploader may
+#: still be pushing the log that says why it failed, and that log is the whole
+#: value of a failed tile. Under waves, the wave teardown collected it minutes
+#: later. A refill run has no wave teardown, so without this a failed instance
+#: bills to its 75 minute deadline while its tile runs again somewhere else.
+#:
+#: MEASURED on 2026-09-16: 60 tiles failed at once, left the pool, and kept
+#: both their billing and their share of the account vCPU, which then refused
+#: every replacement.
+FAILED_GRACE_MINUTES = 3.0
 
 
 #: MEASURED cost model, fitted on 2026-09-16 over the 99 South America tiles
@@ -796,11 +815,25 @@ class Gate:
         return max(cap - live, 0)
 
     def observe(self, placement: Placement, live: int, now: float, say=say_now) -> None:
-        """Learn from what AWS just allowed."""
-        if placement.quota:
+        """Learn from what AWS just allowed.
+
+        A quota refusal with nothing running is not a ceiling of zero. It means
+        something outside this pool holds the account's vCPU: instances this
+        driver has condemned but not yet terminated, or another run. MEASURED
+        on 2026-09-16: 60 instances failed at once, left the pool, and kept
+        their quota for a minute, and the gate wrote `account ceiling met at 0
+        concurrent instance(s)`. A ceiling of zero says never launch again.
+        """
+        if placement.quota and live > 0:
             self.ceiling = live
             self.ceiling_until = now + CAPACITY_BACKOFF_SECONDS
             say(f"account ceiling met at {live} concurrent instance(s)")
+        elif placement.quota:
+            self.hold_until = now + CAPACITY_BACKOFF_SECONDS
+            say(
+                f"the account vCPU is held by something outside this pool. "
+                f"Asking again in {CAPACITY_BACKOFF_SECONDS / 60:.0f} minute(s)."
+            )
         elif placement.refused and not placement.placed:
             self.hold_until = now + CAPACITY_BACKOFF_SECONDS
             say(
@@ -827,6 +860,8 @@ class Pool:
         self.settled: dict[str, str] = {}
         self.waiting_since: dict[str, float] = {}
         self.reaped: set[str] = set()
+        #: instance id -> (tile, monotonic deadline). See `FAILED_GRACE_MINUTES`.
+        self.condemned: dict[str, tuple[str, float]] = {}
         self.peak = 0
         self.fleet_dir = fleet_dir
         self.manifest_path = manifest_path
@@ -918,8 +953,13 @@ class Pool:
                     proc.terminate()
                 elif proc.returncode != 0 and status == "starting":
                     status = "not-driven"
-            self.live.pop(tile, None)
+            entry = self.live.pop(tile, None)
             self.waiting_since.pop(tile, None)
+            if status != "finished" and entry and entry.get("instance_id"):
+                self.condemned[entry["instance_id"]] = (
+                    tile,
+                    now + FAILED_GRACE_MINUTES * 60,
+                )
             one, again = sort_wave(
                 [tile],
                 {tile: status},
@@ -929,6 +969,25 @@ class Pool:
             )
             self.settled |= one
             self.queue.extend(again)
+
+    def sweep(self, cfg: dict, now: float, say=say_now) -> int:
+        """Terminate the failed instances whose grace has run out.
+
+        Returns:
+            How many were stopped.
+        """
+        due = [i for i, (_, when) in self.condemned.items() if now >= when]
+        stopped = 0
+        for instance_id in due:
+            tile, _ = self.condemned[instance_id]
+            code, err = terminate_one(cfg, instance_id)
+            if code != 0:
+                say(f"           {tile:9} could not terminate {instance_id}: {err}")
+                continue
+            del self.condemned[instance_id]
+            stopped += 1
+            say(f"           {tile:9} failed, terminated {instance_id}")
+        return stopped
 
     def stop_drivers(self) -> None:
         for proc in self.drivers.values():
@@ -1005,7 +1064,10 @@ def refill(
 
     try:
         while pool.busy():
-            room = gate.room(len(pool.live), time.monotonic())
+            # A condemned instance still holds its vCPU until it is swept, so
+            # it counts against the ceiling. Asking for a slot it holds buys a
+            # refusal and a wasted key pair.
+            room = gate.room(len(pool.live) + len(pool.condemned), time.monotonic())
             if room > 0 and pool.queue:
                 placement = pool.fill(
                     room,
@@ -1042,10 +1104,13 @@ def refill(
                     say=say,
                 )
 
+            pool.sweep(cfg, time.monotonic(), say=say)
+
             stamp = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
             say(
                 f"{stamp}  live={len(pool.live)} queued={len(pool.queue)} "
-                f"done={len(pool.settled)}/{len(tiles)} peak={pool.peak}"
+                f"done={len(pool.settled)}/{len(tiles)} peak={pool.peak} "
+                f"condemned={len(pool.condemned)}"
             )
 
             if time.monotonic() >= next_cost:

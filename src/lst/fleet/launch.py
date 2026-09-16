@@ -153,14 +153,62 @@ def load_config(path: Path | None = None, fleet_dir: Path | None = None) -> dict
     return tomllib.loads((path or fleet_asset("config.toml", fleet_dir)).read_text())
 
 
+def on_a_remote(sha: str, repo: Path) -> bool:
+    """Whether a clone of this repository would contain `sha`.
+
+    An instance clones the repository and checks the commit out. A commit that
+    exists only on this workstation is not there to check out, so `git
+    checkout` exits 128 and the tile dies about four minutes into billing,
+    having done nothing.
+
+    MEASURED on 2026-09-16: 60 instances were launched at an unpushed commit.
+    Every one of them wrote `MARKER checkout rc=128` and was requeued, and the
+    mistake cost about $42 before the run was stopped. At the full 665 tiles it
+    would have run the whole queue twice and spent most of a four-figure budget
+    on `git checkout`.
+
+    `git branch -r --contains` is the exact question: a clone fetches every
+    remote branch, so a commit reachable from one is a commit the instance can
+    check out. One fetch is attempted before answering no, because the local
+    copy of the remote refs may be older than the push.
+    """
+
+    def contains() -> bool:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "branch", "-r", "--contains", sha],
+            capture_output=True,
+            text=True,
+        )
+        return out.returncode == 0 and bool(out.stdout.strip())
+
+    if contains():
+        return True
+    subprocess.run(
+        ["git", "-C", str(repo), "fetch", "--quiet"],
+        capture_output=True,
+        text=True,
+    )
+    return contains()
+
+
 def resolve_commit(value: str, repo: Path | None = None) -> str:
     """The 40-character SHA this run pins, or an explanation of the refusal.
 
     A branch name is refused rather than resolved. Resolving one here would
     read this machine's idea of the branch, which is not what the instance
     would clone, and the difference is invisible in the published item.
+
+    A SHA the remote does not carry is refused for the same reason, one step
+    further on. See `on_a_remote`.
     """
     if SHA.fullmatch(value):
+        if repo is not None and not on_a_remote(value, repo):
+            raise SystemExit(
+                f"--commit {value} is not on any remote branch.\n"
+                f"Every instance clones this repository and checks that commit "
+                f"out, so an unpushed commit fails on every tile and bills for "
+                f"the attempt. Push it first."
+            )
         return value
     hint = ""
     if repo is not None:

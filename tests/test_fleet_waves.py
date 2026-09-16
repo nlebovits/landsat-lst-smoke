@@ -1221,3 +1221,196 @@ class TestTheProjectionIsHonest:
         scenes = dict.fromkeys(tiles, 3354)
         _, dollars, _ = waves.project(tiles, scenes, 20)
         assert 175 < dollars < 215
+
+
+class TestAnUnpushedCommitNeverReachesAnInstance:
+    """MEASURED on 2026-09-16: 60 instances launched at an unpushed commit.
+
+    Every one wrote `MARKER checkout rc=128` about four minutes into billing,
+    having done nothing. The mistake cost about $42 before the run was stopped.
+    At 665 tiles it would have run the whole queue twice on `git checkout`.
+    """
+
+    def a_repo(self, tmp_path, monkeypatch, on_remote):
+        calls = []
+
+        def fake(argv, **kwargs):
+            calls.append(argv)
+            import subprocess as sp
+
+            if argv[3:5] == ["branch", "-r"]:
+                out = "  origin/main\n" if on_remote else ""
+                return sp.CompletedProcess(argv, 0, out, "")
+            return sp.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(launch.subprocess, "run", fake)
+        return calls
+
+    def test_a_commit_on_a_remote_branch_is_accepted(self, tmp_path, monkeypatch):
+        self.a_repo(tmp_path, monkeypatch, on_remote=True)
+        assert launch.resolve_commit(SHA, repo=tmp_path) == SHA
+
+    def test_a_commit_on_no_remote_branch_is_refused(self, tmp_path, monkeypatch):
+        self.a_repo(tmp_path, monkeypatch, on_remote=False)
+        with pytest.raises(SystemExit, match="not on any remote branch"):
+            launch.resolve_commit(SHA, repo=tmp_path)
+
+    def test_the_refusal_says_to_push(self, tmp_path, monkeypatch):
+        self.a_repo(tmp_path, monkeypatch, on_remote=False)
+        with pytest.raises(SystemExit) as err:
+            launch.resolve_commit(SHA, repo=tmp_path)
+        assert "Push it first" in str(err.value)
+
+    def test_it_fetches_once_before_answering_no(self, tmp_path, monkeypatch):
+        """The local copy of the remote refs may be older than the push."""
+        calls = self.a_repo(tmp_path, monkeypatch, on_remote=False)
+        with pytest.raises(SystemExit):
+            launch.resolve_commit(SHA, repo=tmp_path)
+        assert ["fetch", "--quiet"] == calls[1][3:5]
+        assert sum(1 for c in calls if c[3] == "fetch") == 1
+
+    def test_no_repo_means_no_check(self, tmp_path, monkeypatch):
+        """`--commit` alone still resolves, for callers with no working copy."""
+        assert launch.resolve_commit(SHA) == SHA
+
+
+class TestAFailedInstanceStopsBilling:
+    """`reap` leaves a failed instance alone so its log can finish uploading.
+
+    Under waves the wave teardown collected it minutes later. A refill run has
+    no wave teardown. MEASURED on 2026-09-16: 60 failed tiles left the pool and
+    kept both their billing and their share of the account vCPU.
+    """
+
+    def a_pool(self, tmp_path):
+        return waves.Pool(
+            ["S30W065"],
+            fleet_dir=Path("fleet"),
+            manifest_path=tmp_path / "run.json",
+            log_dir=tmp_path / "logs",
+        )
+
+    def failed_pool(self, cfg, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            waves,
+            "launch_one",
+            lambda cfg, tile, *a, **k: {"tile": tile, "instance_id": "i-0abc"},
+        )
+        pool = self.a_pool(tmp_path)
+        pool.fill(
+            1,
+            cfg=cfg,
+            run_id="x",
+            user_data=Path("ud.sh"),
+            manifest=a_manifest(tmp_path, cfg),
+            workers=1,
+            drive_fn=lambda *a: FakeProc(alive=True),
+            say=lambda *a: None,
+        )
+        pool.retire(
+            [FakeState("S30W065", "failed", "compositing")],
+            {"S30W065": "failed"},
+            pool.started["S30W065"] + 1,
+            timeout_minutes=85.0,
+            retries=0,
+            say=lambda *a: None,
+        )
+        return pool
+
+    def test_a_failed_instance_is_condemned(self, cfg, tmp_path, monkeypatch):
+        pool = self.failed_pool(cfg, tmp_path, monkeypatch)
+        assert "i-0abc" in pool.condemned
+        assert pool.condemned["i-0abc"][0] == "S30W065"
+
+    def test_it_is_not_terminated_inside_the_grace(self, cfg, tmp_path, monkeypatch):
+        """Its uploader may still be pushing the log that says why it failed."""
+        stopped = []
+        pool = self.failed_pool(cfg, tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            waves, "terminate_one", lambda cfg, i: (stopped.append(i), (0, ""))[1]
+        )
+        assert pool.sweep(cfg, 0.0, say=lambda *a: None) == 0
+        assert stopped == []
+
+    def test_it_is_terminated_once_the_grace_expires(self, cfg, tmp_path, monkeypatch):
+        stopped = []
+        pool = self.failed_pool(cfg, tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            waves, "terminate_one", lambda cfg, i: (stopped.append(i), (0, ""))[1]
+        )
+        due = pool.condemned["i-0abc"][1] + 1
+        assert pool.sweep(cfg, due, say=lambda *a: None) == 1
+        assert stopped == ["i-0abc"]
+        assert pool.condemned == {}
+
+    def test_a_refused_termination_is_tried_again(self, cfg, tmp_path, monkeypatch):
+        """An instance left condemned is an instance still billing."""
+        pool = self.failed_pool(cfg, tmp_path, monkeypatch)
+        monkeypatch.setattr(waves, "terminate_one", lambda cfg, i: (255, "denied"))
+        due = pool.condemned["i-0abc"][1] + 1
+        assert pool.sweep(cfg, due, say=lambda *a: None) == 0
+        assert "i-0abc" in pool.condemned
+
+    def test_an_uploaded_tile_is_not_condemned(self, cfg, tmp_path, monkeypatch):
+        """`reap` already terminated it. Condemning it would ask twice."""
+        monkeypatch.setattr(
+            waves,
+            "launch_one",
+            lambda cfg, tile, *a, **k: {"tile": tile, "instance_id": "i-0abc"},
+        )
+        pool = self.a_pool(tmp_path)
+        pool.fill(
+            1,
+            cfg=cfg,
+            run_id="x",
+            user_data=Path("ud.sh"),
+            manifest=a_manifest(tmp_path, cfg),
+            workers=1,
+            drive_fn=lambda *a: FakeProc(alive=True),
+            say=lambda *a: None,
+        )
+        pool.retire(
+            [FakeState("S30W065", "finished", waves.UPLOADED_PHASE)],
+            {"S30W065": "finished"},
+            pool.started["S30W065"] + 1,
+            timeout_minutes=85.0,
+            retries=0,
+            say=lambda *a: None,
+        )
+        assert pool.condemned == {}
+
+
+class TestACeilingOfZeroIsNotACeiling:
+    """A ceiling of zero says never launch again.
+
+    MEASURED on 2026-09-16: 60 instances failed at once, left the pool, and
+    kept their quota. The gate read the next refusal against a live count of
+    zero and wrote `account ceiling met at 0 concurrent instance(s)`.
+    """
+
+    def test_a_refusal_with_nothing_live_sets_no_ceiling(self):
+        gate = waves.Gate(80)
+        out = waves.Placement()
+        out.quota = True
+        out.refused = ["S30W065"]
+        gate.observe(out, 0, 0.0, say=lambda *a: None)
+        assert gate.ceiling == 0
+        assert gate.room(0, waves.CAPACITY_BACKOFF_SECONDS + 1) == 80
+
+    def test_it_backs_off_rather_than_asking_every_poll(self):
+        gate = waves.Gate(80)
+        out = waves.Placement()
+        out.quota = True
+        out.refused = ["S30W065"]
+        gate.observe(out, 0, 0.0, say=lambda *a: None)
+        assert gate.room(0, 1.0) == 0
+
+    def test_a_refusal_with_instances_live_still_sets_the_ceiling(self):
+        gate = waves.Gate(80)
+        out = waves.Placement()
+        out.quota = True
+        out.refused = ["S30W065"]
+        gate.observe(out, 60, 0.0, say=lambda *a: None)
+        assert gate.ceiling == 60
+        assert gate.room(60, 1.0) == 0
+        assert gate.room(59, 1.0) == 1
