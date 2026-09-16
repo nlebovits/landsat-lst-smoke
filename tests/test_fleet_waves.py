@@ -72,11 +72,46 @@ class TestAQuotaRefusalNarrowsTheWave:
             )
 
         monkeypatch.setattr(launch, "aws_try", fake)
-        with pytest.raises(SystemExit):
+        with pytest.raises(launch.CapacityExhausted):
             launch.run_instances(
                 cfg, "n", "S30W065", Path("ud.sh"), say=lambda *a: None
             )
         assert len(calls) == len(launch.subnet_candidates(cfg))
+
+    def test_every_zone_full_does_not_kill_the_run(self, cfg, monkeypatch):
+        """This used to be a `SystemExit`, which ended a whole continent.
+
+        At width 20 it never fired. At width 60 or more, one tile meeting a
+        full region would have taken the other 600 with it.
+        """
+
+        def fake(argv):
+            return (
+                255,
+                "",
+                f"An error occurred ({launch.CAPACITY_ERROR}) when calling it",
+            )
+
+        monkeypatch.setattr(launch, "aws_try", fake)
+        with pytest.raises(launch.LaunchRefused) as caught:
+            launch.run_instances(
+                cfg, "n", "S30W065", Path("ud.sh"), say=lambda *a: None
+            )
+        assert not isinstance(caught.value, SystemExit)
+        assert caught.value.tile == "S30W065"
+        assert caught.value.code == launch.CAPACITY_ERROR
+
+    def test_a_malformed_request_still_stops_the_run(self, cfg, monkeypatch):
+        """Only quota and capacity are recoverable. Everything else is a bug."""
+
+        def fake(argv):
+            return (255, "", "An error occurred (InvalidGroup.NotFound) when calling")
+
+        monkeypatch.setattr(launch, "aws_try", fake)
+        with pytest.raises(SystemExit):
+            launch.run_instances(
+                cfg, "n", "S30W065", Path("ud.sh"), say=lambda *a: None
+            )
 
 
 class TestARefusedInstanceLeavesNothingBehind:
@@ -178,6 +213,7 @@ class TestTheWidthSurvivesTheWave:
             manifest_dir=tmp_path,
             poll_seconds=0.0,
             timeout_minutes=1.0,
+            launch_workers=1,
         )
         return argparse.Namespace(**(base | over))
 
@@ -707,3 +743,481 @@ class TestAFinishedInstanceStopsBilling:
             say=lambda *a: None,
         )
         assert fresh == set()
+
+
+class FakeProc:
+    """A `drive.sh` that is already finished, or still going."""
+
+    def __init__(self, returncode=0, alive=False):
+        self.returncode = returncode
+        self._alive = alive
+        self.terminated = False
+
+    def poll(self):
+        return None if self._alive else self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self._alive = False
+
+
+class FakeState:
+    """What `watch.classify` returns, without a bucket behind it."""
+
+    def __init__(self, tile, status="running", phase="compositing", detail=""):
+        self.tile = tile
+        self.status = status
+        self.phase = phase
+        self.detail = detail
+
+
+def a_manifest(tmp_path, cfg):
+    return launch.RunManifest(
+        tmp_path / "run.json", {"run_id": "x", "commit": SHA, "config": cfg}
+    )
+
+
+class TestInstancesArePlacedInParallel:
+    """MEASURED: a serial launcher placed one instance every 22 seconds.
+
+    Almost all of it is `aws ec2 wait instance-running`, which polls on a 15
+    second cycle. 665 tiles serially is 4.1 hours of launching alone, which on
+    its own misses a one-day run.
+    """
+
+    def test_every_tile_is_placed(self, cfg, tmp_path, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            waves,
+            "launch_one",
+            lambda cfg, tile, *a, **k: seen.append(tile) or {"tile": tile},
+        )
+        tiles = ["S30W065", "S30W060", "S35W055", "S35W060"]
+        out = waves.launch_many(
+            tiles,
+            cfg=cfg,
+            run_id="x",
+            user_data=Path("ud.sh"),
+            manifest=a_manifest(tmp_path, cfg),
+            workers=4,
+            say=lambda *a: None,
+        )
+        assert sorted(e["tile"] for e in out.placed) == sorted(tiles)
+        assert out.refused == []
+        assert sorted(seen) == sorted(tiles)
+
+    def test_the_launches_actually_overlap(self, cfg, tmp_path, monkeypatch):
+        """Four 0.2 s launches on four workers finish in well under 0.8 s."""
+        import time
+
+        def slow(cfg, tile, *a, **k):
+            time.sleep(0.2)
+            return {"tile": tile}
+
+        monkeypatch.setattr(waves, "launch_one", slow)
+        start = time.monotonic()
+        waves.launch_many(
+            ["S30W065", "S30W060", "S35W055", "S35W060"],
+            cfg=cfg,
+            run_id="x",
+            user_data=Path("ud.sh"),
+            manifest=a_manifest(tmp_path, cfg),
+            workers=4,
+            say=lambda *a: None,
+        )
+        assert (time.monotonic() - start) < 0.6
+
+    def test_a_quota_refusal_stops_the_rest_from_asking(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        """Quota is account-wide. Asking again costs a key pair per tile."""
+        asked = []
+
+        def fake(cfg, tile, *a, **k):
+            asked.append(tile)
+            raise launch.QuotaExhausted(tile, "VcpuLimitExceeded", "full")
+
+        monkeypatch.setattr(waves, "launch_one", fake)
+        out = waves.launch_many(
+            [f"S{n:02d}W060" for n in range(10, 60, 5)],
+            cfg=cfg,
+            run_id="x",
+            user_data=Path("ud.sh"),
+            manifest=a_manifest(tmp_path, cfg),
+            workers=1,
+            say=lambda *a: None,
+        )
+        assert out.quota is True
+        assert len(asked) == 1
+        assert len(out.refused) == 10
+
+    def test_a_capacity_refusal_stops_only_its_own_tile(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        """One full region moment is not a reason to stop placing other tiles."""
+
+        def fake(cfg, tile, *a, **k):
+            if tile == "S35W055":
+                raise launch.CapacityExhausted(tile, launch.CAPACITY_ERROR, "full")
+            return {"tile": tile}
+
+        monkeypatch.setattr(waves, "launch_one", fake)
+        out = waves.launch_many(
+            ["S30W065", "S35W055", "S30W060"],
+            cfg=cfg,
+            run_id="x",
+            user_data=Path("ud.sh"),
+            manifest=a_manifest(tmp_path, cfg),
+            workers=1,
+            say=lambda *a: None,
+        )
+        assert out.quota is False
+        assert out.refused == ["S35W055"]
+        assert sorted(e["tile"] for e in out.placed) == ["S30W060", "S30W065"]
+
+    def test_an_unrecoverable_error_still_stops_the_run(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        """A wrong security group is a bug, not something a retry fixes."""
+
+        def fake(cfg, tile, *a, **k):
+            raise SystemExit("aws ec2 run-instances failed")
+
+        monkeypatch.setattr(waves, "launch_one", fake)
+        with pytest.raises(SystemExit):
+            waves.launch_many(
+                ["S30W065"],
+                cfg=cfg,
+                run_id="x",
+                user_data=Path("ud.sh"),
+                manifest=a_manifest(tmp_path, cfg),
+                workers=2,
+                say=lambda *a: None,
+            )
+
+
+class TestTheManifestSurvivesConcurrentWriters:
+    """Every thread writes the same file through one fixed temporary path.
+
+    An entry lost to that race is a running instance nobody can terminate.
+    """
+
+    def test_no_entry_is_lost(self, tmp_path, cfg):
+        from concurrent.futures import ThreadPoolExecutor
+
+        manifest = a_manifest(tmp_path, cfg)
+        tiles = [f"N{n:02d}E010" for n in range(0, 50)]
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(lambda t: manifest.add({"tile": t}), tiles))
+        assert len(manifest.instances) == len(tiles)
+        on_disk = json.loads((tmp_path / "run.json").read_text())
+        assert len(on_disk["instances"]) == len(tiles)
+        assert sorted(e["tile"] for e in on_disk["instances"]) == sorted(tiles)
+
+
+class TestTheGateAnswersRefusalsDifferently:
+    """Quota is an account fact. Capacity is one type in four zones, for now."""
+
+    def test_an_empty_pool_may_ask_for_the_full_width(self):
+        assert waves.Gate(80).room(0, 0.0) == 80
+
+    def test_a_full_pool_asks_for_nothing(self):
+        assert waves.Gate(80).room(80, 0.0) == 0
+
+    def test_a_quota_refusal_caps_the_next_ask(self):
+        gate = waves.Gate(80)
+        out = waves.Placement()
+        out.quota = True
+        out.refused = ["S30W065"]
+        gate.observe(out, 34, 0.0, say=lambda *a: None)
+        assert gate.room(34, 1.0) == 0
+        assert gate.room(33, 1.0) == 1
+
+    def test_the_cap_expires_so_a_busy_hour_does_not_set_the_day(self):
+        """The account may have been busy with somebody else's work."""
+        gate = waves.Gate(80)
+        out = waves.Placement()
+        out.quota = True
+        out.refused = ["S30W065"]
+        gate.observe(out, 34, 0.0, say=lambda *a: None)
+        later = waves.CAPACITY_BACKOFF_SECONDS + 1
+        assert gate.room(34, later) == 80 - 34
+
+    def test_a_full_region_is_not_asked_again_at_once(self):
+        gate = waves.Gate(80)
+        out = waves.Placement()
+        out.refused = ["S30W065"]
+        gate.observe(out, 0, 0.0, say=lambda *a: None)
+        assert gate.room(0, 1.0) == 0
+        assert gate.room(0, waves.CAPACITY_BACKOFF_SECONDS + 1) == 80
+
+    def test_a_partly_filled_ask_is_not_a_refusal(self):
+        """Some placed means the region has room. Do not back off."""
+        gate = waves.Gate(80)
+        out = waves.Placement()
+        out.placed = [{"tile": "S30W065"}]
+        out.refused = ["S35W055"]
+        gate.observe(out, 1, 0.0, say=lambda *a: None)
+        assert gate.room(1, 1.0) == 79
+
+
+class TestThePoolFillsAndRetires:
+    """The wave barrier cost about 20 machine-minutes a tile at width 20."""
+
+    def a_pool(self, tmp_path, tiles):
+        return waves.Pool(
+            tiles,
+            fleet_dir=Path("fleet"),
+            manifest_path=tmp_path / "run.json",
+            log_dir=tmp_path / "logs",
+        )
+
+    def fill(self, pool, cfg, tmp_path, monkeypatch, count):
+        monkeypatch.setattr(
+            waves, "launch_one", lambda cfg, tile, *a, **k: {"tile": tile}
+        )
+        return pool.fill(
+            count,
+            cfg=cfg,
+            run_id="x",
+            user_data=Path("ud.sh"),
+            manifest=a_manifest(tmp_path, cfg),
+            workers=2,
+            drive_fn=lambda *a: FakeProc(alive=True),
+            say=lambda *a: None,
+        )
+
+    def test_filling_takes_from_the_queue_and_drives_each_tile(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        pool = self.a_pool(tmp_path, ["S30W065", "S30W060", "S35W055"])
+        self.fill(pool, cfg, tmp_path, monkeypatch, 2)
+        assert len(pool.live) == 2
+        assert len(pool.drivers) == 2
+        assert pool.queue == ["S35W055"]
+        assert pool.peak == 2
+
+    def test_a_refused_tile_keeps_its_place_at_the_head(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        def fake(cfg, tile, *a, **k):
+            if tile == "S30W065":
+                raise launch.CapacityExhausted(tile, launch.CAPACITY_ERROR, "full")
+            return {"tile": tile}
+
+        monkeypatch.setattr(waves, "launch_one", fake)
+        pool = self.a_pool(tmp_path, ["S30W065", "S30W060", "S35W055"])
+        pool.fill(
+            2,
+            cfg=cfg,
+            run_id="x",
+            user_data=Path("ud.sh"),
+            manifest=a_manifest(tmp_path, cfg),
+            workers=1,
+            drive_fn=lambda *a: FakeProc(alive=True),
+            say=lambda *a: None,
+        )
+        assert pool.queue == ["S30W065", "S35W055"]
+
+    def test_polling_asks_about_the_live_instances_only(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        """Polling the whole run would grow with the tiles already finished."""
+        pool = self.a_pool(tmp_path, [f"N{n:02d}E010" for n in range(0, 40, 5)])
+        self.fill(pool, cfg, tmp_path, monkeypatch, 3)
+        assert len(pool.view(cfg)["instances"]) == 3
+
+    def test_an_uploaded_tile_leaves_the_pool_and_frees_its_slot(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        pool = self.a_pool(tmp_path, ["S30W065", "S30W060"])
+        self.fill(pool, cfg, tmp_path, monkeypatch, 2)
+        states = [
+            FakeState("S30W065", "finished", waves.UPLOADED_PHASE),
+            FakeState("S30W060", "running", "compositing"),
+        ]
+        pool.retire(
+            states,
+            {"S30W065": "finished", "S30W060": "running"},
+            pool.started["S30W065"] + 1,
+            timeout_minutes=85.0,
+            retries=1,
+            say=lambda *a: None,
+        )
+        assert pool.settled == {"S30W065": "finished"}
+        assert list(pool.live) == ["S30W060"]
+        assert pool.queue == []
+
+    def test_a_tile_at_the_marker_without_its_manifest_stays(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        """MEASURED: N00W045 was torn down at `all_done` and lost its manifest."""
+        pool = self.a_pool(tmp_path, ["S30W065"])
+        self.fill(pool, cfg, tmp_path, monkeypatch, 1)
+        states = [FakeState("S30W065", "finished", "all_done", "waiting on upload")]
+        pool.retire(
+            states,
+            {"S30W065": "finished"},
+            pool.started["S30W065"] + 1,
+            timeout_minutes=85.0,
+            retries=1,
+            say=lambda *a: None,
+        )
+        assert list(pool.live) == ["S30W065"]
+        assert pool.settled == {}
+
+    def test_a_failed_tile_goes_back_to_the_queue_once(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        pool = self.a_pool(tmp_path, ["S30W065"])
+        self.fill(pool, cfg, tmp_path, monkeypatch, 1)
+        for _ in range(2):
+            states = [FakeState("S30W065", "failed", "compositing")]
+            pool.retire(
+                states,
+                {"S30W065": "failed"},
+                pool.started["S30W065"] + 1,
+                timeout_minutes=85.0,
+                retries=1,
+                say=lambda *a: None,
+            )
+            if pool.queue:
+                self.fill(pool, cfg, tmp_path, monkeypatch, 1)
+        assert pool.queue == []
+        assert pool.settled == {"S30W065": "failed"}
+        assert pool.attempts["S30W065"] == 2
+
+    def test_a_tile_past_its_own_deadline_is_a_timeout(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        """Each tile carries its own deadline. A pool has no wave to time out."""
+        pool = self.a_pool(tmp_path, ["S30W065"])
+        self.fill(pool, cfg, tmp_path, monkeypatch, 1)
+        states = [FakeState("S30W065", "running", "compositing")]
+        pool.retire(
+            states,
+            {"S30W065": "running"},
+            pool.started["S30W065"] + 86 * 60,
+            timeout_minutes=85.0,
+            retries=0,
+            say=lambda *a: None,
+        )
+        assert pool.settled == {"S30W065": "timeout"}
+        assert pool.live == {}
+
+    def test_retiring_terminates_a_driver_that_is_still_polling(
+        self, cfg, tmp_path, monkeypatch
+    ):
+        pool = self.a_pool(tmp_path, ["S30W065"])
+        self.fill(pool, cfg, tmp_path, monkeypatch, 1)
+        proc = pool.drivers["S30W065"]
+        pool.retire(
+            [FakeState("S30W065", "finished", waves.UPLOADED_PHASE)],
+            {"S30W065": "finished"},
+            pool.started["S30W065"] + 1,
+            timeout_minutes=85.0,
+            retries=1,
+            say=lambda *a: None,
+        )
+        assert proc.terminated is True
+
+
+class TestARunPricesItselfWhileItRuns:
+    """AWS forgets a terminated instance after about an hour.
+
+    A wave run tore down every 40 minutes and priced itself inside that
+    window. A five-hour refill run would reach its report with the first four
+    hours already unpriceable.
+    """
+
+    def snapshots(self, tmp_path, *blocks):
+        path = tmp_path / "snap.txt"
+        path.write_text("\n".join(blocks))
+        return path
+
+    BLOCK = (
+        "=== snapshot {stamp} ===\n"
+        "instance             type           AMI          launch    term      sec\n"
+        "{rows}\n"
+        "=== DERIVED: EC2 ===\n"
+        "  m6id.16xlarge      {total}s / 3600 x $3.7968  = $ 1.00\n"
+    )
+
+    def row(self, iid, sec):
+        return f"{iid}  m6id.16xlarge  ami-04678417  18:14:20  18:53:28  {sec:8d}"
+
+    def test_an_instance_in_two_snapshots_is_counted_once(self, tmp_path):
+        """MEASURED: summing six wave reports gave $346 against a true $195."""
+        first = self.BLOCK.format(
+            stamp="a", rows=self.row("i-0000000000000000a", 3600), total=3600
+        )
+        second = self.BLOCK.format(
+            stamp="b",
+            rows=self.row("i-0000000000000000a", 3600)
+            + "\n"
+            + self.row("i-0000000000000000b", 1800),
+            total=5400,
+        )
+        count, seconds, dollars = waves.total_from_snapshots(
+            self.snapshots(tmp_path, first, second)
+        )
+        assert count == 2
+        assert seconds == 5400
+        assert dollars == pytest.approx(1.5 * 3.7968, rel=1e-6)
+
+    def test_a_growing_instance_is_priced_at_its_final_seconds(self, tmp_path):
+        """Instance seconds only grow, so the largest reading is the last."""
+        first = self.BLOCK.format(
+            stamp="a", rows=self.row("i-0000000000000000a", 600), total=600
+        )
+        second = self.BLOCK.format(
+            stamp="b", rows=self.row("i-0000000000000000a", 3600), total=3600
+        )
+        count, seconds, _ = waves.total_from_snapshots(
+            self.snapshots(tmp_path, first, second)
+        )
+        assert count == 1
+        assert seconds == 3600
+
+    def test_an_empty_file_prices_at_zero(self, tmp_path):
+        path = tmp_path / "snap.txt"
+        path.write_text("")
+        assert waves.total_from_snapshots(path) == (0, 0, 0.0)
+
+
+class TestTheProjectionIsHonest:
+    """A dry run that understates the bill is worse than no dry run."""
+
+    def test_the_fixed_cost_is_carried_per_tile(self):
+        scenes = {"N00E005": 0, "N00E010": 0}
+        hours, dollars, _ = waves.project(list(scenes), scenes, 1)
+        assert hours == pytest.approx(2 * waves.FIXED_SECONDS / 3600)
+        assert dollars == pytest.approx(hours * waves.HOURLY_USD)
+
+    def test_scenes_add_to_the_cost(self):
+        few = waves.project(["N00E005"], {"N00E005": 1000}, 1)[0]
+        many = waves.project(["N00E005"], {"N00E005": 5000}, 1)[0]
+        assert many > few
+        assert (many - few) * 3600 == pytest.approx(4000 * waves.SECONDS_PER_SCENE)
+
+    def test_width_shortens_the_wall_clock_but_not_the_bill(self):
+        tiles = [f"N{n:02d}E010" for n in range(0, 60, 5)]
+        scenes = dict.fromkeys(tiles, 4000)
+        narrow = waves.project(tiles, scenes, 10)
+        wide = waves.project(tiles, scenes, 40)
+        assert narrow[1] == pytest.approx(wide[1])
+        assert wide[2] < narrow[2]
+
+    def test_a_tile_with_no_scene_count_is_not_free(self):
+        """An unknown tile priced at zero would understate the run."""
+        scenes = {"N00E005": 4000}
+        one = waves.project(["N00E005"], scenes, 1)[1]
+        two = waves.project(["N00E005", "N00E010"], scenes, 1)[1]
+        assert two == pytest.approx(2 * one)
+
+    def test_the_model_matches_the_measured_south_america_run(self):
+        """MEASURED: 99 tiles, 348,834 scenes in the continent, about $195."""
+        tiles = [f"T{n:03d}" for n in range(99)]
+        scenes = dict.fromkeys(tiles, 3354)
+        _, dollars, _ = waves.project(tiles, scenes, 20)
+        assert 175 < dollars < 215

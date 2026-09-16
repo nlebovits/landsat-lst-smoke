@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,12 +69,16 @@ QUOTA_ERRORS = (
 )
 
 
-class QuotaExhausted(RuntimeError):
-    """The account may not run another instance right now.
+class LaunchRefused(RuntimeError):
+    """AWS would not place this instance, and the run may continue without it.
 
-    Carries the AWS error code and message. Distinct from `SystemExit` because
-    it is recoverable: the instances already placed are fine, and the caller
-    decides whether to wait, run a narrower wave, or stop.
+    Both subclasses leave the caller in a good state. The key pair is deleted,
+    the private key is removed, and the manifest entry is dropped, so the tile
+    is exactly as it was before the attempt. The caller decides whether to wait,
+    run narrower, or give the tile back to the queue.
+
+    Distinct from `SystemExit`, which every other launch error still raises. A
+    wrong security group or an expired token is not something a retry fixes.
     """
 
     def __init__(self, tile: str, code: str, detail: str):
@@ -81,6 +86,28 @@ class QuotaExhausted(RuntimeError):
         self.tile = tile
         self.code = code
         self.detail = detail
+
+
+class QuotaExhausted(LaunchRefused):
+    """The account already runs as many instances as it may.
+
+    Account-and-region wide, so every other pending launch would meet it too.
+    A caller stops asking for more and runs what it has.
+    """
+
+
+class CapacityExhausted(LaunchRefused):
+    """Every configured zone is out of this instance type right now.
+
+    A region fact, not an account fact, and a temporary one. MEASURED on
+    2026-09-15: single zones refused `m6id.16xlarge` repeatedly while other
+    zones placed it seconds later.
+
+    This used to be a `SystemExit`. At width 20 it never fired. At width 60 or
+    more it becomes likely, and killing a five-hour run over one tile that
+    could be relaunched a minute later is the wrong trade. The tile goes back
+    to the queue instead.
+    """
 
 
 #: The error code out of an AWS CLI failure. Matched at the position the CLI
@@ -393,7 +420,9 @@ def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -
         took an hour to place four instances says why.
 
     Raises:
-        SystemExit: on any non-capacity error, or when every zone is full.
+        QuotaExhausted: when the account may not run another instance.
+        CapacityExhausted: when every configured zone is out of this type.
+        SystemExit: on any other error, which a retry would not fix.
     """
     refusals = []
     candidates = subnet_candidates(cfg)
@@ -420,10 +449,12 @@ def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -
             f"trying the next zone",
         )
     zones = ", ".join(zone for zone, _ in candidates)
-    raise SystemExit(
+    raise CapacityExhausted(
+        tile,
+        CAPACITY_ERROR,
         f"every configured zone refused a {cfg['instance']['type']} for "
-        f"{tile} with {CAPACITY_ERROR}: {zones}. Nothing was launched for this "
-        f"tile. Instances already launched are in the manifest."
+        f"{tile}: {zones}. Nothing was launched for this tile. Instances "
+        f"already launched are in the manifest.",
     )
 
 
@@ -445,12 +476,22 @@ class RunManifest:
         self.path = Path(path)
         self.header = dict(header)
         self.instances: list[dict] = []
+        # Reentrant, because `add` and `remove` both flush while holding it.
+        #
+        # The launcher used to place instances one at a time, so nothing here
+        # was ever touched by two threads. Placing them in parallel makes every
+        # method below a critical section twice over: the list is mutated, and
+        # `write` stages through one fixed temporary path that a second writer
+        # would overwrite mid-flight. Either race publishes a manifest missing
+        # an instance that is running and billing.
+        self.lock = threading.RLock()
         self.write()
 
     def add(self, entry: dict) -> dict:
         """Record one instance and flush. Returns the entry, to be mutated."""
-        self.instances.append(entry)
-        self.write()
+        with self.lock:
+            self.instances.append(entry)
+            self.write()
         return entry
 
     def remove(self, entry: dict) -> None:
@@ -461,14 +502,16 @@ class RunManifest:
         would report it `gone` forever and `teardown.py` would skip it, so the
         entry is removed once its key is deleted.
         """
-        self.instances = [e for e in self.instances if e is not entry]
-        self.write()
+        with self.lock:
+            self.instances = [e for e in self.instances if e is not entry]
+            self.write()
 
     def write(self) -> None:
-        payload = dict(self.header) | {"instances": self.instances}
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=1))
-        os.replace(tmp, self.path)
+        with self.lock:
+            payload = dict(self.header) | {"instances": self.instances}
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, indent=1))
+            os.replace(tmp, self.path)
 
 
 def delete_key_pair(cfg: dict, name: str) -> bool:
@@ -553,7 +596,7 @@ def launch_one(
 
     try:
         placed = run_instances(cfg, name, tile, user_data)
-    except QuotaExhausted:
+    except LaunchRefused:
         # The key opens nothing. Leaving it behind accumulates one dead key
         # pair per refusal, in EC2 and in ~/.ssh, across every wave.
         delete_key_pair(cfg, name)
