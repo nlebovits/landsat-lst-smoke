@@ -28,10 +28,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +70,29 @@ QUOTA_ERRORS = (
     "MaxSpotInstanceCountExceeded",
 )
 
+#: The errors that mean "you are asking too fast", not "you may not have this".
+#:
+#: MEASURED on 2026-09-16: placing 80 instances through 8 threads, minutes
+#: after terminating 60, drew `RequestLimitExceeded` on `ec2:RunInstances`.
+#: The launcher treated it as fatal, so it killed the run after 62 instances
+#: and the teardown terminated all of them. About $31 for nothing.
+#:
+#: A throttle is the one AWS error that asks for exactly one thing: wait and
+#: try again. The AWS CLI already retries twice on its own, so the wait here
+#: starts above the wait it has already done.
+THROTTLE_ERRORS = (
+    "RequestLimitExceeded",
+    "Throttling",
+    "ThrottlingException",
+    "RequestThrottled",
+)
+
+#: How many times one zone is asked again after a throttle, and the first wait.
+#: The wait doubles each time with jitter, so six attempts span about two
+#: minutes. Beyond that the tile goes back to the queue and another one tries.
+THROTTLE_RETRIES = 6
+THROTTLE_BACKOFF_SECONDS = 2.0
+
 
 class LaunchRefused(RuntimeError):
     """AWS would not place this instance, and the run may continue without it.
@@ -93,6 +118,14 @@ class QuotaExhausted(LaunchRefused):
 
     Account-and-region wide, so every other pending launch would meet it too.
     A caller stops asking for more and runs what it has.
+    """
+
+
+class Throttled(LaunchRefused):
+    """AWS is asking this account to make fewer requests per second.
+
+    Recoverable by construction. The tile goes back to the queue and the driver
+    tries it again on a later poll, by which time the burst has drained.
     """
 
 
@@ -454,6 +487,35 @@ def aws(argv: list[str]) -> str:
     return stdout
 
 
+def wait_out_throttling(argv: list[str], tile: str, say=print) -> tuple[int, str, str]:
+    """One AWS call, asked again while AWS is only asking us to slow down.
+
+    A throttle is not a refusal. It carries no information about capacity or
+    quota, so moving to another zone answers a question nobody asked and
+    spends another request against the same rate limit. The only useful reply
+    is to wait, and each wait is longer than the last.
+
+    Jitter matters because the threads that met the limit met it together.
+    Backing off in lockstep rebuilds the burst that caused it.
+
+    Raises:
+        Throttled: when AWS is still throttling after `THROTTLE_RETRIES`.
+    """
+    wait = THROTTLE_BACKOFF_SECONDS
+    for attempt in range(THROTTLE_RETRIES):
+        code, stdout, stderr = aws_try(argv)
+        detail = stderr or stdout
+        if code == 0 or error_code(detail) not in THROTTLE_ERRORS:
+            return code, stdout, stderr
+        if attempt == THROTTLE_RETRIES - 1:
+            raise Throttled(tile, error_code(detail) or "Throttling", detail)
+        pause = wait * (0.5 + random.random())
+        say(f"{tile}  AWS is throttling, waiting {pause:.0f}s")
+        time.sleep(pause)
+        wait *= 2
+    raise AssertionError("unreachable")
+
+
 def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -> dict:
     """One instance, trying each configured zone while capacity is the reason.
 
@@ -476,7 +538,7 @@ def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -
     candidates = subnet_candidates(cfg)
     for zone, subnet in candidates:
         argv = run_instances_argv(cfg, name, tile, user_data, subnet=subnet)
-        code, stdout, stderr = aws_try(argv)
+        code, stdout, stderr = wait_out_throttling(argv, tile, say=say)
         if code == 0:
             return {
                 "instance_id": stdout,

@@ -131,11 +131,16 @@ RETRYABLE = ("failed", "gone", "hung", "timeout", "not-driven", "upload-lost")
 #: on a 15 second cycle, so the time is spent waiting rather than computing.
 #: 665 tiles at 22 seconds each is 4.1 hours of launching alone.
 #:
-#: Eight is chosen against the waiter, not against the CPU. Eight concurrent
-#: waiters bring the effective rate to about 3 seconds per instance, which puts
-#: 665 launches under 35 minutes. Going wider trades against the EC2 API
-#: request rate, which answers a burst and then throttles.
-LAUNCH_WORKERS = 8
+#: Four is chosen against two limits at once. Four concurrent waiters bring the
+#: effective rate to about 6 seconds per instance, which puts 665 launches
+#: under 70 minutes and a pool of 60 under 7 minutes.
+#:
+#: It was eight. MEASURED on 2026-09-16: eight threads placing 80 instances,
+#: minutes after terminating 60, drew `RequestLimitExceeded` on
+#: `ec2:RunInstances` after 62 of them. `launch.THROTTLE_ERRORS` now waits that
+#: out rather than failing, but a rate that does not provoke the limit is
+#: better than a rate that recovers from it.
+LAUNCH_WORKERS = 4
 
 #: How often a run prices itself while it is still running.
 #:

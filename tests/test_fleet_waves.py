@@ -1414,3 +1414,79 @@ class TestACeilingOfZeroIsNotACeiling:
         assert gate.ceiling == 60
         assert gate.room(60, 1.0) == 0
         assert gate.room(59, 1.0) == 1
+
+
+class TestAThrottleIsNotAFailure:
+    """MEASURED on 2026-09-16: `RequestLimitExceeded` killed a 665-tile run.
+
+    Eight threads placing 80 instances, minutes after terminating 60, drew
+    `ec2:RunInstances` throttling. The launcher treated it as fatal, so the run
+    died after 62 instances and the teardown terminated all of them. About $31
+    for nothing. A throttle asks for one thing: wait, then ask again.
+    """
+
+    THROTTLE = (
+        "An error occurred (RequestLimitExceeded) when calling the RunInstances "
+        "operation (reached max retries: 2): Request limit exceeded."
+    )
+
+    def test_it_waits_and_succeeds(self, monkeypatch):
+        replies = [(255, "", self.THROTTLE), (255, "", self.THROTTLE), (0, "i-0a", "")]
+        monkeypatch.setattr(launch, "aws_try", lambda argv: replies.pop(0))
+        monkeypatch.setattr(launch.time, "sleep", lambda s: None)
+        code, out, _ = launch.wait_out_throttling(
+            ["aws"], "S30W065", say=lambda *a: None
+        )
+        assert (code, out) == (0, "i-0a")
+        assert replies == []
+
+    def test_the_wait_grows(self, monkeypatch):
+        waits = []
+        replies = [(255, "", self.THROTTLE)] * 3 + [(0, "i-0a", "")]
+        monkeypatch.setattr(launch, "aws_try", lambda argv: replies.pop(0))
+        monkeypatch.setattr(launch.time, "sleep", waits.append)
+        launch.wait_out_throttling(["aws"], "S30W065", say=lambda *a: None)
+        assert len(waits) == 3
+        assert waits[2] > waits[0]
+
+    def test_a_persistent_throttle_returns_the_tile_to_the_queue(self, monkeypatch):
+        """Recoverable, so another tile may go first and this one tries later."""
+        monkeypatch.setattr(launch, "aws_try", lambda argv: (255, "", self.THROTTLE))
+        monkeypatch.setattr(launch.time, "sleep", lambda s: None)
+        with pytest.raises(launch.Throttled) as err:
+            launch.wait_out_throttling(["aws"], "S30W065", say=lambda *a: None)
+        assert not isinstance(err.value, SystemExit)
+        assert err.value.tile == "S30W065"
+
+    def test_a_throttle_does_not_walk_the_zones(self, cfg, monkeypatch):
+        """A throttle says nothing about capacity. Another zone spends another
+        request against the same rate limit."""
+        subnets = []
+
+        def fake(argv):
+            subnets.append(argv[argv.index("--subnet-id") + 1])
+            return (255, "", self.THROTTLE)
+
+        monkeypatch.setattr(launch, "aws_try", fake)
+        monkeypatch.setattr(launch.time, "sleep", lambda s: None)
+        with pytest.raises(launch.Throttled):
+            launch.run_instances(
+                cfg, "n", "S30W065", Path("ud.sh"), say=lambda *a: None
+            )
+        assert len(set(subnets)) == 1
+
+    def test_a_non_throttle_error_is_returned_at_once(self, monkeypatch):
+        """Capacity and quota still reach the caller on the first reply."""
+        calls = []
+
+        def fake(argv):
+            calls.append(argv)
+            return (255, "", f"An error occurred ({launch.CAPACITY_ERROR}) calling it")
+
+        monkeypatch.setattr(launch, "aws_try", fake)
+        code, _, _ = launch.wait_out_throttling(["aws"], "S30W065", say=lambda *a: None)
+        assert code == 255
+        assert len(calls) == 1
+
+    def test_the_launcher_asks_slowly_enough_to_avoid_the_limit(self):
+        assert waves.LAUNCH_WORKERS <= 4
