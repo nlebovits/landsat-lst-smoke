@@ -20,6 +20,12 @@ evidence/qa-parity/*.npy
 # because a pattern holding a slash anchors here, and `*` stops at one.
 composite-run/
 **/catalog/
+# The published catalog is the one exception. `catalog/` at the repository
+# root is tracked, and it is the source of truth for every metadata object in
+# the bucket. The negation names the directory itself, so git resumes walking
+# into it. The COGs it describes stay in object storage.
+!/catalog/
+/catalog/**/*.tif
 *.staging.tif
 *.staging.tif.lock
 **/rehearsal-scenes/

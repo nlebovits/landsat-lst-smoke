@@ -130,9 +130,22 @@ dev = [
   # `addopts` below for why the worker count is fixed rather than `auto`.
   "pytest-xdist>=3.6",
   # The Portolan conformance validator. tests/test_cog_catalog.py runs it
-  # against a catalog built in tmp_path, so CI fails on a non-conformant COG.
+  # against a catalog built in tmp_path and against the tracked `catalog/`,
+  # so CI fails on a non-conformant COG and on a stale published tree.
   # 0.1.8 is the first release carrying the v0.2.0 rules the writer targets.
-  "rashid>=0.1.8",
+  # The ceiling is the next minor: a release adds rules, and a tree that was
+  # conformant on Tuesday is not conformant on Wednesday without a look.
+  # `docs/conformance.md` states what was measured with which version, and
+  # the same bounds are asserted from inside the gate.
+  "rashid>=0.1.8,<0.2.0",
+  # The published `AGENTS.md` decode example imports it, and
+  # `tests/test_documented_examples.py` runs that example in a subprocess.
+  # It was dropped from this file once, as a DEP002 "declared but never
+  # imported", because back then it appeared only inside a generated string
+  # that nothing executed. That is exactly the example that shipped broken.
+  # Declared here rather than in `[project] dependencies` because no module
+  # under `src/lst` imports it and an instance never needs it.
+  "rioxarray",
 ]
 
 # Imported names against declared dependencies. Two entries, and both are
@@ -143,11 +156,16 @@ dev = [
 known_first_party = ["lst"]
 
 [tool.deptry.per_rule_ignores]
-# DEP002 is "declared but never imported". deptry found four. Three were real
+# DEP002 is "declared but never imported". deptry found four. Two were real
 # and are gone: `planetary-computer`, which only ever appeared as a refused
-# `--source` choice; `rioxarray`, which appeared only inside a usage snippet
-# the catalog writer emits for its readers; and `rich`, which nothing imported
-# at all.
+# `--source` choice, and `rich`, which nothing imported at all.
+#
+# `rioxarray` was the third, and removing it was the wrong call. It appeared
+# only inside a usage snippet the catalog writer emits for its readers, and
+# deptry was right that no module imports it. It was also the one dependency
+# the published example needed. Nothing executed that snippet, so nothing
+# noticed when it broke. It is back in the `dev` group now, and
+# `tests/test_documented_examples.py` is what imports it.
 #
 # `pyogrio` is the fourth and it stays. geopandas loads it as an IO engine
 # rather than this code importing it, and which engine is present changes

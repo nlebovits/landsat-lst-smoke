@@ -103,6 +103,24 @@ jobs:
       - name: pytest
         run: uv run pytest
 
+      # Every Python block in README.md and in the four published documents,
+      # run against https://data.source.coop/nlebovits/landsat-lst/. A
+      # documented example is a promise, and a generated one is a string that
+      # nothing executes: the AGENTS.md decode example shipped for months
+      # calling `da.rio.scales[0]`, which rioxarray has never had.
+      #
+      # Its own step, because `addopts` deselects the `network` mark. The
+      # bucket is public and these are ranged GETs against two tiles, so this
+      # costs about a minute of wall clock and no money.
+      #
+      # Scoped to the one file rather than run as a bare `-m network`. That
+      # expression also collects `test_load_parity.py`, which carries both
+      # marks and reads `s3://usgs-landsat` requester-pays, and
+      # `test_inventory_parity.py`, which would gate every pull request on
+      # the USGS bulk metadata service staying up.
+      - name: Documented examples run against the published catalog
+        run: uv run pytest -m network tests/test_documented_examples.py
+
       # An instance runs on `[project] dependencies` alone, not on the dev
       # group the suite above runs inside, and that suite cannot tell the two
       # apart. This step can: it builds a checkout at a fresh path, runs

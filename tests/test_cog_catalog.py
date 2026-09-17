@@ -12,6 +12,8 @@ tree the writer produced and reports every Portolan requirement it breaks.
 """
 
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -33,8 +35,10 @@ from lst.cog_catalog import (
     VALID_PERCENT_KEY,
     _renders,
     _rfc3339,
+    _worked_example_item,
     _verify_cog,
     band_statistics,
+    canonical_readme_path,
     catalog_provenance,
     check_raster_shape,
     correction_lineage,
@@ -773,6 +777,43 @@ def pair_report(pair):
     return validate(pair)
 
 
+#: Error-severity rule ids this catalog is allowed to break.
+#:
+#: Empty, and `docs/conformance.md` is what keeps it empty. Adding a rule id
+#: here without an entry in that document fails
+#: `test_the_allow_list_matches_the_conformance_document` below. That is the
+#: point: a finding leaves the build red until someone writes down why.
+ACCEPTED: frozenset[str] = frozenset()
+
+#: The one SHOULD this catalog does not meet. `docs/conformance.md` states the
+#: cost of meeting it and names the tracking issue.
+ACCEPTED_WARNINGS = frozenset({"PTL-CAT-001"})
+
+#: rashid 0.1.6 carries no v0.2.0 schema and reports `PTL-SCH-000` in place of
+#: validating, so it passes trees this gate rejects. The floor is 0.1.8. The
+#: ceiling is the next minor, because a new release adds rules and a tree that
+#: was conformant on Tuesday is not conformant on Wednesday without a look.
+RASHID_FLOOR = (0, 1, 8)
+RASHID_CEILING = (0, 2, 0)
+
+PUBLISHED_CATALOG = Path(__file__).resolve().parents[1] / "catalog"
+
+
+@pytest.fixture(scope="module")
+def published_report():
+    """rashid over the tracked tree. 771 files, so it runs once per module."""
+    from rashid import validate
+
+    return validate(PUBLISHED_CATALOG)
+
+
+def _rule_ids_in_conformance_document() -> set[str]:
+    document = PUBLISHED_CATALOG.parent / "docs" / "conformance.md"
+    table = document.read_text(encoding="utf-8").split("## Accepted deviations")[1]
+    table = table.split("\n## ")[0]
+    return set(re.findall(r"`(PTL-[A-Z]{3}-\d{3})`", table))
+
+
 class TestPortolanConformance:
     def test_rashid_reports_no_broken_requirement(self, report):
         assert not report.errors, "\n".join(f.message for f in report.errors)
@@ -788,6 +829,104 @@ class TestPortolanConformance:
         assert not pair_report.findings, "\n".join(
             f.message for f in pair_report.findings
         )
+
+
+class TestThePublishedCatalogIsConformant:
+    """The gate on `catalog/`, which is what the bucket receives.
+
+    The three tests above build a catalog from synthetic pixels and check the
+    generator. These check the tree that ships. A generator can be correct and
+    the tracked tree still stale, because an item document is primary: the run
+    writes it and no rebuild reproduces it without the COGs.
+    """
+
+    def test_the_validator_is_the_version_this_repository_was_checked_with(self):
+        from importlib.metadata import version as installed_version
+
+        raw = installed_version("rashid")
+        version = tuple(int(part) for part in raw.split(".")[:3])
+        assert RASHID_FLOOR <= version < RASHID_CEILING, (
+            f"rashid {raw} is outside the pinned range. "
+            "`docs/conformance.md` records what was measured with which "
+            "version, and pyproject.toml holds the same bounds."
+        )
+
+    def test_no_error_outside_the_accepted_set(self, published_report):
+        broken = [f for f in published_report.errors if f.rule_id not in ACCEPTED]
+        assert not broken, "\n".join(f"{f.rule_id}: {f.message}" for f in broken)
+
+    def test_no_warning_outside_the_accepted_set(self, published_report):
+        warnings = [
+            f
+            for f in published_report.findings
+            if f not in published_report.errors and f.rule_id not in ACCEPTED_WARNINGS
+        ]
+        assert not warnings, "\n".join(f"{f.rule_id}: {f.message}" for f in warnings)
+
+    def test_the_accepted_warning_is_still_there(self, published_report):
+        """A waiver for a finding nobody reports is a stale waiver.
+
+        `docs/conformance.md` costs a reader time and points at an open issue.
+        When the finding goes, both should go with it.
+        """
+        reported = {f.rule_id for f in published_report.findings}
+        assert ACCEPTED_WARNINGS <= reported, (
+            f"{sorted(ACCEPTED_WARNINGS - reported)} is waived in "
+            "docs/conformance.md and rashid no longer reports it. Close the "
+            "tracking issue and delete the row."
+        )
+
+    def test_the_allow_list_matches_the_conformance_document(self):
+        assert _rule_ids_in_conformance_document() == ACCEPTED | ACCEPTED_WARNINGS
+
+
+class TestTheWorkedExample:
+    """Which tile the published decode example opens.
+
+    Sorted by id, the first tile in the live collection is `N00E005`: the Gulf
+    of Guinea, 7.2% valid and the rest ocean. MEASURED 2026-09-17, a 512 by
+    512 window at the centre of it returns 262,144 nodata values and nothing
+    else. A reader who ran the example on that tile saw an empty array.
+    """
+
+    @staticmethod
+    def item(item_id, valid=None):
+        properties = {} if valid is None else {"lst:valid_pixels": valid}
+        return {"id": item_id, "properties": properties}
+
+    def test_the_tile_with_the_most_valid_pixels_wins(self):
+        items = [
+            self.item("N00E005", 23_448_614),
+            self.item("N15E025", 324_000_000),
+            self.item("S30W065", 214_339_334),
+        ]
+        assert _worked_example_item(items) == "N15E025"
+
+    def test_the_lowest_id_breaks_a_tie(self):
+        """Several tiles are wholly valid, so the rule needs a second key.
+
+        Without one, the chosen tile would move whenever the item order
+        changed, and every published document would churn with it.
+        """
+        items = [
+            self.item("N20E005", 324_000_000),
+            self.item("N15E025", 324_000_000),
+            self.item("N20E000", 324_000_000),
+        ]
+        assert _worked_example_item(items) == "N15E025"
+
+    def test_a_missing_count_scores_zero(self):
+        """An item written before the property existed still sorts.
+
+        It sorts last rather than raising, so an older collection picks its
+        lowest id and the example still resolves.
+        """
+        items = [self.item("S10W040"), self.item("N15E025", 1)]
+        assert _worked_example_item(items) == "N15E025"
+
+    def test_the_first_id_wins_when_nothing_carries_a_count(self):
+        items = [self.item("S10W040"), self.item("N15E025")]
+        assert _worked_example_item(items) == "N15E025"
 
 
 class TestASecondTile:
@@ -835,10 +974,33 @@ class TestASecondTile:
         assert one.shape[0] == one.shape[1]
         assert both.shape[0] == pytest.approx(2 * both.shape[1], abs=1)
 
-    def test_the_readme_lists_both_tiles(self, pair):
+    def test_the_readme_describes_the_dataset_rather_than_the_tiles(self, pair):
+        """Where the per-tile list went.
+
+        The published README used to be generated, and it carried a row per
+        tile. At 769 tiles that table was longer than the prose around it and
+        it duplicated `items.parquet`, which answers the same question in one
+        range request. The README is now the repository's canonical text, and
+        it names one tile as an example and no others.
+        """
         readme = (pair / COLLECTION_ID / "README.md").read_text()
-        assert f"./{ITEM_ID}/{ITEM_ID}.json" in readme
-        assert f"./{NEIGHBOUR_ID}/{NEIGHBOUR_ID}.json" in readme
+        assert "| Tile | Land pixels |" not in readme
+        assert f"./{NEIGHBOUR_ID}/{NEIGHBOUR_ID}.json" not in readme
+        assert readme == (pair / "README.md").read_text()
+
+    def test_the_worked_example_names_one_of_the_tiles(self, pair):
+        """The decode example opens a tile this collection actually holds.
+
+        These two fixture items carry no `lst:valid_pixels`, so both score 0
+        and the lowest id wins. That is the fallback path, and it has to
+        produce a URL that resolves rather than an empty tile id.
+        `TestTheWorkedExample` covers the ranking itself.
+        """
+        items = read_items(pair / COLLECTION_ID)
+        chosen = min(items)
+        agents = (pair / COLLECTION_ID / "AGENTS.md").read_text()
+        assert f"/{chosen}/lst_p95.tif" in agents
+        assert agents == (pair / "AGENTS.md").read_text()
 
     def test_rewriting_the_same_tile_is_allowed(self, tmp_path, composite):
         _celsius, lst, qa = composite
@@ -1132,33 +1294,18 @@ class TestCoverageReachesTheItem:
         assert p["lst:valid_pixels"] <= p["lst:land_pixels"]
         assert p["lst:coastal_buffer_valid_pixels"] <= p["lst:coastal_buffer_pixels"]
 
-    def test_the_collection_readme_carries_the_tile_table(self, tmp_path, composite):
-        _item, readme = self.written(tmp_path, composite)
-        assert "| Tile | Land pixels | Land with a temperature |" in readme
-        assert "356,400" in readme
-        assert "99.0%" in readme
-        assert "3,564" in readme
-        assert "Cloud decides how much of a tile exists" in readme
+    def test_the_published_readme_is_the_repository_readme(self, tmp_path, composite):
+        """Where the per-tile numbers went.
 
-    def test_the_readme_says_which_footprint_each_count_describes(
-        self, tmp_path, composite
-    ):
-        _item, readme = self.written(tmp_path, composite)
-        assert "## Coverage on the item" in readme
-        assert "`lst:processing_mask_pixels`" in readme
-        assert "`lst:coastal_buffer_pixels`" in readme
-
-    def test_the_empty_land_paragraph_is_derived_from_the_items(
-        self, tmp_path, composite
-    ):
-        """The sentence used to quote five tiles measured against the mask.
-
-        Changing the denominator left that prose true of a footprint the
-        collection no longer reports, so it is computed from the items instead.
+        The collection README used to hold a 769-row table built from these
+        same properties. It is now a copy of the repository's own README, and
+        the per-tile numbers reach a reader through `items.parquet` and the
+        item documents. A reader who wants the table builds it from those.
         """
         _item, readme = self.written(tmp_path, composite)
-        assert "MEASURED on `S32W065`, 3,564 land pixels came back with no" in readme
-        assert "1.0% of that tile's land" in readme
+        canonical = canonical_readme_path().read_text(encoding="utf-8")
+        assert readme.splitlines()[3] == canonical.splitlines()[3]
+        assert "| Tile | Land pixels |" not in readme
 
     def test_a_run_without_land_geometry_publishes_no_share_of_land(
         self, tmp_path, composite
@@ -1169,7 +1316,9 @@ class TestCoverageReachesTheItem:
         without land is the defect this work exists to end, so the honest answer
         is fewer properties rather than a mislabelled one.
         """
-        item, readme = self.written(tmp_path, composite, coverage=COVERAGE_WITHOUT_LAND)
+        item, _readme = self.written(
+            tmp_path, composite, coverage=COVERAGE_WITHOUT_LAND
+        )
         props = item["properties"]
         assert props["lst:processing_mask_pixels"] == 360_000
         assert props["lst:valid_pixels"] == 356_400
@@ -1181,9 +1330,8 @@ class TestCoverageReachesTheItem:
             "lst:ged_gap_fraction",
         ):
             assert absent not in props
-        assert "| — | — | — | — |" in readme
 
-    def test_a_tile_without_coverage_shows_a_dash_not_a_zero(self, tmp_path, composite):
+    def test_a_tile_without_coverage_publishes_no_fraction(self, tmp_path, composite):
         """Absent and empty are different claims. A tile published before
         these properties existed must not read as fully masked."""
         _celsius, lst, qa = composite
@@ -1198,4 +1346,3 @@ class TestCoverageReachesTheItem:
             (root / COLLECTION_ID / ITEM_ID / f"{ITEM_ID}.json").read_text()
         )
         assert "lst:valid_fraction" not in item["properties"]
-        assert "| — | — | — | — |" in (root / COLLECTION_ID / "README.md").read_text()
