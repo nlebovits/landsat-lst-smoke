@@ -12,8 +12,8 @@ the test finds is the version you read about here:
 ```
 
 MEASURED 2026-09-17 with `rashid` 0.1.8 over 771 files: 0 errors, 1 warning.
-The live probe against `https://data.source.coop/nlebovits/landsat-lst/`
-reports the same, which covers `PTL-LIV-000` through `PTL-LIV-005`.
+The live probe reports 0 errors and 2 warnings. The second one is about the
+probe rather than the catalog, and the section on it below says why.
 
 A `rashid` on `PATH` may be older. Version 0.1.6 carries no v0.2.0 schema and
 reports `PTL-SCH-000` in place of validating, so it passes trees this gate
@@ -28,6 +28,38 @@ parses these rule ids and compares them with the allow-list in the code.
 | Rule | Where | Why | Tracking |
 |---|---|---|---|
 | `PTL-CAT-001` | `lst-p95-2021-2025/collection.json` | The 769 tile directories are the published URL contract, and `README.md` names one of them in its worked example. Regrouping them under subcatalogs moves every item document and both COGs: 769 x 3 objects, and roughly 400 GB of server-side copies. | [#35](https://github.com/nlebovits/landsat-lst-smoke/issues/35) |
+
+## The live probe cannot measure `PTL-LIV-000`
+
+```bash
+.venv/bin/rashid check catalog/ --no-data --live \
+  --live-base-url https://data.source.coop/nlebovits/landsat-lst/
+```
+
+MEASURED 2026-09-17, this reports a `PTL-LIV-000` warning saying that the
+`HEAD` probes failed with `SSL: UNEXPECTED_EOF_WHILE_READING`. The cause is
+the User-Agent header. Source Cooperative's CDN answers `Python-urllib/3.12`
+with `403`, and `rashid` sets no User-Agent of its own:
+
+```
+curl HEAD, default UA           200
+urllib HEAD, default UA         403 Forbidden
+urllib HEAD, UA "curl/8.5.0"    200
+```
+
+So the finding describes the probe client, not the catalog and not the host.
+Measured directly against the same objects, the host meets every live
+requirement the rule covers:
+
+| Check | Measured |
+|---|---|
+| `HEAD` on an item, a COG, and the root catalog | `200` |
+| Ranged GET on `lst_p95.tif` | `206`, `content-range: bytes 0-99/4247873` |
+| `Accept-Ranges` | `bytes` |
+| CORS | `access-control-allow-origin: *`, `GET, HEAD, PUT, POST, DELETE, OPTIONS` |
+
+This is not an accepted deviation, so it is absent from the table above and
+the gate does not allow it. Re-measure it when `rashid` sends a User-Agent.
 
 ## Findings this catalog does not carry, and why that is deliberate
 
