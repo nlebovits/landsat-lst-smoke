@@ -100,6 +100,12 @@ AnthropomorphicCognition      the spec wants a retry, the release teaches the li
 AnthropomorphicJustification  pays for itself, pulls its weight, deserves a look
 ```
 
+One repository-owned rule covers causal language that the package misses:
+
+- `Landsat-Voice.CausalWriter` catches a condition, rule, or threshold used
+  as the subject of a writer verb. State which component writes the output,
+  or say that the condition causes it to write.
+
 `.vale.ini` pins `ai-tells` at v1.37.0. `AnthropomorphicAdjectives` does not
 exist before that release.
 

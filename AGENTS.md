@@ -23,6 +23,103 @@ The code is one installed package, `lst`, under `src/`. Read
   `uv run lst-fleet-plan`, and the rest are in `[project.scripts]`. Never
   `uv run <path>.py` for anything in the package.
 
+  DERIVED from the package metadata, development requires Python 3.12, 3.13, or
+3.14 and [uv](https://docs.astral.sh/uv/). Install the package and its development
+dependencies from the repository root:
+
+```bash
+uv sync
+```
+
+Run package commands through their console scripts. Do not invoke files under
+`src/lst` by path.
+
+### Rehearse locally
+
+This small run uses synthetic scenes, skips the production output mask, and
+writes a local catalog:
+
+```bash
+uv run lst-shard \
+  --bbox=-65.0,-32.5,-64.5,-32.0 \
+  --rehearse 6 \
+  --pixels-per-degree 120 \
+  --chunk 30 \
+  --workers 2 \
+  --threads-per-worker 1 \
+  --no-output-mask \
+  --out-dir ./rehearsal
+```
+
+The command prefixes output with `REHEARSAL:`, and `summary.json` records
+`"synthetic": true`. A rehearsal proves only the execution path, not real-data
+output, capacity, runtime, or cost.
+
+### Prepare production inputs
+
+A real tile needs the complete scene inventory, ASTER GED raster, and both land
+geometries. The repository commits small test slices rather than the production
+artifacts.
+
+Build the land and inventory artifacts first:
+
+```bash
+uv run lst-land-tiles \
+  --out artifacts/land_tiles.parquet \
+  --write-geometry artifacts/land_buffered.gpkg \
+  --write-strict-geometry artifacts/land_strict.gpkg
+
+uv run lst-inventory \
+  --land-tiles artifacts/land_tiles.parquet \
+  --out artifacts/tile_scene_inventory.parquet
+```
+
+The ASTER GED build needs a NASA Earthdata login:
+
+```bash
+uv run python -c "import earthaccess; earthaccess.login(persist=True)"
+uv run lst-aster-ged --out artifacts/aster_numobs.tif
+uv run lst-fleet-plan --out artifacts/fleet_plan.json
+```
+
+### Run one real tile
+
+Build the seam-correction artifact before the composite. Use the same tile,
+window, inventory, and stage directory for both commands:
+
+```bash
+uv run lst-prep \
+  --tile S30W065 \
+  --stage-dir ./stage \
+  --out-dir ./tile-prep
+
+uv run lst-shard \
+  --tile S30W065 \
+  --tile-prep ./tile-prep \
+  --engine fused \
+  --stage-dir ./stage \
+  --out-dir ./composite-run
+```
+
+A full tile requires production-scale memory, storage, and requester-pays S3
+access. Run `lst-prep` and `lst-shard` with `--dry-run` before allocating that
+capacity. The [fleet runbook](fleet/README.md) covers EC2 launch, monitoring,
+teardown, and catalog promotion.
+
+### Check changes
+
+```bash
+uv run ruff check .
+uv run ty check --extra-search-path tests --extra-search-path fleet
+uv run lint-imports --no-logo
+uv run pytest
+vale --minAlertLevel=error README.md FINDINGS.md docs/PROSE.md
+```
+
+The package keeps three layers separate. `lst.*` holds the run path,
+`lst.fleet` holds deployment operations, and `lst.measure` holds one-off
+measurements. Read `src/lst/__init__.py` before changing those boundaries.
+
 ## The pipeline
 
 The composite is a block plan and one submitted task per block
