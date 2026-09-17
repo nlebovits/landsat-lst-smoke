@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -178,6 +179,14 @@ SOURCE_URL = (
 SOURCE_STAC_URL = "https://landsatlook.usgs.gov/stac-server"
 DEFAULT_HOST_NAME = "landsat-lst-smoke"
 DEFAULT_HOST_URL = "https://github.com/nlebovits/landsat-lst-smoke"
+#: Where the published catalog answers. A document that a reader opens from the
+#: bucket cannot use a repository-relative path, so the two link rewrites below
+#: and the agent decode example are built from this.
+#:
+#: `fleet/config.toml` states the same address as a bucket and a prefix, for
+#: the uploader. `tests/test_publish_catalog.py` asserts the two agree, so the
+#: publisher cannot write to one address while the documents name another.
+DEFAULT_PUBLIC_BASE = "https://data.source.coop/nlebovits/landsat-lst"
 #: Landsat Collection 2 carries no use restrictions, which CC0-1.0 states in
 #: SPDX terms. The collection README records the USGS citation request.
 DEFAULT_LICENSE = "CC0-1.0"
@@ -1034,7 +1043,35 @@ def build_collection(
     }
 
 
-def build_root_catalog(collection_id: str, *, updated: str) -> dict[str, Any]:
+def _repository_links(host_url: str) -> tuple[dict[str, str], ...]:
+    """Where a reader takes a metadata correction.
+
+    This catalog is git-backed: the tree under `catalog/` is the source of
+    truth, and `lst-publish-catalog` copies it to the bucket. A reader who
+    finds a wrong licence or a wrong extent can open a pull request, and these
+    two links are how they find out where. Both are absolute, because the
+    repository sits outside the published catalog and a relative href would
+    resolve against the bucket.
+
+    `vcs` and `issues` are best-practice conventions rather than Core
+    requirements. rashid checks neither.
+    """
+    return (
+        {"rel": "vcs", "href": host_url, "title": "Source repository"},
+        {
+            "rel": "issues",
+            "href": f"{host_url}/issues",
+            "title": "Issue tracker",
+        },
+    )
+
+
+def build_root_catalog(
+    collection_id: str,
+    *,
+    updated: str,
+    host_url: str = DEFAULT_HOST_URL,
+) -> dict[str, Any]:
     """The root catalog. One child, and the two documents Portolan requires."""
     return {
         "type": "Catalog",
@@ -1056,6 +1093,7 @@ def build_root_catalog(collection_id: str, *, updated: str) -> dict[str, Any]:
                 "title": "Landsat P95 Land Surface Temperature Composite",
             },
             *PORTOLAN_DOCUMENT_LINKS,
+            *_repository_links(host_url),
         ],
         "updated": updated,
     }
@@ -1082,250 +1120,189 @@ def write_item_mirror(path: Path, items: list[dict[str, Any]]) -> Path:
 
 
 def _decode_snippet(asset_href: str) -> str:
+    """The shortest correct decode, as a runnable block.
+
+    `mask_and_scale=True` reads the scale, the offset and the nodata value out
+    of the file and applies all three, lazily. Nothing here repeats a number
+    that the COG already carries, so a reader cannot copy a stale constant.
+
+    It replaced a two-step form that read `da.rio.scales[0]`. That attribute
+    does not exist. rioxarray 0.23 raises `AttributeError: 'RasterArray'
+    object has no attribute 'scales'`, so the published example had never
+    run. `tests/test_documented_examples.py` is what now stops that shipping.
+    """
     return (
         "```python\n"
         "import rioxarray\n\n"
-        f'da = rioxarray.open_rasterio("{asset_href}", masked=True)\n\n'
-        "# The decoding rule travels with the file.\n"
-        "scale, offset = da.rio.scales[0], da.rio.offsets[0]\n"
-        "celsius = da * scale + offset\n"
+        "# The decoding rule travels with the file. Scale, offset and nodata\n"
+        "# all come out of the COG, and none of them is repeated here.\n"
+        f'celsius = rioxarray.open_rasterio(\n    "{asset_href}",\n'
+        "    mask_and_scale=True,\n)\n"
         "```\n"
     )
 
 
-def _root_readme(collection_id: str) -> str:
-    return (
-        "# Landsat LST Composites\n\n"
-        "Cloud-optimized 95th-percentile land surface temperature composites "
-        "built from Landsat Collection 2 Level-2 scenes.\n\n"
-        "## License\n\n"
-        f"The data carries the `{DEFAULT_LICENSE}` license. Landsat Collection "
-        "2 products are free of use restrictions.\n\n"
-        "## Provenance\n\n"
-        f"Scenes come from the [USGS Landsat Collection 2 Level-2 science "
-        f"products]({SOURCE_URL}). This catalog is a derived mirror, not the "
-        "authoritative source.\n\n"
-        "## Collections\n\n"
-        f"- [`{collection_id}`](./{collection_id}/README.md)\n"
+#: Every repository file a link in the canonical README points at.
+#:
+#: That README is the repository's own front door, so three of its links are
+#: repository-relative. A copy served from the bucket resolves them against the
+#: bucket, where none of the three exists. Source Cooperative resolves a
+#: relative Markdown link one directory higher again, so even a published
+#: sibling would miss.
+#:
+#: `_published_readme` refuses to write a document holding a relative link
+#: this tuple does not name. A fourth relative link added to the canonical
+#: README then fails the build rather than publishing a dead one.
+_REPOSITORY_RELATIVE_LINKS = (
+    "docs/images/aster-ged-coverage-usgs.jpg",
+    "./AGENTS.md",
+    "./LICENSE",
+)
+
+_MARKDOWN_LINK = re.compile(r"\]\(([^)\s]+)\)")
+
+#: Extensions a browser renders inline. These resolve on the raw host; a blob
+#: page serves HTML around the bytes and an `<img>` tag shows nothing.
+_RENDERED_INLINE = (".jpg", ".jpeg", ".png", ".svg", ".gif", ".webp")
+
+
+def _relative_link_targets(markdown: str) -> list[str]:
+    """Every link target in the document naming no scheme and no anchor."""
+    return [
+        target
+        for target in _MARKDOWN_LINK.findall(markdown)
+        if "://" not in target and not target.startswith(("#", "mailto:"))
+    ]
+
+
+def _published_link_rewrites(host_url: str) -> dict[str, str]:
+    """Each repository-relative target, against its absolute repository URL.
+
+    Built from `host_url` rather than from a literal, so a fork rewrites to its
+    own files.
+    """
+    raw = host_url.replace("https://github.com/", "https://raw.githubusercontent.com/")
+    rewrites: dict[str, str] = {}
+    for target in _REPOSITORY_RELATIVE_LINKS:
+        path = target.removeprefix("./")
+        if path.lower().endswith(_RENDERED_INLINE):
+            rewrites[target] = f"{raw}/main/{path}"
+        else:
+            rewrites[target] = f"{host_url}/blob/main/{path}"
+    return rewrites
+
+
+def canonical_readme_path(start: Path | None = None) -> Path:
+    """The repository README, found by walking up from this module.
+
+    Every published README is a copy of that file, so a build that cannot find
+    it stops here. A generated stand-in would publish a description of this
+    dataset that nobody wrote.
+    """
+    here = (start or Path(__file__)).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").is_file() and (parent / "README.md").is_file():
+            return parent / "README.md"
+    raise FileNotFoundError(
+        f"no repository README above {here}. Every published README copies "
+        "that file, so this build cannot write one."
     )
 
 
-def _tile_list(items: list[dict[str, Any]]) -> str:
-    """The collection's tiles, with how much of each one carries a temperature.
+def _published_readme(markdown: str, *, host_url: str = DEFAULT_HOST_URL) -> str:
+    """The canonical README, with its repository-relative links made absolute.
 
-    Rebuilt from the items on disk every time a tile is written, so the table
-    describes the collection as it stands rather than as it was first written.
-    A tile published before `lst:valid_fraction` existed shows a dash rather
-    than a zero, because the two mean different things.
-
-    The land column is the denominator of the two beside it, and it is land
-    rather than the processing mask. A reader who wants the mask reads
-    `lst:processing_mask_pixels` on the item.
+    The repository README is the one description of this dataset and a person
+    wrote it. A published copy carries that text and changes nothing in it
+    except the three links a bucket cannot resolve. The Vale markers travel
+    with the body, so the prose gate reads the copies the way it reads the
+    original.
     """
-    rows = [
-        "| Tile | Land pixels | Land with a temperature | Empty land pixels | "
-        "Land in an ASTER GED gap |",
-        "|---|---|---|---|---|",
-    ]
-    for item in items:
-        item_id = item["id"]
-        props = item.get("properties", {})
-        link = f"[`{item_id}`](./{item_id}/{item_id}.json)"
-        if "lst:valid_fraction" not in props:
-            rows.append(f"| {link} | — | — | — | — |")
-            continue
-        rows.append(
-            f"| {link} | {props['lst:land_pixels']:,} | "
-            f"{props['lst:valid_fraction'] * 100:.1f}% | "
-            f"{props['lst:empty_land_pixels']:,} | "
-            f"{props['lst:ged_gap_fraction'] * 100:.1f}% |"
+    rewrites = _published_link_rewrites(host_url)
+    unknown = sorted(set(_relative_link_targets(markdown)) - set(rewrites))
+    if unknown:
+        raise ValueError(
+            "the canonical README holds relative links this module cannot "
+            f"rewrite for the bucket: {unknown}. Name each one in "
+            "_REPOSITORY_RELATIVE_LINKS."
         )
-    return "\n".join(rows) + "\n"
+    for target, absolute in rewrites.items():
+        markdown = markdown.replace(f"]({target})", f"]({absolute})")
+    return markdown
 
 
-def _empty_land_range(items: list[dict[str, Any]]) -> str:
-    """The published spread of empty land, as a paragraph, or nothing.
+def _worked_example_item(items: list[dict[str, Any]]) -> str:
+    """The tile a documented example should open.
 
-    Derived from the items rather than written down, because the sentence that
-    used to stand here quoted five tiles measured against the processing mask.
-    Changing the denominator to land left the prose true of a footprint the
-    collection no longer reports. A number a reader can recompute from the items
-    beside it cannot go stale that way.
+    Not the first one. Sorted by id, that is `N00E005`, which is the Gulf of
+    Guinea: 7.2% of its pixels carry a temperature and the rest are ocean.
+    MEASURED 2026-09-17, a 512 by 512 window at the centre of that tile
+    returns 262,144 nodata values and nothing else. A reader who runs the
+    example on it sees an empty array and concludes the data is empty.
+
+    So pick the tile with the most valid pixels. Several are wholly valid at
+    324,000,000, and the lowest id among them wins, which keeps the chosen
+    tile stable while the collection grows on either side of it.
     """
-    rows = [
-        (item["id"], props["lst:empty_land_pixels"], props["lst:land_pixels"])
-        for item in items
-        for props in (item.get("properties", {}),)
-        if "lst:empty_land_pixels" in props and props.get("lst:land_pixels")
-    ]
-    if not rows:
-        return ""
-    low = min(rows, key=lambda row: row[1])
-    high = max(rows, key=lambda row: row[1])
-    if low[0] == high[0]:
-        return (
-            f"MEASURED on `{high[0]}`, {high[1]:,} land pixels came back with "
-            f"no usable observation, which is {100 * high[1] / high[2]:.1f}% of "
-            f"that tile's land.\n\n"
-        )
-    return (
-        f"MEASURED over {len(rows)} tiles, land with no usable observation ran "
-        f"from {low[1]:,} pixels on `{low[0]}` to {high[1]:,} on `{high[0]}`, "
-        f"which is {100 * high[1] / high[2]:.1f}% of that tile's land.\n\n"
+    ranked = sorted(
+        items,
+        key=lambda item: (-item["properties"].get("lst:valid_pixels", 0), item["id"]),
     )
+    return ranked[0]["id"]
 
 
-def _collection_readme(
+def _agents_md(
     collection_id: str,
     items: list[dict[str, Any]],
-    start: str,
-    end: str,
-    license_id: str,
+    *,
+    public_base: str = DEFAULT_PUBLIC_BASE,
 ) -> str:
-    item_id = items[0]["id"]
-    item_ids = [item["id"] for item in items]
-    return (
-        "# Landsat P95 Land Surface Temperature Composite\n\n"
-        "The 95th percentile of clear-sky land surface temperature over "
-        f"{start} to {end}, with the count of valid observations behind each "
-        "pixel.\n\n"
-        "## Tiles\n\n"
-        f"One item per tile of the degree grid, {len(item_ids)} so far. Each "
-        "item carries both assets for its own footprint.\n\n"
-        f"{_tile_list(items)}\n"
-        "## Assets\n\n"
-        "| Asset | Name | Dtype | Scale | Offset | Nodata | Units |\n"
-        "|---|---|---|---|---|---|---|\n"
-        f"| `{LST_ASSET_KEY}` | 95th percentile LST | uint16, 1 band | "
-        f"{LST_SCALE} | {LST_OFFSET} | {LST_NODATA_DN} | celsius |\n"
-        f"| `{QA_ASSET_KEY}` | Valid observations per calendar month | "
-        "uint8, 12 bands (Jan..Dec) | — | — | none | count |\n\n"
-        f"`{QA_ASSET_KEY}` has no nodata value by design. A value of 0 means "
-        "that no valid observation survived masking for that month. Keeping "
-        "zero visible lets you tell this gap apart from masked data.\n\n"
-        "## Coverage on the item\n\n"
-        "`lst:land_pixels` is land: Natural Earth 10m land with no buffer. A "
-        "run masks on that geometry grown by 25 km, so that a coastal scene is "
-        "not cut at the waterline, and `lst:processing_mask_pixels` is the "
-        "grown one. `lst:coastal_buffer_pixels` is the difference, and the "
-        "first two of those three sum to the third. Every share of land on the "
-        "item divides by `lst:land_pixels`, so `lst:valid_fraction` and "
-        "`lst:empty_land_pixels` describe land. The values the product still "
-        "publishes over water are counted by "
-        "`lst:coastal_buffer_valid_pixels`.\n\n"
-        "## Limitations\n\n"
-        f"A nodata `{LST_ASSET_KEY}` pixel means one of four things, and the "
-        "raster separates none of them: no usable observation, ground no scene "
-        "imaged, water, or an emissivity retrieval that failed inside an ASTER "
-        "GED coverage gap. Only the first would improve with a wider window. "
-        "Each item's `processing:lineage` states the rules that produced its "
-        "pixels and names the artifacts they read by checksum.\n\n"
-        "### Cloud decides how much of a tile exists\n\n"
-        "Over persistent cloud a five-year window returns nothing to "
-        "composite. This is not a rule the pipeline applies. It is the absence "
-        "of a clear observation, and no compositing rule recovers a pixel "
-        "nothing ever saw. The table above gives each tile's share, and "
-        f"`{QA_ASSET_KEY}` gives it per pixel: its twelve bands sum to the "
-        "evidence behind each value.\n\n"
-        f"{_empty_land_range(items)}"
-        "### A nodata pixel can be ground no scene photographed\n\n"
-        "Sharp-edged rectangles of nodata appear inside otherwise complete "
-        f"ground, a few hundred pixels across, with `{QA_ASSET_KEY}` at zero "
-        "in all twelve months while the land around them carries 125 to 200 "
-        "observations. They are neither cloud nor a processing fault.\n\n"
-        "A Landsat scene is a rotated parallelogram written into an "
-        "axis-aligned GeoTIFF, and the corners of that file are fill. The USGS "
-        "bulk metadata describes the file, so its stated footprint exceeds the "
-        "imaged area by about 46%. MEASURED at 26.49 S 61.64 W: 295 scenes "
-        "under 20% cloud list that point inside their footprint, and reading "
-        "30 of them at that pixel returns 30 source fills. None imaged it.\n\n"
-        f"So `lst:empty_land_pixels` counts two different things: ground "
-        "Landsat never photographed, and ground it photographed where no "
-        "observation survived the QA and range rules. Only the second would "
-        f"improve with a wider window, and `{QA_ASSET_KEY}` cannot tell you "
-        "which you are looking at. It reads zero for both, because a source "
-        "fill increments nothing and a rejected observation increments "
-        "nothing.\n\n"
-        "Read a straight-edged region of zero observations as ground outside "
-        "Landsat's imaged footprint, even where scene bounding rectangles "
-        "cover it. Those pixels are not cloudy. A bounding rectangle is the "
-        "shape of a file and not the shape of the ground a sensor saw, so no "
-        "count of overlapping footprints is evidence that a pixel was "
-        "imaged.\n\n"
-        "`lst:ged_gap_fraction` ranks tiles by how much to expect. A gap cell "
-        "is ground ASTER caught no clear sky over between 2000 and 2008, and "
-        "Landsat loses the same ground to the same cloud. MEASURED on the "
-        "2026-09-14 run, against the processing mask that build divided by, "
-        "land pixels with no clear observation that fall outside a gap number "
-        "0 of 289,580 on `N40W080`, 0 of 35,754,489 on `S25E030`, and 5,895 of "
-        "105,608,892 on `N00E110`. It is a ranking, not a calibrated "
-        "prediction: the two share a cause, not a ratio.\n\n"
-        "### Two tiles are not always comparable\n\n"
-        "A tile may be built with a WRS seam correction, which shifts every "
-        "scene to its own calendar-month median before the percentile. That "
-        "value answers how hot a surface gets against its own monthly normal. "
-        "An uncorrected tile answers what the hottest observed value was. "
-        "Nothing in either raster separates the two, so differencing a "
-        "corrected tile against an uncorrected one measures the correction "
-        "rather than the ground. Read each item's `processing:lineage` before "
-        "comparing tiles: it states which rule produced the pixels, and names "
-        "the scene set the offsets were fitted over.\n\n"
-        "Where ASTER GED caught no clear sky between 2000 and 2008, the USGS "
-        "interpolates emissivity from neighbouring cells and retrieves a "
-        "temperature anyway, and some of those retrievals fail upward. That "
-        "region is reported per tile and removes nothing. An earlier build "
-        "paired it with a 70 C threshold, and the pair was withdrawn after "
-        "five tiles showed the two halves do not coincide: on N30E075 all 207 "
-        f"pixels at or above 80 C fell outside the region. The "
-        f"{LST_OUTPUT_MAX_C:.0f} C ceiling that replaced it applies to every "
-        "pixel wherever it sits.\n\n"
-        f"A five-year 95th percentile also needs evidence behind it. A pixel "
-        f"with fewer than {MIN_TOTAL_OBSERVATIONS} clear observations across "
-        f"the whole window is removed, which MEASURED across five tiles costs "
-        f"between 0.0003% and 0.804% of valid land. Sum the 12 `qa_count` "
-        f"bands to see what each surviving pixel rests on.\n\n"
-        "## Decoding\n\n"
-        f"{_decode_snippet(f'{item_id}/{LST_FILENAME}')}\n"
-        "If you already know the constants:\n\n"
-        "```python\n"
-        f"celsius = dn * {LST_SCALE} + ({LST_OFFSET})  # DN "
-        f"{LST_NODATA_DN} is nodata\n"
-        "```\n\n"
-        "## License\n\n"
-        f"`{license_id}`. Landsat Collection 2 products carry no use "
-        "restrictions. The USGS asks that you cite the source.\n\n"
-        "## Provenance\n\n"
-        f"Derived from [Landsat Collection 2 Level-2 science products]"
-        f"({SOURCE_URL}) through the `{collection_id}` pipeline in "
-        f"[landsat-lst-smoke]({DEFAULT_HOST_URL}). The upstream STAC API is "
-        f"[LandsatLook]({SOURCE_STAC_URL}).\n"
-    )
+    """The machine-facing notes that sit beside a published README.
 
+    `README.md` in the same directory is the canonical description, and this
+    document opens by saying so. What follows is the part a reader cannot
+    recover from the prose: what a nodata pixel means, what `qa_count`
+    counts, and where the item mirror is. An agent that reads a zero as cold
+    produces a confident wrong answer, and nothing in the raster corrects it.
 
-def _agents_md(collection_id: str, item_ids: list[str]) -> str:
-    item_id = item_ids[0]
+    Args:
+        collection_id: The collection this document describes.
+        items: Every item in it, as written. `_worked_example_item` picks the
+            one the decode example opens.
+        public_base: Where the catalog answers. Every href here is absolute,
+            because this document is copied into two directories at different
+            depths, and because the examples have to run as written.
+
+    Returns:
+        The Markdown body, which the prose gate checks at error level.
+    """
+    item_id = _worked_example_item(items)
+    collection_base = f"{public_base}/{collection_id}"
     return (
-        "# Guidance for agents\n\n"
+        "# Agent guidance\n\n"
+        "Read [`README.md`](./README.md) first. It is the canonical "
+        "description of this dataset, and the source repository serves the "
+        "same text. This document adds what that prose leaves out.\n\n"
         "## Reading the data\n\n"
-        f"The `{collection_id}` collection holds one item per tile of the "
-        f"degree grid, {len(item_ids)} of them, and both assets are Cloud "
-        f"Optimized GeoTIFFs on the item. `{item_id}` is one. A tile is named "
-        "for its north and west edges, so `S30W065` starts at 30 S, 65 W. "
-        "Read a window rather than the whole file: the internal tiles are "
-        f"{BLOCK_SIZE} by {BLOCK_SIZE} pixels and the overviews let you draw "
-        "the tile without touching full-resolution pixels.\n\n"
+        f"The `{collection_id}` collection has one item per tile of the "
+        f"degree grid, {len(items)} of them. Each item carries two Cloud "
+        f"Optimized GeoTIFFs. `{item_id}` is one tile. A tile takes its name "
+        "from its north and west edges. `S30W065` starts at 30 S, 65 W.\n\n"
+        "Read a window rather than the whole file. The internal tiles measure "
+        f"{BLOCK_SIZE} by {BLOCK_SIZE} pixels. The overviews store a reduced "
+        "copy for a whole-tile draw.\n\n"
         "## Decoding temperature\n\n"
-        f"{_decode_snippet(f'{item_id}/{LST_FILENAME}')}\n"
+        f"{_decode_snippet(f'{collection_base}/{item_id}/{LST_FILENAME}')}\n"
         f"DN {LST_NODATA_DN} is nodata. Treat it as absent rather than cold.\n\n"
-        "## What a nodata pixel means\n\n"
-        "Six different facts, and the raster separates none of them:\n\n"
+        "## Nodata semantics\n\n"
+        "The raster separates none of these meanings:\n\n"
         "| Meaning | Rule | Would a wider window fix it |\n"
         "|---|---|---|\n"
         "| No usable observation | every observation failed the QA or range "
         "rule | yes |\n"
         "| Never imaged | the pixel is off every imaged footprint, whatever "
         "the scene rectangles say | no |\n"
-        "| Outside the land geometry | the pixel sits beyond Natural Earth "
+        "| Outside the land geometry | the pixel is beyond Natural Earth "
         "land grown by 25 km | no |\n"
         f"| Observed water | at least {WATER_SHARE_THRESHOLD:.0%} of its clear "
         f"observations set QA_PIXEL bit {QA_WATER_BIT}, and it is no hotter "
@@ -1334,36 +1311,39 @@ def _agents_md(collection_id: str, item_ids: list[str]) -> str:
         "observations over the whole window | yes |\n"
         f"| Physically impossible | below {LST_OUTPUT_MIN_C:.0f} C or above "
         f"{LST_OUTPUT_MAX_C:.0f} C | no |\n\n"
-        "Read `qa_count` beside the pixel, and read it as evidence rather "
-        "than as an answer. A count above 0 narrows the pixel to the last two "
-        "rows, which leave the count standing: 1 to 4 is the evidence rule and "
-        "5 or more is a temperature bound. A count of 0 is the other four "
-        "rows together, and nothing in the raster tells them apart. The two "
-        "water rules zero the count with the temperature, a source fill "
-        "increments nothing, and a rejected observation increments nothing. "
-        "So a zero count is not a signature of sea, and a nodata pixel is not "
-        "a cloudy one. The item's `processing:lineage` states every rule and "
-        "names the artifacts they read by checksum.\n\n"
+        f"Read `{QA_ASSET_KEY}` beside the pixel, as evidence rather than as "
+        "an answer. A count above 0 narrows the pixel to the last two rows, "
+        f"and the count itself stands. 1 to {MIN_TOTAL_OBSERVATIONS - 1} is "
+        f"the evidence rule. {MIN_TOTAL_OBSERVATIONS} or more is a "
+        "temperature bound. A count of 0 covers the other four rows together, "
+        "and nothing in the raster tells them apart.\n\n"
+        "Both water rules zero the count with the temperature. Neither a "
+        "source fill nor a rejected observation increments it. A zero count "
+        "is no signature of sea, and a nodata pixel is no cloudy one. Each "
+        "item's `processing:lineage` states every rule, and references by "
+        "checksum the artifacts each rule reads.\n\n"
         "Shape is the one clue the raster does offer. A straight-edged region "
-        "of zeros is ground outside Landsat's imaged footprint, and the scene "
+        "of zeros is ground outside Landsat's imaged footprint. The scene "
         "rectangles that cover it describe files rather than ground.\n\n"
         "## Reading the observation counts\n\n"
         f"`{QA_ASSET_KEY}` has 12 bands, January through December. Band `m` "
         "counts the clear observations that entered the percentile for that "
         "calendar month, pooled across every year in the window. The count "
-        "saturates at 255. A zero is a real count, not a gap, which is why "
-        "the band declares no nodata value.\n\n"
+        "saturates at 255. A zero is a real count rather than a gap, and the "
+        "band declares no nodata value.\n\n"
         "## Comparing two tiles\n\n"
         "Check each item's `processing:lineage` first. A tile built with the "
         "WRS seam correction carries a percentile taken against each scene's "
-        "own calendar-month median, and an uncorrected tile carries the "
-        "hottest observed value. The rasters look alike and the numbers answer "
-        "different questions, so a difference between two tiles built under "
-        "different rules measures the rule. The lineage names the rule and the "
-        "scene set the offsets were fitted over.\n\n"
+        "own calendar-month median. An uncorrected tile carries the hottest "
+        "observed value. Both rasters look alike, and the numbers answer "
+        "different questions. A difference between tiles built under "
+        "different rules measures the rule rather than the ground. The "
+        "lineage records which rule ran and which scenes fitted the "
+        "offsets.\n\n"
         "## Cross-referencing\n\n"
-        "Read `items.parquet` in the collection root to get every item's "
-        "metadata in one range request, instead of fetching each item JSON.\n"
+        f"Read [`{MIRROR_FILENAME}`]({collection_base}/{MIRROR_FILENAME}). It "
+        "gives every item's metadata in one range request. The alternative is "
+        f"one fetch per item, {len(items)} of them.\n"
     )
 
 
@@ -1795,6 +1775,7 @@ def rebuild_collection(
     license_id: str = DEFAULT_LICENSE,
     updated: str | None = None,
     lst_uri=None,
+    public_base: str = DEFAULT_PUBLIC_BASE,
 ) -> Path:
     """Everything the collection derives from its items, rebuilt from them.
 
@@ -1811,6 +1792,12 @@ def rebuild_collection(
     merge that publishes to object storage holds the item documents and leaves
     the rasters remote, so it passes a resolver returning a `/vsis3` path and
     moves no gigabytes to draw a 480 px preview.
+
+    `host_url` points at the repository and `public_base` points at the
+    bucket. Both README copies come from the repository's own `README.md`,
+    with its three repository-relative links rewritten against `host_url`.
+    The `AGENTS.md` examples address the published assets under
+    `public_base`, so a reader can run them as written.
     """
     collection_dir = Path(root) / collection_id
     updated = updated or now_utc()
@@ -1837,21 +1824,21 @@ def rebuild_collection(
         updated=updated,
     )
     _dump(collection_dir / "collection.json", collection)
-    _dump(root / "catalog.json", build_root_catalog(collection_id, updated=updated))
+    _dump(
+        root / "catalog.json",
+        build_root_catalog(collection_id, updated=updated, host_url=host_url),
+    )
 
-    start, end = (
-        bound[:10] for bound in collection["extent"]["temporal"]["interval"][0]
+    # Both directories get the same two documents. The catalog holds one
+    # collection, so the root and the collection describe one dataset, and
+    # PTL-FIL-001 wants a README and an AGENTS.md in each of them.
+    readme = _published_readme(
+        canonical_readme_path().read_text(encoding="utf-8"), host_url=host_url
     )
-    (collection_dir / "README.md").write_text(
-        _collection_readme(collection_id, ordered, start, end, license_id)
-    )
-    (collection_dir / "AGENTS.md").write_text(
-        _agents_md(collection_id, [item["id"] for item in ordered])
-    )
-    (Path(root) / "README.md").write_text(_root_readme(collection_id))
-    (Path(root) / "AGENTS.md").write_text(
-        _agents_md(collection_id, [item["id"] for item in ordered])
-    )
+    agents = _agents_md(collection_id, ordered, public_base=public_base)
+    for directory in (Path(root), collection_dir):
+        (directory / "README.md").write_text(readme, encoding="utf-8")
+        (directory / "AGENTS.md").write_text(agents, encoding="utf-8")
     return Path(root)
 
 

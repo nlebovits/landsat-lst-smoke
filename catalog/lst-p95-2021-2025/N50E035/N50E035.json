@@ -1,0 +1,318 @@
+{
+  "type": "Feature",
+  "stac_version": "1.1.0",
+  "stac_extensions": [
+    "https://stac-extensions.github.io/file/v2.1.0/schema.json",
+    "https://stac-extensions.github.io/projection/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/raster/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/render/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/processing/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/scientific/v1.0.0/schema.json"
+  ],
+  "id": "N50E035",
+  "collection": "lst-p95-2021-2025",
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          35.0,
+          45.0
+        ],
+        [
+          40.0,
+          45.0
+        ],
+        [
+          40.0,
+          50.0
+        ],
+        [
+          35.0,
+          50.0
+        ],
+        [
+          35.0,
+          45.0
+        ]
+      ]
+    ]
+  },
+  "bbox": [
+    35.0,
+    45.0,
+    40.0,
+    50.0
+  ],
+  "properties": {
+    "title": "N50E035 land surface temperature, 2021-2025",
+    "datetime": null,
+    "start_datetime": "2021-01-01T00:00:00Z",
+    "end_datetime": "2025-12-31T23:59:59Z",
+    "proj:code": "EPSG:4326",
+    "renders": {
+      "lst_p95": {
+        "title": "95th percentile land surface temperature",
+        "assets": [
+          "lst_p95"
+        ],
+        "rescale": [
+          [
+            5184.0,
+            12951.0
+          ]
+        ],
+        "colormap_name": "magma",
+        "resampling": "average",
+        "nodata": 0
+      }
+    },
+    "lst:land_pixels": 265059842,
+    "lst:valid_pixels": 247820446,
+    "lst:empty_land_pixels": 17239396,
+    "lst:coastal_buffer_pixels": 30215382,
+    "lst:coastal_buffer_valid_pixels": 1285236,
+    "lst:processing_mask_pixels": 295275224,
+    "lst:valid_fraction": 0.93496,
+    "lst:ged_gap_fraction": 0.099607,
+    "processing:lineage": "Scene offsets: each scene was compared against a per-pixel median for its own calendar month, pooled across every year in the window, and shifted by its bulk deviation. A value is relative to that month's normal, not an absolute maximum, and is not comparable with a composite built without this step. A scene whose offset exceeded 15.0 C was discarded rather than clamped, so qa_count counts the evidence behind the percentile rather than what was available. Per-path percentiles: the percentile was taken once per WRS path (173, 174, 175, 176, 177, 178) and blended on distance to each swath edge, which removes the step where one path's coverage stops. A swath is the ground where at least 0.5 of a (path, row) quad's scenes produced a valid observation. A pixel outside every swath takes the pooled percentile of whatever observed it. Pooled fallback: 93.34% of the retained pixels took the pooled percentile rather than the cross-fade, 232,505,196 of 249,105,682. The share counts pixels present in this raster, after the output mask, so it divides by the same count the coverage figures use. No swath was found for WRS path 179 (174 scenes), so those scenes fed qa_count and the pooled fallback and took no part in the per-path blend. Fitted over scene set cf425d58974d7ab0, 2021-01-01 to 2025-12-31T23:59:59Z. Per-scene screening removes cloud, cloud shadow, snow, cirrus, and out-of-range pixels before the percentile. A pixel with no surviving observation is nodata. Water: a pixel outside the buffered land geometry becomes nodata, and its qa_count becomes 0, so the two bands cannot disagree about a pixel that was never this product's subject. Observed water: a pixel becomes nodata, and its qa_count becomes 0, when at least 90% of its usable clear observations set QA_PIXEL bit 7 and its percentile is at or below 34 C. The share is counted over the whole window from unsaturated counters, and a pixel with fewer than 5 such observations is left alone rather than called water. The temperature bound is there because the flag comes from a reflectance test that fires over a dark roof, and water has a ceiling asphalt does not. This rule reads the record and not a polygon, so it removes a river the land geometry cannot. Evidence and plausibility: a pixel becomes nodata when fewer than 5 clear observations entered its percentile, or when the percentile falls below -20 C or above 80 C. Both bounds are inclusive, and both rules leave qa_count alone, so the count of clear observations stays readable beside the pixel they removed. ASTER GED coverage is reported rather than masked. A pixel whose GED cell reports no clear-sky observation, or lies 1 cell from such a cell, rests on emissivity interpolated by USGS, and the collection records how much of each tile that covers. Emissivity coverage read from AG1km v003, 14,128 granules, raster sha256 6c3b0f845242bdf54bbb2a8674286105009f834f5547b8e2d4ca56712b4dae4b. Land geometry sha256 35170d2371beacac96c858f71b048de9c4065433c44637e98c71b0a7ab0c9339. Land geometry for the coverage counts, unbuffered, sha256 31185f42c8548a38e23478058753dfc117085e12adf16e658e3635a214a7bf7e.",
+    "sci:publications": [
+      {
+        "doi": "10.5067/COMMUNITY/ASTER_GED/AG1KM.003",
+        "citation": "ASTER Global Emissivity Dataset AG1km v003. NASA LP DAAC."
+      }
+    ]
+  },
+  "assets": {
+    "lst_p95": {
+      "href": "./lst_p95.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "95th percentile land surface temperature (COG)",
+      "roles": [
+        "data"
+      ],
+      "file:size": 369530073,
+      "file:checksum": "1220d72352284c8e8fc0c3989b235977804a47273c15cf6b57ea60e977d6ef6ee9cd",
+      "bands": [
+        {
+          "name": "95th percentile LST",
+          "description": "95th percentile land surface temperature",
+          "data_type": "uint16",
+          "unit": "celsius",
+          "statistics": {
+            "minimum": 5184.0,
+            "maximum": 12951.0,
+            "mean": 9357.715347271765,
+            "stddev": 460.6537512166955,
+            "valid_percent": 76.88446975308642
+          },
+          "raster:sampling": "area",
+          "raster:scale": 0.01,
+          "raster:offset": -50.0,
+          "nodata": 0.0
+        }
+      ],
+      "proj:code": "EPSG:4326"
+    },
+    "qa_count": {
+      "href": "./qa_count.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Valid observations per calendar month (COG)",
+      "roles": [
+        "data",
+        "quality"
+      ],
+      "file:size": 527778452,
+      "file:checksum": "1220343ec2e8cda490a191dc46cf57d381757516b265340fe0b372fbc3715342a6b4",
+      "bands": [
+        {
+          "name": "Jan",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 30.0,
+            "mean": 3.7829201049382717,
+            "stddev": 3.913089508859358,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Feb",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 23.0,
+            "mean": 2.7922527932098764,
+            "stddev": 2.9269595624418296,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Mar",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 39.0,
+            "mean": 7.7953353672839505,
+            "stddev": 6.043738045617226,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Apr",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 44.0,
+            "mean": 10.15833925925926,
+            "stddev": 7.4707278588304655,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "May",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 51.0,
+            "mean": 13.502095052469135,
+            "stddev": 9.613613977880194,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Jun",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 54.0,
+            "mean": 13.861340592592592,
+            "stddev": 9.983937195963072,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Jul",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 68.0,
+            "mean": 18.29311637962963,
+            "stddev": 13.033197156898433,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Aug",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 68.0,
+            "mean": 18.565179808641975,
+            "stddev": 13.292536116458749,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Sep",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 54.0,
+            "mean": 14.562097953703704,
+            "stddev": 10.503790774490382,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Oct",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 42.0,
+            "mean": 10.44174400617284,
+            "stddev": 7.656982879661553,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Nov",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 27.0,
+            "mean": 5.393574200617284,
+            "stddev": 4.461853425838886,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        },
+        {
+          "name": "Dec",
+          "description": "Valid observations entering the percentile",
+          "data_type": "uint8",
+          "unit": "count",
+          "statistics": {
+            "minimum": 0.0,
+            "maximum": 26.0,
+            "mean": 2.565568407407407,
+            "stddev": 2.849010386991354,
+            "valid_percent": 100.0
+          },
+          "raster:sampling": "area"
+        }
+      ],
+      "proj:code": "EPSG:4326",
+      "description": "Cloud-free observations entering the percentile, one band per calendar month pooled across the window. A zero means masking removed every observation for that month, which differs from a masked pixel."
+    }
+  },
+  "links": [
+    {
+      "rel": "root",
+      "href": "../../catalog.json",
+      "type": "application/json"
+    },
+    {
+      "rel": "parent",
+      "href": "../collection.json",
+      "type": "application/json"
+    },
+    {
+      "rel": "collection",
+      "href": "../collection.json",
+      "type": "application/json"
+    }
+  ]
+}

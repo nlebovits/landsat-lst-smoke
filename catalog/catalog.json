@@ -1,0 +1,46 @@
+{
+  "type": "Catalog",
+  "stac_version": "1.1.0",
+  "stac_extensions": [
+    "https://schemas.portolan-sdi.org/portolan/v0.2.0/schema.json"
+  ],
+  "id": "landsat-lst-smoke",
+  "title": "Landsat LST Composites",
+  "description": "Cloud-optimized 95th-percentile land surface temperature composites built from Landsat Collection 2 Level-2 scenes, with the per-month observation counts behind each pixel.",
+  "links": [
+    {
+      "rel": "root",
+      "href": "./catalog.json",
+      "type": "application/json"
+    },
+    {
+      "rel": "child",
+      "href": "./lst-p95-2021-2025/collection.json",
+      "type": "application/json",
+      "title": "Landsat P95 Land Surface Temperature Composite"
+    },
+    {
+      "rel": "agents",
+      "href": "./AGENTS.md",
+      "type": "text/markdown",
+      "title": "Guidance for AI agents"
+    },
+    {
+      "rel": "describedby",
+      "href": "./README.md",
+      "type": "text/markdown",
+      "title": "Human-readable documentation"
+    },
+    {
+      "rel": "vcs",
+      "href": "https://github.com/nlebovits/landsat-lst-smoke",
+      "title": "Source repository"
+    },
+    {
+      "rel": "issues",
+      "href": "https://github.com/nlebovits/landsat-lst-smoke/issues",
+      "title": "Issue tracker"
+    }
+  ],
+  "updated": "2026-09-17T11:48:08Z"
+}

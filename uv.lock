@@ -1043,6 +1043,7 @@ dev = [
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "rashid" },
+    { name = "rioxarray" },
     { name = "ty" },
 ]
 
@@ -1080,7 +1081,8 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "pytest-xdist", specifier = ">=3.6" },
-    { name = "rashid", specifier = ">=0.1.8" },
+    { name = "rashid", specifier = ">=0.1.8,<0.2.0" },
+    { name = "rioxarray" },
     { name = "ty", specifier = ">=0.0.1a14" },
 ]
 
@@ -2475,6 +2477,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4a/01/3b88154233db4cb29cc54df64006537fadb8d7c2ace872af985dac972fd3/rio_cogeo-7.0.2.tar.gz", hash = "sha256:1454ff94dca8652db68862d667bf47e54ecabfe8872c939f2c16ebb62d432f69", size = 19282, upload-time = "2026-03-27T08:25:27.554Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f5/da/835b573b1a8ba0fcdb3fa6c26fee0c8fa7549f79cf882894ea2238f19f1c/rio_cogeo-7.0.2-py3-none-any.whl", hash = "sha256:1426faea08ae0970707d3534119164d99969ee15181b06d94c5f84645f82537f", size = 21827, upload-time = "2026-03-27T08:25:26.18Z" },
+]
+
+[[package]]
+name = "rioxarray"
+version = "0.23.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pyproj" },
+    { name = "rasterio" },
+    { name = "xarray" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c9/8d/9e5ab7525d2e81f9963a9192637ba8808e214f1c93a5ed000048447d626f/rioxarray-0.23.0.tar.gz", hash = "sha256:800fc3ae2405ff535edf657f3f0a6bda5a70e72282883ce18c7daecd8e0bfc58", size = 61638, upload-time = "2026-07-27T19:33:29.281Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/85/3f/07a582935b06ee0dddaaf2656fbeb5f7c4e1476f0649d1e5ac3c0dac540f/rioxarray-0.23.0-py3-none-any.whl", hash = "sha256:5f8dad0577792a3cb5b90dda66339f161f149a1ad5c03fba0747cc67e29b54af", size = 72397, upload-time = "2026-07-27T19:33:28.23Z" },
 ]
 
 [[package]]

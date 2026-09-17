@@ -204,6 +204,10 @@ def run_recount(monkeypatch, published, land_geometry, strict_land_geometry):
         )
         args = Args(
             dest="s3://bucket/catalog",
+            # The tracked tree. `recount` reads and writes item documents here
+            # and reaches the bucket only through `/vsis3`, so the fixture's
+            # published tree doubles as the checkout.
+            catalog=published["bucket"] / "catalog",
             collection=COLLECTION,
             numobs=published["numobs"],
             land_geometry_uri=land_geometry,
@@ -235,13 +239,17 @@ class TestRecountLeavesTheRastersAlone:
         assert code == 0
         assert [digest(path) for path in rasters] == before
 
-    def test_no_raster_key_is_ever_copied(self, run_recount):
-        """Read the rasters, write none. GDAL reads them out of band."""
+    def test_the_bucket_is_never_written(self, run_recount):
+        """Read the rasters, write nothing at all. GDAL reads out of band.
+
+        `recount` used to download each item document, rewrite it, and put it
+        back. The tree under `catalog/` is the source of truth now, so it
+        rewrites the file in the checkout and makes no `aws s3` call. `sync`
+        is the one step that uploads, and a human runs it after reading the
+        diff.
+        """
         _code, s3 = run_recount()
-        copied = [args for args in s3.calls if args[0] == "cp"]
-        assert copied
-        for args in copied:
-            assert not any(arg.endswith(".tif") for arg in args)
+        assert s3.calls == []
 
 
 class TestRecountCorrectsTheDenominator:
@@ -371,19 +379,21 @@ class TestTheTileFilter:
     tile. An operator checking the numbers on one tile should not pay for five.
     """
 
-    def test_a_named_tile_is_the_only_one_read(self, published, run_recount):
-        code, s3 = run_recount(tile=[TILE])
+    def test_a_named_tile_is_the_only_one_read(self, published, run_recount, capsys):
+        code, _ = run_recount(tile=[TILE])
         assert code == 0
-        assert any(TILE in "".join(args) for args in s3.calls if args[0] == "cp")
+        out = capsys.readouterr().out
+        assert "1 item(s) to recount" in out
+        assert TILE in out
 
-    def test_a_tile_that_is_not_published_stops_the_step(
+    def test_a_tile_that_is_not_tracked_stops_the_step(
         self, published, run_recount, capsys
     ):
         """Silence would be worse: the step would report nothing to do and exit
         0, and an operator would read that as a recount that found no change."""
         code, _ = run_recount(tile=["S40W065"])
         assert code == 1
-        assert "not published at the destination" in capsys.readouterr().err
+        assert "not tracked under" in capsys.readouterr().err
 
 
 class TestATileWithNoLandSettles:
