@@ -8,10 +8,19 @@ __pycache__/
 spans.json
 trace.json
 
-# Numpy-era full-tile outputs that may still sit in an old checkout. The
-# pipeline no longer writes any of them.
+# The full-tile run's heavy outputs. `evidence/fulltile/` keeps the metadata
+# that the findings rest on: part-meta.json, slice.log, summary.json, and
+# merge.json are tracked and total 252 KB. The rasters they describe run to
+# 5.9 GB and regenerate from a run, so they stay out.
+#
+# The `.tif` rule is newer than the rest. Those two files sat in a stray
+# `fulltile/` at the repository root until 2026-09-17, one directory above the
+# rules meant to cover them, which is also why `FINDINGS.md` documented a
+# `--raster evidence/fulltile/tile/lst_p95_dn.npy` path that resolved to
+# nothing. They are in place now.
 evidence/fulltile/part*/part-000.npz
 evidence/fulltile/tile/*.npy
+evidence/fulltile/tile/*.tif
 evidence/qa-parity/*.npy
 
 # What a composite run writes. The staging GeoTIFFs are the workers' window
