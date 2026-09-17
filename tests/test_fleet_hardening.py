@@ -250,16 +250,30 @@ class TestTheCapacityFallback:
 
     def test_it_walks_every_zone_before_giving_up(self, offline, tmp_path):
         fake, cfg = offline([(255, "", CAPACITY_STDERR)] * 4)
-        with pytest.raises(SystemExit, match="every configured zone refused"):
+        with pytest.raises(
+            launch.CapacityExhausted, match="every configured zone refused"
+        ):
             launch.run_instances(cfg, "lst-T-1", "T", tmp_path / "u.sh", say=quiet)
         assert len(fake.subnets) == 4
         assert len(set(fake.subnets)) == 4
 
     def test_giving_up_says_nothing_was_launched_for_that_tile(self, offline, tmp_path):
         _, cfg = offline([(255, "", CAPACITY_STDERR)] * 4)
-        with pytest.raises(SystemExit) as err:
+        with pytest.raises(launch.CapacityExhausted) as err:
             launch.run_instances(cfg, "lst-T-1", "T", tmp_path / "u.sh", say=quiet)
         assert "Nothing was launched for this tile" in str(err.value)
+
+    def test_giving_up_does_not_end_the_run(self, offline, tmp_path):
+        """A full region used to raise `SystemExit`.
+
+        At width 20 that never fired. At width 60 or more it becomes likely,
+        and one tile meeting a full region would end a five-hour run that had
+        600 tiles left. The tile goes back to the queue instead.
+        """
+        _, cfg = offline([(255, "", CAPACITY_STDERR)] * 4)
+        with pytest.raises(launch.LaunchRefused) as err:
+            launch.run_instances(cfg, "lst-T-1", "T", tmp_path / "u.sh", say=quiet)
+        assert not isinstance(err.value, SystemExit)
 
     def test_the_first_zone_succeeding_tries_no_others(self, offline, tmp_path):
         fake, cfg = offline([(0, "i-0abc", "")])
@@ -354,20 +368,24 @@ class TestTheManifestSurvivesAPartialLaunch:
     def test_a_capacity_failure_leaves_the_earlier_instances_readable(
         self, offline, tmp_path
     ):
-        """The failure this whole class exists for."""
+        """The failure this whole class exists for.
+
+        The refused tile now leaves nothing behind. Its key pair is deleted and
+        its entry is dropped, the same cleanup a quota refusal gets. An entry
+        naming a key that no longer exists and an instance that never did would
+        read `gone` to `watch.py` forever, and `teardown.py` would skip it.
+        """
         fake, cfg = offline([(0, "i-0001", "")] + [(255, "", CAPACITY_STDERR)] * 4)
         path = tmp_path / "run.json"
         manifest = launch.RunManifest(path, header())
         launch.launch_one(cfg, "N40W080", "1", False, tmp_path / "u.sh", manifest)
-        with pytest.raises(SystemExit, match="every configured zone refused"):
+        with pytest.raises(launch.CapacityExhausted):
             launch.launch_one(cfg, "S45W075", "1", False, tmp_path / "u.sh", manifest)
 
         written = json.loads(path.read_text())["instances"]
-        assert [e["tile"] for e in written] == ["N40W080", "S45W075"]
+        assert [e["tile"] for e in written] == ["N40W080"]
         assert written[0]["instance_id"] == "i-0001"
         assert written[0]["state"] == "running"
-        assert "instance_id" not in written[1]
-        assert written[1]["state"] == "key_created"
 
     def test_teardown_reads_a_partial_manifest(self, offline, tmp_path):
         """`teardown.py` filters on the key, so a keyed-but-unlaunched entry
@@ -376,7 +394,7 @@ class TestTheManifestSurvivesAPartialLaunch:
         path = tmp_path / "run.json"
         manifest = launch.RunManifest(path, header())
         launch.launch_one(cfg, "N40W080", "1", False, tmp_path / "u.sh", manifest)
-        with pytest.raises(SystemExit):
+        with pytest.raises(launch.CapacityExhausted):
             launch.launch_one(cfg, "S45W075", "1", False, tmp_path / "u.sh", manifest)
 
         run = json.loads(path.read_text())

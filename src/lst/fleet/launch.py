@@ -28,9 +28,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import subprocess
 import sys
+import threading
+import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +54,94 @@ DEFAULT_FLEET_DIR = Path("fleet")
 
 #: The one AWS error a launch may answer by moving to another zone.
 CAPACITY_ERROR = "InsufficientInstanceCapacity"
+
+#: The errors that mean the account is already running as much as it may, not
+#: that this zone is full. They are account-and-region facts, so trying another
+#: zone cannot help and the launch stops at the first one.
+#:
+#: `servicequotas:GetServiceQuota` is denied for this role, so the concurrent
+#: vCPU ceiling cannot be read before a launch. Meeting one of these is the
+#: only way to discover it. A caller placing a wave catches `QuotaExhausted`,
+#: keeps the instances it did place, and learns its own width from where the
+#: refusal landed.
+QUOTA_ERRORS = (
+    "VcpuLimitExceeded",
+    "InstanceLimitExceeded",
+    "MaxSpotInstanceCountExceeded",
+)
+
+#: The errors that mean "you are asking too fast", not "you may not have this".
+#:
+#: MEASURED on 2026-09-16: placing 80 instances through 8 threads, minutes
+#: after terminating 60, drew `RequestLimitExceeded` on `ec2:RunInstances`.
+#: The launcher treated it as fatal, so it killed the run after 62 instances
+#: and the teardown terminated all of them. About $31 for nothing.
+#:
+#: A throttle is the one AWS error that asks for exactly one thing: wait and
+#: try again. The AWS CLI already retries twice on its own, so the wait here
+#: starts above the wait it has already done.
+THROTTLE_ERRORS = (
+    "RequestLimitExceeded",
+    "Throttling",
+    "ThrottlingException",
+    "RequestThrottled",
+)
+
+#: How many times one zone is asked again after a throttle, and the first wait.
+#: The wait doubles each time with jitter, so six attempts span about two
+#: minutes. Beyond that the tile goes back to the queue and another one tries.
+THROTTLE_RETRIES = 6
+THROTTLE_BACKOFF_SECONDS = 2.0
+
+
+class LaunchRefused(RuntimeError):
+    """AWS would not place this instance, and the run may continue without it.
+
+    Both subclasses leave the caller in a good state. The key pair is deleted,
+    the private key is removed, and the manifest entry is dropped, so the tile
+    is exactly as it was before the attempt. The caller decides whether to wait,
+    run narrower, or give the tile back to the queue.
+
+    Distinct from `SystemExit`, which every other launch error still raises. A
+    wrong security group or an expired token is not something a retry fixes.
+    """
+
+    def __init__(self, tile: str, code: str, detail: str):
+        super().__init__(f"{tile}: {code}: {detail}")
+        self.tile = tile
+        self.code = code
+        self.detail = detail
+
+
+class QuotaExhausted(LaunchRefused):
+    """The account already runs as many instances as it may.
+
+    Account-and-region wide, so every other pending launch would meet it too.
+    A caller stops asking for more and runs what it has.
+    """
+
+
+class Throttled(LaunchRefused):
+    """AWS is asking this account to make fewer requests per second.
+
+    Recoverable by construction. The tile goes back to the queue and the driver
+    tries it again on a later poll, by which time the burst has drained.
+    """
+
+
+class CapacityExhausted(LaunchRefused):
+    """Every configured zone is out of this instance type right now.
+
+    A region fact, not an account fact, and a temporary one. MEASURED on
+    2026-09-15: single zones refused `m6id.16xlarge` repeatedly while other
+    zones placed it seconds later.
+
+    This used to be a `SystemExit`. At width 20 it never fired. At width 60 or
+    more it becomes likely, and killing a five-hour run over one tile that
+    could be relaunched a minute later is the wrong trade. The tile goes back
+    to the queue instead.
+    """
+
 
 #: The error code out of an AWS CLI failure. Matched at the position the CLI
 #: prints it, not anywhere in the text: a message that merely mentions capacity
@@ -95,14 +186,62 @@ def load_config(path: Path | None = None, fleet_dir: Path | None = None) -> dict
     return tomllib.loads((path or fleet_asset("config.toml", fleet_dir)).read_text())
 
 
+def on_a_remote(sha: str, repo: Path) -> bool:
+    """Whether a clone of this repository would contain `sha`.
+
+    An instance clones the repository and checks the commit out. A commit that
+    exists only on this workstation is not there to check out, so `git
+    checkout` exits 128 and the tile dies about four minutes into billing,
+    having done nothing.
+
+    MEASURED on 2026-09-16: 60 instances were launched at an unpushed commit.
+    Every one of them wrote `MARKER checkout rc=128` and was requeued, and the
+    mistake cost about $42 before the run was stopped. At the full 665 tiles it
+    would have run the whole queue twice and spent most of a four-figure budget
+    on `git checkout`.
+
+    `git branch -r --contains` is the exact question: a clone fetches every
+    remote branch, so a commit reachable from one is a commit the instance can
+    check out. One fetch is attempted before answering no, because the local
+    copy of the remote refs may be older than the push.
+    """
+
+    def contains() -> bool:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "branch", "-r", "--contains", sha],
+            capture_output=True,
+            text=True,
+        )
+        return out.returncode == 0 and bool(out.stdout.strip())
+
+    if contains():
+        return True
+    subprocess.run(
+        ["git", "-C", str(repo), "fetch", "--quiet"],
+        capture_output=True,
+        text=True,
+    )
+    return contains()
+
+
 def resolve_commit(value: str, repo: Path | None = None) -> str:
     """The 40-character SHA this run pins, or an explanation of the refusal.
 
     A branch name is refused rather than resolved. Resolving one here would
     read this machine's idea of the branch, which is not what the instance
     would clone, and the difference is invisible in the published item.
+
+    A SHA the remote does not carry is refused for the same reason, one step
+    further on. See `on_a_remote`.
     """
     if SHA.fullmatch(value):
+        if repo is not None and not on_a_remote(value, repo):
+            raise SystemExit(
+                f"--commit {value} is not on any remote branch.\n"
+                f"Every instance clones this repository and checks that commit "
+                f"out, so an unpushed commit fails on every tile and bills for "
+                f"the attempt. Push it first."
+            )
         return value
     hint = ""
     if repo is not None:
@@ -348,6 +487,35 @@ def aws(argv: list[str]) -> str:
     return stdout
 
 
+def wait_out_throttling(argv: list[str], tile: str, say=print) -> tuple[int, str, str]:
+    """One AWS call, asked again while AWS is only asking us to slow down.
+
+    A throttle is not a refusal. It carries no information about capacity or
+    quota, so moving to another zone answers a question nobody asked and
+    spends another request against the same rate limit. The only useful reply
+    is to wait, and each wait is longer than the last.
+
+    Jitter matters because the threads that met the limit met it together.
+    Backing off in lockstep rebuilds the burst that caused it.
+
+    Raises:
+        Throttled: when AWS is still throttling after `THROTTLE_RETRIES`.
+    """
+    wait = THROTTLE_BACKOFF_SECONDS
+    for attempt in range(THROTTLE_RETRIES):
+        code, stdout, stderr = aws_try(argv)
+        detail = stderr or stdout
+        if code == 0 or error_code(detail) not in THROTTLE_ERRORS:
+            return code, stdout, stderr
+        if attempt == THROTTLE_RETRIES - 1:
+            raise Throttled(tile, error_code(detail) or "Throttling", detail)
+        pause = wait * (0.5 + random.random())
+        say(f"{tile}  AWS is throttling, waiting {pause:.0f}s")
+        time.sleep(pause)
+        wait *= 2
+    raise AssertionError("unreachable")
+
+
 def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -> dict:
     """One instance, trying each configured zone while capacity is the reason.
 
@@ -362,13 +530,15 @@ def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -
         took an hour to place four instances says why.
 
     Raises:
-        SystemExit: on any non-capacity error, or when every zone is full.
+        QuotaExhausted: when the account may not run another instance.
+        CapacityExhausted: when every configured zone is out of this type.
+        SystemExit: on any other error, which a retry would not fix.
     """
     refusals = []
     candidates = subnet_candidates(cfg)
     for zone, subnet in candidates:
         argv = run_instances_argv(cfg, name, tile, user_data, subnet=subnet)
-        code, stdout, stderr = aws_try(argv)
+        code, stdout, stderr = wait_out_throttling(argv, tile, say=say)
         if code == 0:
             return {
                 "instance_id": stdout,
@@ -377,7 +547,11 @@ def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -
                 "capacity_refusals": refusals,
             }
         detail = stderr or stdout
-        if error_code(detail) != CAPACITY_ERROR:
+        found = error_code(detail)
+        if found in QUOTA_ERRORS:
+            # Account-wide, so the next zone would refuse it too.
+            raise QuotaExhausted(tile, found, detail)
+        if found != CAPACITY_ERROR:
             raise fail(argv, code, detail)
         refusals.append(zone)
         say(
@@ -385,10 +559,12 @@ def run_instances(cfg: dict, name: str, tile: str, user_data: Path, say=print) -
             f"trying the next zone",
         )
     zones = ", ".join(zone for zone, _ in candidates)
-    raise SystemExit(
+    raise CapacityExhausted(
+        tile,
+        CAPACITY_ERROR,
         f"every configured zone refused a {cfg['instance']['type']} for "
-        f"{tile} with {CAPACITY_ERROR}: {zones}. Nothing was launched for this "
-        f"tile. Instances already launched are in the manifest."
+        f"{tile}: {zones}. Nothing was launched for this tile. Instances "
+        f"already launched are in the manifest.",
     )
 
 
@@ -410,19 +586,66 @@ class RunManifest:
         self.path = Path(path)
         self.header = dict(header)
         self.instances: list[dict] = []
+        # Reentrant, because `add` and `remove` both flush while holding it.
+        #
+        # The launcher used to place instances one at a time, so nothing here
+        # was ever touched by two threads. Placing them in parallel makes every
+        # method below a critical section twice over: the list is mutated, and
+        # `write` stages through one fixed temporary path that a second writer
+        # would overwrite mid-flight. Either race publishes a manifest missing
+        # an instance that is running and billing.
+        self.lock = threading.RLock()
         self.write()
 
     def add(self, entry: dict) -> dict:
         """Record one instance and flush. Returns the entry, to be mutated."""
-        self.instances.append(entry)
-        self.write()
+        with self.lock:
+            self.instances.append(entry)
+            self.write()
         return entry
 
+    def remove(self, entry: dict) -> None:
+        """Drop an entry that never became an instance, and flush.
+
+        A key pair reaches the manifest before `run-instances` is called, so a
+        quota refusal leaves an entry naming a key and no instance. `watch.py`
+        would report it `gone` forever and `teardown.py` would skip it, so the
+        entry is removed once its key is deleted.
+        """
+        with self.lock:
+            self.instances = [e for e in self.instances if e is not entry]
+            self.write()
+
     def write(self) -> None:
-        payload = dict(self.header) | {"instances": self.instances}
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=1))
-        os.replace(tmp, self.path)
+        with self.lock:
+            payload = dict(self.header) | {"instances": self.instances}
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, indent=1))
+            os.replace(tmp, self.path)
+
+
+def delete_key_pair(cfg: dict, name: str) -> bool:
+    """Remove one key pair from EC2. Returns whether the call succeeded.
+
+    Never raises. A key pair that outlives its instance costs nothing and
+    blocks nothing, so failing to delete one must not fail the caller that was
+    cleaning up after something that matters.
+    """
+    a = cfg["aws"]
+    code, _, _ = aws_try(
+        [
+            "aws",
+            "ec2",
+            "delete-key-pair",
+            "--profile",
+            a["profile"],
+            "--region",
+            a["region"],
+            "--key-name",
+            name,
+        ]
+    )
+    return code == 0
 
 
 def launch_one(
@@ -481,7 +704,16 @@ def launch_one(
     if manifest is not None:
         manifest.add(entry)
 
-    placed = run_instances(cfg, name, tile, user_data)
+    try:
+        placed = run_instances(cfg, name, tile, user_data)
+    except LaunchRefused:
+        # The key opens nothing. Leaving it behind accumulates one dead key
+        # pair per refusal, in EC2 and in ~/.ssh, across every wave.
+        delete_key_pair(cfg, name)
+        pem.unlink(missing_ok=True)
+        if manifest is not None:
+            manifest.remove(entry)
+        raise
     entry |= {
         "instance_id": placed["instance_id"],
         "zone": placed["zone"],

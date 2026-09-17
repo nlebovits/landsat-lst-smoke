@@ -384,3 +384,81 @@ class TestTheTileFilter:
         code, _ = run_recount(tile=["S40W065"])
         assert code == 1
         assert "not published at the destination" in capsys.readouterr().err
+
+
+class TestATileWithNoLandSettles:
+    """`coverage_properties` is sparse on purpose, and the comparison must be too.
+
+    A tile holding no strict land publishes no share that would divide by it.
+    MEASURED on 2026-09-15: `S35W055` has 0 land pixels and omits
+    `lst:valid_fraction` and `lst:ged_gap_fraction`. Comparing a None-filled
+    dict against that sparse one called it changed on every recount, while
+    every printed value matched, so it would be rewritten forever.
+    """
+
+    def _names(self):
+        from lst import cog_catalog
+
+        return [name for _, name, _ in cog_catalog.COVERAGE_PROPERTIES]
+
+    def test_an_omitted_share_is_not_a_change(self, monkeypatch):
+        from lst import cog_catalog
+        from lst.fleet import publish_catalog
+
+        names = self._names()
+        sparse = {n: 1 for n in names[:2]}
+        monkeypatch.setattr(
+            cog_catalog, "coverage_properties", lambda fresh: dict(sparse)
+        )
+        item = {
+            "id": "S35W055",
+            "properties": dict(sparse) | {"processing:lineage": "... counted."},
+        }
+        assert not publish_catalog.rewrite_coverage(item, {}, "counted.", dry_run=True)
+
+    def test_a_stale_key_the_recount_drops_is_still_a_change(self, monkeypatch):
+        """The property that stopped being produced must stop being published."""
+        from lst import cog_catalog
+        from lst.fleet import publish_catalog
+
+        names = self._names()
+        monkeypatch.setattr(
+            cog_catalog, "coverage_properties", lambda fresh: {names[0]: 1}
+        )
+        item = {
+            "id": "S35W055",
+            "properties": {
+                names[0]: 1,
+                names[1]: 99,
+                "processing:lineage": "... counted.",
+            },
+        }
+        assert publish_catalog.rewrite_coverage(item, {}, "counted.", dry_run=True)
+
+    def test_a_real_value_change_is_still_a_change(self, monkeypatch):
+        from lst import cog_catalog
+        from lst.fleet import publish_catalog
+
+        names = self._names()
+        monkeypatch.setattr(
+            cog_catalog, "coverage_properties", lambda fresh: {names[0]: 2}
+        )
+        item = {
+            "id": "S35W055",
+            "properties": {names[0]: 1, "processing:lineage": "... counted."},
+        }
+        assert publish_catalog.rewrite_coverage(item, {}, "counted.", dry_run=True)
+
+    def test_a_missing_lineage_sentence_is_still_a_change(self, monkeypatch):
+        from lst import cog_catalog
+        from lst.fleet import publish_catalog
+
+        names = self._names()
+        monkeypatch.setattr(
+            cog_catalog, "coverage_properties", lambda fresh: {names[0]: 1}
+        )
+        item = {
+            "id": "S35W055",
+            "properties": {names[0]: 1, "processing:lineage": "older run."},
+        }
+        assert publish_catalog.rewrite_coverage(item, {}, "counted.", dry_run=True)
